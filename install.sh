@@ -3,7 +3,7 @@
 # Ollama Voice Input — 安装 / 更新脚本
 # 用法: ./install.sh            # 完整安装（系统包/sudo/input 组/udev/依赖/单元/快捷方式；
 #                                #   仅当生产门闩已关闭才 enable 开机自启，见 _activation.py）
-#       ./install.sh --update    # 安全同步：只渲染 systemd 用户单元 + daemon-reload。
+#       ./install.sh --update    # 安全同步：只渲染 systemd 用户单元 + 清理旧 override + daemon-reload。
 #                                #   不 sudo、不装包、不改组/udev、不 pip、不 enable、不 start/restart
 #       ./install.sh --uninstall # 卸载
 #
@@ -34,9 +34,9 @@ NC='\033[0m'
 UNITS=(ollama-voice-ollama.service ollama-voice-asr.service ollama-voice-server.service ollama-voice-daemon.service)
 
 # 单元模板在 systemd/*.service，唯一渲染器 _v3/units.py（不调用 systemctl）。
-# server：v1 API + static/v3（https）；daemon：直接 exec python（禁止 sg input，portal 需要可 dumpable）；
-# asr：Qwen3-ASR sidecar 127.0.0.1:17946（权重就绪才启动）；ollama：项目内用户级 Ollama 127.0.0.1:11434。
-# 只写文件 + daemon-reload：不 enable、不 start。完整安装与 --update 共用这一处。
+# server：v1 API + static/v3 翻译工作台（https）；daemon：PySide6 跨平台守护进程（禁止 sg input，portal 需要可 dumpable）；
+# asr：Qwen3-ASR sidecar 127.0.0.1:17946（权重就绪才启动）；ollama：项目内用户级 Ollama 127.0.0.1:17947。
+# 只写文件 + 清理历史 override.conf + daemon-reload：不 enable、不 start。完整安装与 --update 共用这一处。
 render_units() {
     if [ ! -x "$VENV/bin/python3" ]; then
         echo -e "${RED}  缺少 $VENV，请先运行完整安装 ./install.sh${NC}"
@@ -53,6 +53,9 @@ render_units() {
         cuda_libs="${cuda_libs#:}"
     fi
     (cd "$DIR" && "$VENV/bin/python3" -m _v3.units --project-dir "$DIR" --venv "$VENV" --cuda-libs "$cuda_libs" --out-dir "$SYSTEMD_DIR")
+    # 清理历史遗留的 daemon override.conf（保留 acceptance.conf 不受影响）
+    rm -f "$SYSTEMD_DIR/ollama-voice-daemon.service.d/override.conf"
+    rmdir "$SYSTEMD_DIR/ollama-voice-daemon.service.d" 2>/dev/null || true
     systemctl --user daemon-reload
 }
 
@@ -94,38 +97,32 @@ echo -e "${YELLOW}[1/6] 检查系统依赖...${NC}"
 
 MISSING_PKGS=()
 
-# GTK3 + GObject Introspection (核心依赖)
-if ! python3 -c "import gi" 2>/dev/null; then
-    MISSING_PKGS+=(python3-gi gir1.2-gtk-3.0)
+# OCR 引擎与中英文语言包
+if ! command -v tesseract &>/dev/null; then
+    MISSING_PKGS+=(tesseract-ocr tesseract-ocr-chi-sim tesseract-ocr-eng)
+else
+    TESS_LANGS="$(tesseract --list-langs 2>/dev/null || true)"
+    echo "$TESS_LANGS" | grep -qx "chi_sim" || MISSING_PKGS+=(tesseract-ocr-chi-sim)
+    echo "$TESS_LANGS" | grep -qx "eng" || MISSING_PKGS+=(tesseract-ocr-eng)
 fi
 
-# AppIndicator3 (系统托盘)
-if ! python3 -c "
-import gi
-try:
-    gi.require_version('AyatanaAppIndicator3', '0.1')
-    from gi.repository import AyatanaAppIndicator3
-except:
-    gi.require_version('AppIndicator3', '0.1')
-    from gi.repository import AppIndicator3
-" 2>/dev/null; then
-    MISSING_PKGS+=(gir1.2-ayatanaappindicator3-0.1)
-fi
+# 录音底层库、解压工具、端口清理工具
+ldconfig -p 2>/dev/null | grep -q 'libportaudio\.so\.2' || MISSING_PKGS+=(libportaudio2)
+command -v zstd &>/dev/null || MISSING_PKGS+=(zstd)
+command -v fuser &>/dev/null || MISSING_PKGS+=(psmisc)
 
-# 截图/剪贴板工具 (按会话类型)
+# 剪贴板 / 模拟输入 / Wayland Portal D-Bus 依赖（桌面 UI 已迁移至跨平台 PySide6，不再强依赖 GTK3 / AppIndicator3）
 SESSION_TYPE="${XDG_SESSION_TYPE:-x11}"
+command -v xclip &>/dev/null || MISSING_PKGS+=(xclip)
+command -v xdotool &>/dev/null || MISSING_PKGS+=(xdotool)
 if [ "$SESSION_TYPE" = "wayland" ]; then
-    # 截图走 xdg-desktop-portal（GNOME 不支持 grim/slurp 的 wlr 接口）；
+    # Wayland Portal 截图与全局快捷键需要 python3-gi（Gio/GLib）与 python3-dbus；
     # 剪贴板优先 xclip（Mutter 桥接），wl-clipboard/wtype 作为兜底。
-    command -v xclip &>/dev/null || MISSING_PKGS+=(xclip)
+    python3 -c "import gi" 2>/dev/null || MISSING_PKGS+=(python3-gi)
+    python3 -c "import dbus" 2>/dev/null || MISSING_PKGS+=(python3-dbus)
     command -v wl-copy &>/dev/null || MISSING_PKGS+=(wl-clipboard)
     command -v wtype &>/dev/null || MISSING_PKGS+=(wtype)
-    python3 -c "import dbus" 2>/dev/null || MISSING_PKGS+=(python3-dbus)
-else
-    command -v xclip &>/dev/null || MISSING_PKGS+=(xclip)
-    command -v maim &>/dev/null || MISSING_PKGS+=(maim)
 fi
-command -v xdotool &>/dev/null || MISSING_PKGS+=(xdotool)
 
 if [ ${#MISSING_PKGS[@]} -gt 0 ]; then
     echo -e "${YELLOW}  安装缺少的系统包: ${MISSING_PKGS[*]}${NC}"
@@ -207,15 +204,15 @@ cat > "$APP_MENU_DIR/$APP_NAME.desktop" << EOF
 [Desktop Entry]
 Name=Ollama Voice Input
 Name[zh_CN]=语音输入助手
-Comment=全局语音输入 + 截图翻译，完全本地运行
-Comment[zh_CN]=全局语音输入 + 截图翻译，完全本地运行
-Exec=bash -c 'cd "$DIR" && ./start.sh'
+Comment=全局语音输入 + 原位截屏翻译 + 纯 OCR，完全本地运行
+Comment[zh_CN]=全局语音输入 + 原位截屏翻译 + 纯 OCR，完全本地运行
+Exec=bash -c 'if systemctl --user is-active --quiet ollama-voice-server.service; then xdg-open https://127.0.0.1:17945/; else cd "$DIR" && ./start.sh; fi'
 Terminal=false
 Type=Application
 Icon=$ICON_REF
 Categories=Utility;Audio;Accessibility;
 StartupNotify=false
-Keywords=voice;input;translate;screenshot;ollama;qwen;asr;
+Keywords=voice;input;translate;screenshot;ocr;ollama;qwen;asr;
 EOF
 
 # daemon 专用 desktop 文件：portal 需要 app id，而 systemd 启动没有终端/desktop 上下文。
@@ -258,6 +255,7 @@ echo -e "  ${GREEN}查看状态:${NC}"
 echo -e "    systemctl --user status ollama-voice-server"
 echo -e "    systemctl --user status ollama-voice-daemon"
 echo ""
+echo -e "  ${GREEN}翻译主页:${NC}  https://127.0.0.1:17945/"
 echo -e "  ${GREEN}设置页面:${NC}  https://127.0.0.1:17945/setup"
 echo ""
 echo -e "  ${GREEN}更新:${NC}      cd \"$DIR\" && git pull && ./install.sh"

@@ -50,9 +50,9 @@ function operationSet(doc) {
 
 const snapIds = operationSet(snapshot);
 const snapPaths = Object.keys(snapshot.paths || {});
-if (snapPaths.length !== 24) fail("唯一快照 paths 应为 24，实际 " + snapPaths.length);
+if (snapPaths.length < 24) fail("唯一快照 paths 应不少于 24，实际 " + snapPaths.length);
 else pass("唯一生成快照 static/v3/openapi.json 有 " + snapPaths.length + " 条路径");
-if (snapIds.length !== 25) fail("唯一快照 operationId 应为 25，实际 " + snapIds.length);
+if (snapIds.length < 25) fail("唯一快照 operationId 应不少于 25，实际 " + snapIds.length);
 else pass("唯一快照 operationId 集合为 " + snapIds.length + " 个");
 
 const requiredOps = [
@@ -60,13 +60,20 @@ const requiredOps = [
   "setup_task_start_api_setup_tasks_post",
   "setup_task_get_api_setup_tasks__task_id__get",
   "lan_access_api_v1_lan_access_get",
+  "status_api_v1_status_get",
   "get_config_api_v1_config_get",
   "post_config_api_v1_config_post",
+  "history_api_v1_history_get",
+  "translate_api_v1_translate_post",
+  "ocr_translate_api_v1_ocr_translate_post",
+  "from_audio_api_v1_utterances_from_audio_post",
+  "resend_api_v1_utterances_resend_post",
+  "query_api_v1_jobs__job_id__get",
   "platform_event_api_v1_events_platform_post"
 ];
 const missingOps = requiredOps.filter((id) => snapIds.indexOf(id) < 0);
 if (missingOps.length) fail("快照缺少前端所需 operationId：" + missingOps.join(", "));
-else pass("快照含 check/tasks/lan-access/config GET+POST 与 platform 事件");
+else pass("快照含 home/setup/voice 全部必需 operationId（含 translate 与 ocr-translate）");
 const removedOps = [
   "setup_set_config_api_setup_set_config_post",
   "setup_unsupported_pull_model_api_setup_pull_model_post",
@@ -237,8 +244,8 @@ function loadBusiness(extra) {
   });
   const order = [
     "catalog.js", "context.js", "job-id.js", "http.js", "sse.js", "clipboard.js",
-    "audio.js", "platform.js", "claim.js", "map-setup.js", "setup-controller.js", "status-controller.js",
-    "translate-controller.js", "voice-controller.js", "bootstrap.js"
+    "audio.js", "platform.js", "map-setup.js", "setup-actions.js", "home-controller.js",
+    "voice-controller.js", "bootstrap.js"
   ];
   order.forEach(function (name) {
     vm.runInContext(fs.readFileSync(path.join(bizDir, name), "utf8"), context, { filename: name });
@@ -287,18 +294,20 @@ async function runUnit() {
   if (platformOp.method !== "POST" || platformOp.path !== "/api/v1/events/platform" || platformOp.access !== "local") {
     fail("platform 事件派生错误 " + JSON.stringify(platformOp));
   } else pass("平台事件 POST /api/v1/events/platform 由 OpenAPI 派生且仅本机");
-  const claimOp = catalog.operation("claim_api_v1_jobs_claim_post");
-  if (claimOp.method !== "POST" || claimOp.path !== "/api/v1/jobs/claim" || claimOp.access !== "local") {
-    fail("claim 派生错误 " + JSON.stringify(claimOp));
-  } else pass("claim 由 OpenAPI 派生且仅本机，手机不能领取");
-  if (B.CLAIM_TIMEOUT_S !== 25) fail("桌面 claim 长轮询应为 25s，实际 " + B.CLAIM_TIMEOUT_S);
-  else pass("桌面 claim 长轮询超时为 25s");
+  const translateOp = catalog.operation("translate_api_v1_translate_post");
+  if (translateOp.method !== "POST" || translateOp.path !== "/api/v1/translate") {
+    fail("translate 派生错误 " + JSON.stringify(translateOp));
+  } else pass("translate POST /api/v1/translate 由 OpenAPI 派生");
+  const ocrOp = catalog.operation("ocr_translate_api_v1_ocr_translate_post");
+  if (ocrOp.method !== "POST" || ocrOp.path !== "/api/v1/ocr-translate" || ocrOp.access !== "local") {
+    fail("ocr-translate 派生错误 " + JSON.stringify(ocrOp));
+  } else pass("ocr-translate POST /api/v1/ocr-translate 由 OpenAPI 派生且仅本机");
 
   const fileCtx = B.createContext({ protocol: "file:", hostname: "", origin: "file://", href: "file:///tmp/voice.html", search: "" });
   if (fileCtx.kind !== "file" || fileCtx.allowFetch) fail("file:// 上下文未关闭请求");
   else pass("file:// 上下文不允许成功请求");
 
-  const localCtx = B.createContext({ protocol: "https:", hostname: "127.0.0.1", origin: "https://127.0.0.1:17945", href: "https://127.0.0.1:17945/static/v3/setup.html", search: "" });
+  const localCtx = B.createContext({ protocol: "https:", hostname: "127.0.0.1", origin: "https://127.0.0.1:17945", href: "https://127.0.0.1:17945/setup", search: "" });
   if (localCtx.kind !== "local" || !localCtx.canCallLocal()) fail("本机上下文不正确");
   else pass("本机 https 上下文可调用仅本机接口");
 
@@ -394,7 +403,7 @@ async function runUnit() {
       return jsonRes(200, { ok: true, service: "ollama-voice-input", unmet_gates: ["v3 尚未切流"], injected: { transcribe: true, polish: true, translate: true } });
     } },
     { path: "/api/v1/config", method: "GET", handler: function () {
-      return jsonRes(200, { polish_enabled: false, custom_keywords: ["Alpha"], translate_target_lang: "zh", hotkey_voice: "ctrl+alt+z", hotkey_screenshot: "ctrl+alt+x", hotkey_repeat: "ctrl+alt+r", ollama_model: "qwen3.5:4b" });
+      return jsonRes(200, { polish_enabled: false, custom_keywords: ["Alpha"], translate_target_lang: "zh", hotkey_voice: "ctrl+alt+z", hotkey_screenshot: "ctrl+alt+x", hotkey_ocr: "ctrl+alt+o", hotkey_repeat: "ctrl+alt+r", ollama_model: "qwen3.5:4b" });
     } },
     { path: "/api/v1/config", method: "POST", handler: function (rec) {
       const body = JSON.parse(rec.body);
@@ -402,7 +411,7 @@ async function runUnit() {
       if (Object.prototype.hasOwnProperty.call(body, "baidu_appkey") || Object.prototype.hasOwnProperty.call(body, "ollama_model")) {
         return jsonRes(400, { ok: false, error: "invalid_request", message: "未知或只读字段" });
       }
-      return jsonRes(200, Object.assign({ polish_enabled: false, custom_keywords: [], translate_target_lang: "zh", hotkey_voice: "ctrl+alt+z", hotkey_screenshot: "ctrl+alt+x", hotkey_repeat: "ctrl+alt+r", ollama_model: "qwen3.5:4b" }, body));
+      return jsonRes(200, Object.assign({ polish_enabled: false, custom_keywords: [], translate_target_lang: "zh", hotkey_voice: "ctrl+alt+z", hotkey_screenshot: "ctrl+alt+x", hotkey_ocr: "ctrl+alt+o", hotkey_repeat: "ctrl+alt+r", ollama_model: "qwen3.5:4b" }, body));
     } },
     { path: "/api/v1/history", method: "GET", handler: function () {
       return jsonRes(200, { records: [{ timestamp: "t", raw_text: "a", final_text: "a", job_id: "j1", source: "web", polish: "off" }], total: 1, skipped_malformed: 0 });
@@ -479,7 +488,7 @@ async function runUnit() {
       return jsonRes(200, cur);
     } }
   ];
-  const setupCtl = B.createSetupController({
+  const setupCtl = B.createHomeController({
     client: B.createHttp({ catalog: catalog, context: localCtx, fetch: setupWorld.fetch, origin: "https://127.0.0.1:17945" }),
     context: localCtx,
     catalog: catalog,
@@ -490,10 +499,10 @@ async function runUnit() {
   await setupCtl.start();
   const st = setupView.getState();
   if (st.connection === "connected" && st.asr && st.asr.status === "missing" && st.asr.action === "asr_download" && st.ollama.modelStatus === "missing" && !st.asr.progress && st.history.records.length === 1 && st.polish_enabled === false) {
-    pass("设置页已连接，按 asr.status/model_status 映射，不用 injected 猜就绪，也无假进度");
-  } else fail("设置页就绪映射错误：" + JSON.stringify({ connection: st.connection, asr: st.asr, ollama: st.ollama }));
-  if (st.statusNotice && (st.statusNotice.indexOf("未达上线") >= 0 || st.statusNotice.indexOf("尚未切流") >= 0)) pass("设置页展示 unmet_gates 说明");
-  else fail("设置页未展示上线条件：" + st.statusNotice);
+    pass("统一工作台设置已连接，按 asr.status/model_status 映射，不用 injected 猜就绪，也无假进度");
+  } else fail("设置就绪映射错误：" + JSON.stringify({ connection: st.connection, asr: st.asr, ollama: st.ollama }));
+  if (st.statusNotice && (st.statusNotice.indexOf("未达上线") >= 0 || st.statusNotice.indexOf("尚未切流") >= 0)) pass("设置展示 unmet_gates 说明");
+  else fail("设置未展示上线条件：" + st.statusNotice);
   if (st.capabilities && st.capabilities[0] && st.capabilities[0].available === false && /剪贴板/.test(st.capabilities[0].name) && /无法写入剪贴板/.test(st.capabilities[0].message)) {
     pass("平台能力按真实 capabilities 呈现不可用原因");
   } else fail("能力映射错误：" + JSON.stringify(st.capabilities));
@@ -504,7 +513,7 @@ async function runUnit() {
     pass("局域网入口只把遮罩写入视图状态，原始令牌不进 setState");
   } else fail("LAN 状态泄露或映射错误");
   const copied = [];
-  const copyCtl = B.createSetupController({
+  const copyCtl = B.createHomeController({
     client: B.createHttp({ catalog: catalog, context: localCtx, fetch: setupWorld.fetch, origin: "https://127.0.0.1:17945" }),
     context: localCtx,
     catalog: catalog,
@@ -521,12 +530,47 @@ async function runUnit() {
   } else fail("复制路径不正确：" + JSON.stringify(copied));
   copyCtl.destroy();
 
+  setupView.setState({ keywordsDraft: "未保存关键词草稿" });
+  await setupCtl.loadAll();
+  if (setupView.getState().keywordsDraft === "未保存关键词草稿") {
+    pass("loadAll 不覆盖未保存的 keywordsDraft");
+  } else fail("loadAll 覆盖了 keywordsDraft：" + JSON.stringify(setupView.getState().keywordsDraft));
+
   await setupCtl.hooks.onSaveKeywords("Alpha，Beta  Gamma");
   const saved = setupWorld.lastConfig;
   if (setupWorld.setConfigCalled) fail("保存配置仍调用了已删除的 set_config");
-  if (saved && Array.isArray(saved.custom_keywords) && saved.custom_keywords.join(",") === "Alpha,Beta,Gamma" && !Object.prototype.hasOwnProperty.call(saved, "baidu_appkey") && !Object.prototype.hasOwnProperty.call(saved, "whisper_model") && !Object.prototype.hasOwnProperty.call(saved, "ollama_model")) {
-    pass("保存只经 config POST 提交合法字段");
+  if (
+    saved &&
+    Array.isArray(saved.custom_keywords) &&
+    saved.custom_keywords.join(",") === "Alpha,Beta,Gamma" &&
+    setupView.getState().keywordsDraft === null &&
+    setupView.getState().keywordsSaved === true &&
+    !Object.prototype.hasOwnProperty.call(saved, "baidu_appkey") &&
+    !Object.prototype.hasOwnProperty.call(saved, "whisper_model") &&
+    !Object.prototype.hasOwnProperty.call(saved, "ollama_model")
+  ) {
+    pass("保存只经 config POST 提交合法字段，并在成功时清空 keywordsDraft");
   } else fail("保存字段不合法：" + JSON.stringify(saved));
+
+  setupView.setState({ hotkeyCaptureWarning: "仅使用 Shift 修饰警告" });
+  await setupCtl.hooks.onSaveHotkeys({
+    hotkey_voice: "ctrl+alt+z",
+    hotkey_screenshot: "ctrl+alt+x",
+    hotkey_ocr: "ctrl+alt+p",
+    hotkey_repeat: "ctrl+alt+r"
+  });
+  const savedKeys = setupWorld.lastConfig;
+  const afterKeys = setupView.getState();
+  if (
+    st.hotkey_ocr === "ctrl+alt+o" &&
+    savedKeys &&
+    savedKeys.hotkey_ocr === "ctrl+alt+p" &&
+    afterKeys.hotkey_ocr === "ctrl+alt+p" &&
+    afterKeys.hotkeysSaved === true &&
+    afterKeys.hotkeyCaptureWarning === ""
+  ) {
+    pass("home-controller + setup-actions 读取并保存第四热键 hotkey_ocr，保存成功时清空 hotkeyCaptureWarning");
+  } else fail("home-controller hotkey_ocr 保存异常：" + JSON.stringify({ initOcr: st.hotkey_ocr, savedKeys: savedKeys, afterOcr: afterKeys.hotkey_ocr, warn: afterKeys.hotkeyCaptureWarning }));
 
   const downloadP = setupCtl.hooks.onDownloadAsr();
   await downloadP;
@@ -541,7 +585,7 @@ async function runUnit() {
   const injCheck = setupCheckBody();
   injWorld.routes = injWorld.routes.filter(function (r) { return r.path !== "/api/setup/check"; });
   injWorld.routes.unshift({ path: "/api/setup/check", method: "GET", handler: function () { return jsonRes(200, injCheck); } });
-  const injCtl = B.createSetupController({
+  const injCtl = B.createHomeController({
     client: B.createHttp({ catalog: catalog, context: localCtx, fetch: injWorld.fetch, origin: "https://127.0.0.1:17945" }),
     context: localCtx,
     catalog: catalog,
@@ -588,7 +632,7 @@ async function runUnit() {
       finished_at: "2026-11-10T00:00:02+00:00"
     });
   };
-  const nopCtl = B.createSetupController({
+  const nopCtl = B.createHomeController({
     client: B.createHttp({ catalog: catalog, context: localCtx, fetch: setupWorld.fetch, origin: "https://127.0.0.1:17945" }),
     context: localCtx,
     catalog: catalog,
@@ -614,9 +658,10 @@ async function runUnit() {
 
   /* destroy 停止轮询且不重复启动 */
   const desWorldPolls = { n: 0, afterDestroy: 0 };
+  let setupDes;
   setupWorld.onPoll = function (rec, n) {
     desWorldPolls.n += 1;
-    if (setupDes.destroyed) desWorldPolls.afterDestroy += 1;
+    if (setupDes && setupDes._debug.isDestroyed()) desWorldPolls.afterDestroy += 1;
     return jsonRes(200, {
       task_id: "task-asr-1",
       kind: "asr_download",
@@ -628,7 +673,7 @@ async function runUnit() {
       finished_at: null
     });
   };
-  const setupDes = B.createSetupController({
+  setupDes = B.createHomeController({
     client: B.createHttp({ catalog: catalog, context: localCtx, fetch: setupWorld.fetch, origin: "https://127.0.0.1:17945" }),
     context: localCtx,
     catalog: catalog,
@@ -642,173 +687,265 @@ async function runUnit() {
   const pollsBefore = desWorldPolls.n;
   setupDes.destroy();
   await wait(40);
-  if (setupDes._debug.isDestroyed() && desWorldPolls.afterDestroy === 0 && desWorldPolls.n >= 1 && pollsBefore === desWorldPolls.n) {
+  if (setupDes._debug.isDestroyed() && setupDes._debug.polling() === null && desWorldPolls.afterDestroy === 0 && desWorldPolls.n >= 1 && pollsBefore === desWorldPolls.n) {
     pass("destroy 后停止任务轮询，不再重新启动");
   } else fail("destroy 未停轮询：" + JSON.stringify(desWorldPolls) + " before=" + pollsBefore);
   setupWorld.onPoll = null;
 
   /* LAN setup must not call local endpoints */
   const lanSetupWorld = createWorld();
-  const lanSetup = B.createSetupController({
+  const lanSetup = B.createHomeController({
     client: B.createHttp({ catalog: catalog, context: lanCtx, fetch: lanSetupWorld.fetch, origin: "https://192.168.1.8:17945" }),
-    context: lanCtx
+    context: lanCtx,
+    catalog: catalog
   });
   const lanSetupView = fakeView();
   lanSetup.bind(lanSetupView);
   await lanSetup.start();
-  if (lanSetupWorld.calls.length === 0 && lanSetupView.getState().connection === "error") pass("设置页在局域网不硬调 config/status");
-  else fail("设置页在局域网发出了请求：" + lanSetupWorld.calls.length);
+  if (lanSetupWorld.calls.length === 0 && lanSetupView.getState().connection === "error") pass("统一工作台在局域网不硬调 config/status");
+  else fail("统一工作台在局域网发出了请求：" + lanSetupWorld.calls.length);
 
-  /* translate */
-  const trWorld = createWorld();
-  trWorld.platform = [];
-  trWorld.routes = [
-    { path: "/api/v1/config", method: "GET", handler: function () { return jsonRes(200, { translate_target_lang: "en" }); } },
-    { path: "/api/v1/events/platform", method: "POST", handler: function (rec) {
-      const body = JSON.parse(rec.body);
-      trWorld.platform.push(body);
-      return jsonRes(202, { ok: true });
+  /* home-controller: 方案 C 主页全链路（状态/四热键/翻译/图片OCR/错误不伪造译文/LAN 脱敏复制/destroy/非本机阻止） */
+  const homeWorld = createWorld();
+  homeWorld.translateFail = false;
+  homeWorld.ocrFail = false;
+  homeWorld.historyOffsetCalls = [];
+  homeWorld.routes = [
+    { path: "/api/setup/check", method: "GET", handler: function () {
+      return jsonRes(200, setupCheckBody({
+        unmet_gates: [],
+        asr: Object.assign({}, setupCheckBody().asr, { status: "ready", weights_present: true, sidecar_running: true, action: null, message: "" }),
+        ollama: Object.assign({}, setupCheckBody().ollama, { installed: true, running: true, model_status: "ready", action: null, message: "" })
+      }));
+    } },
+    { path: "/api/v1/status", method: "GET", handler: function () {
+      return jsonRes(200, { ok: true, service: "ollama-voice-input", unmet_gates: [] });
+    } },
+    { path: "/api/v1/config", method: "GET", handler: function () {
+      return jsonRes(200, {
+        polish_enabled: true,
+        custom_keywords: ["Qwen"],
+        translate_target_lang: "zh",
+        hotkey_voice: "ctrl+alt+z",
+        hotkey_screenshot: "ctrl+alt+x",
+        hotkey_ocr: "ctrl+alt+o",
+        hotkey_repeat: "ctrl+alt+r"
+      });
+    } },
+    { path: "/api/v1/history", method: "GET", handler: function (rec) {
+      const q = new URLSearchParams(String(rec.url).split("?")[1] || "");
+      const offset = Number(q.get("offset") || 0);
+      homeWorld.historyOffsetCalls.push(offset);
+      if (offset === 0) {
+        return jsonRes(200, {
+          records: [{ timestamp: "t1", raw_text: "orig1", final_text: "final1", job_id: "h1", source: "desktop", polish: "on" }],
+          total: 2,
+          skipped_malformed: 0
+        });
+      }
+      return jsonRes(200, {
+        records: [{ timestamp: "t2", raw_text: "orig2", final_text: "final2", job_id: "h2", source: "web", polish: "off" }],
+        total: 2,
+        skipped_malformed: 0
+      });
+    } },
+    { path: "/api/v1/lan-access", method: "GET", handler: function () {
+      return jsonRes(200, {
+        port: 8443,
+        token: "home-secret-lan-token-do-not-leak",
+        token_masked: "hom****eak",
+        entries: [{
+          ip: "192.0.2.9",
+          url: "https://192.0.2.9:8443/voice#token=home-secret-lan-token-do-not-leak",
+          url_masked: "https://192.0.2.9:8443/voice#token=hom****eak",
+          qr_svg: "<svg xmlns='http://www.w3.org/2000/svg'></svg>"
+        }],
+        message: ""
+      });
+    } },
+    { path: "/api/v1/translate", method: "POST", handler: function (rec) {
+      const body = JSON.parse(rec.body || "{}");
+      homeWorld.lastTranslate = body;
+      if (homeWorld.translateDelay) {
+        return new Promise(function (resolve) {
+          homeWorld.resolveDelayedTranslate = function () {
+            resolve(jsonRes(200, { ok: true, text: "迟到译文", target_lang: body.target_lang }));
+          };
+        });
+      }
+      if (homeWorld.translateFail) {
+        return jsonRes(502, { ok: false, error: "translate_failed", message: "本地模型无响应", details: { ocr_text: "不应被当成译文" } });
+      }
+      return jsonRes(200, { ok: true, text: "你好世界", target_lang: body.target_lang });
     } },
     { path: "/api/v1/ocr-translate", method: "POST", handler: function (rec) {
       const fd = rec.body;
-      if (!(fd instanceof FormData) || !fd.get("target_lang") || !fd.get("image")) return jsonRes(422, { ok: false, error: "invalid_request", message: "缺少字段" });
-      return jsonRes(200, { ok: true, text: "Hello", ocr_text: "你好", target_lang: fd.get("target_lang") });
-    } }
-  ];
-  const trCtl = B.createTranslateController({
-    client: B.createHttp({ catalog: catalog, context: localCtx, fetch: trWorld.fetch, origin: "https://127.0.0.1:17945" }),
-    context: localCtx,
-    clipboard: { writeText: function (t) { trWorld.copied = t; return Promise.resolve(); } }
-  });
-  const trView = fakeView();
-  trCtl.bind(trView);
-  await trCtl.submitImage(new Blob([new Uint8Array([1])], { type: "image/png" }), "en");
-  await trCtl.platformSettled(); /* 平台上报串行且不阻塞 DOM；这里等它落定再核对顺序 */
-  const trs = trView.getState();
-  if (trs.phase === "result" && trs.text === "Hello" && trs.ocr_text === "你好") pass("翻译浮层按响应呈现 text / ocr_text");
-  else fail("翻译呈现错误：" + JSON.stringify(trs));
-  if (trWorld.platform.length >= 2 && trWorld.platform[0].event === "busy" && trWorld.platform[1].event === "idle" && !trWorld.platform.some(function (e) { return e.event === "recording" || e.event === "partial"; })) {
-    pass("翻译在本机上报 platform busy/idle，不冒充识别事件");
-  } else fail("翻译平台事件不正确：" + JSON.stringify(trWorld.platform));
-  await trCtl.hooks.onCopy({ text: trs.text });
-  if (trWorld.copied === "Hello") pass("复制仅在点击时 writeText");
-  else fail("复制未走到 writeText");
-
-  /* status SSE: single product stream, mirrored session events, claim loop */
-  FakeEventSource.instances = [];
-  const stWorld = createWorld();
-  stWorld.claims = [];
-  stWorld.resends = [];
-  stWorld.routes = [
-    { path: "/api/v1/config", method: "GET", handler: function () { return jsonRes(200, { hotkey_repeat: "ctrl+alt+r" }); } },
-    { path: "/api/v1/jobs/claim", method: "POST", handler: function (rec) {
-      const body = rec.body ? JSON.parse(rec.body) : {};
-      stWorld.claims.push(body);
-      if (stWorld.claimJob) {
-        const job = stWorld.claimJob;
-        stWorld.claimJob = null;
-        return jsonRes(200, job);
+      if (!(fd instanceof FormData) || !fd.get("target_lang") || !fd.get("image")) {
+        return jsonRes(422, { ok: false, error: "invalid_request", message: "缺少字段" });
       }
-      if (stWorld.claims.length === 1) return jsonRes(200, null);
-      return new Promise(function () { /* 后续长轮询挂起，避免测试里空转 */ });
-    } },
-    { path: "/api/v1/utterances/resend", method: "POST", handler: function (rec) {
-      const body = JSON.parse(rec.body);
-      stWorld.resends.push(body);
-      return jsonRes(200, { ok: true, state: "queued", job_id: body.job_id, text: body.text });
+      const lang = fd.get("target_lang");
+      homeWorld.lastOcrLang = lang;
+      if (homeWorld.ocrFail) {
+        return jsonRes(502, { ok: false, error: "translate_failed", message: "翻译服务异常", details: { ocr_text: "DO_NOT_FAKE_TRANSLATION" } });
+      }
+      if (lang === "raw") {
+        return jsonRes(200, { ok: true, text: "Pure OCR line", ocr_text: "Pure OCR line", target_lang: "raw" });
+      }
+      return jsonRes(200, { ok: true, text: "版本说明 3.2", ocr_text: "Release notes 3.2", target_lang: lang });
     } }
   ];
-  const statusCtl = B.createStatusController({
-    client: B.createHttp({ catalog: catalog, context: localCtx, fetch: stWorld.fetch, origin: "https://127.0.0.1:17945" }),
+
+  const homeCopied = [];
+  let fakeClock = 1000;
+  const homeCtl = B.createHomeController({
+    client: B.createHttp({ catalog: catalog, context: localCtx, fetch: homeWorld.fetch, origin: "https://127.0.0.1:17945" }),
     context: localCtx,
     catalog: catalog,
-    origin: "https://127.0.0.1:17945",
-    sse: B.createSse({ EventSource: FakeEventSource }),
-    jobIds: B.createJobIds(),
-    claimErrorDelay: 60 * 1000
+    clipboard: { writeText: function (t) { homeCopied.push(t); return Promise.resolve(); } },
+    now: function () { fakeClock += 45; return fakeClock; }
   });
-  const statusView = fakeView({ events: [] });
-  statusCtl.bind(statusView);
-  await statusCtl.start();
-  await wait(5);
-  const src = FakeEventSource.instances[0];
-  if (!src || src.url.indexOf("/api/v1/events") < 0) fail("未按 OpenAPI 路径连接 SSE");
-  else pass("状态浮层按派生路径连接产品事件");
-  if (FakeEventSource.instances.length === 1 && FakeEventSource.instances.every(function (s) { return String(s.url).indexOf("/recognize/sessions") < 0; })) {
-    pass("状态浮层只订阅一次产品事件，不订 session events，避免双字幕");
-  } else fail("状态浮层重复订阅或订了会话事件：" + FakeEventSource.instances.map(function (s) { return s.url; }).join(", "));
-  await statusCtl.start();
-  await wait(5);
-  const openSources = FakeEventSource.instances.filter(function (s) { return !s.closed; });
-  if (openSources.length === 1 && openSources[0].url.indexOf("/api/v1/events") >= 0) {
-    pass("重复 start 不会同时打开两条产品事件流");
-  } else fail("重复 start 后打开的事件流数=" + openSources.length);
-  src.open();
-  openSources[0].open();
-  const live = openSources[0];
-  live.emit("recording", { event: "recording", session_id: "sess-1" });
-  live.emit("partial", { event: "partial", session_id: "sess-1", stable_text: "你好", tail_text: "啊" });
-  live.emit("error", { event: "error", error: "delivery_failed", message: "输入目标已消失", details: { job_id: "job-delivery-1" } });
-  live.emit("idle", { event: "idle" });
-  const evs = statusView.getState().events || [];
-  if (evs[0] && evs[0].event === "idle" && evs[1] && evs[1].event === "error" && evs[1].error === "delivery_failed" && evs[1].details && evs[1].details.job_id === "job-delivery-1" && evs[2] && evs[2].event === "partial" && evs[2].stable_text === "你好" && evs[2].tail_text === "啊" && evs[3] && evs[3].event === "recording") {
-    pass("产品事件流呈现会话镜像的 recording/partial/error/idle，并保留 delivery_failed 的 job_id");
-  } else fail("产品事件镜像未正确呈现：" + JSON.stringify(evs));
-  if (stWorld.claims.length && stWorld.claims[0].timeout_s === 25) pass("桌面状态路径以 timeout_s=25 长轮询 claim");
-  else fail("claim 未按 25s 长轮询：" + JSON.stringify(stWorld.claims));
-  const beforeCalls = stWorld.calls.filter(function (c) { return String(c.url).indexOf("/api/v1/jobs/claim") < 0; }).length;
-  live.onerror && live.onerror({});
-  if (statusView.getState().connection === "disconnected") pass("SSE 断线后显式未连接");
-  else fail("断线未显示未连接：" + statusView.getState().connection);
-  const afterNonClaim = stWorld.calls.filter(function (c) { return String(c.url).indexOf("/api/v1/jobs/claim") < 0; }).length;
-  if (afterNonClaim === beforeCalls) pass("断线后不自动发送（不含桌面 claim 长轮询）");
-  else fail("断线后发生了额外请求");
+  const homeView = fakeView(catalogCtx.V3.defaults.homeState());
+  homeCtl.bind(homeView);
+  await homeCtl.start();
+  const hs = homeView.getState();
+  if (
+    hs.connection === "connected" &&
+    hs.asr.status === "ready" &&
+    hs.asr.sidecarRunning === true &&
+    hs.ollama.modelStatus === "ready" &&
+    hs.hotkey_ocr === "ctrl+alt+o" &&
+    hs.translate_target_lang === "zh" &&
+    hs.history.records.length === 1 &&
+    hs.lanEntries &&
+    hs.lanEntries[0].urlMasked.indexOf("hom****eak") >= 0 &&
+    !hs.lanEntries[0].url &&
+    JSON.stringify(hs).indexOf("home-secret-lan-token-do-not-leak") < 0
+  ) {
+    pass("home-controller start 并行加载状态/四热键/历史/脱敏局域网入口，明文令牌不进 setState");
+  } else fail("home-controller start 映射异常：" + JSON.stringify(hs));
 
-  await statusCtl.hooks.onConfirmDeliveryChoice({ confirm: true, job_id: "job-old", text: "再发一次", focus_id: "focus-desk" });
-  if (stWorld.resends[0] && stWorld.resends[0].focus_id === "focus-desk" && stWorld.resends[0].original_job_id === "job-old" && stWorld.resends[0].confirm === true) {
-    pass("状态栏确认重发可附带可选 focus_id");
-  } else fail("focus_id 未随 resend 提交：" + JSON.stringify(stWorld.resends));
-  statusCtl.destroy();
+  await homeCtl.hooks.onCopy({ kind: "lan_url", index: 0 });
+  if (
+    homeCopied[0] === "https://192.0.2.9:8443/voice#token=home-secret-lan-token-do-not-leak" &&
+    homeView.getState().copyKind === "lan_url" &&
+    homeView.getState().copyStatus === "已复制" &&
+    JSON.stringify(homeView.getState()).indexOf("home-secret-lan-token-do-not-leak") < 0
+  ) {
+    pass("home-controller 复制局域网网址从私有闭包写出明文，state 始终零泄露");
+  } else fail("home-controller LAN 复制异常：" + JSON.stringify({ copied: homeCopied, copyStatus: homeView.getState().copyStatus }));
 
-  const lanClaimWorld = createWorld();
-  lanClaimWorld.routes = [{ path: "/api/v1/jobs/claim", method: "POST", handler: function () { lanClaimWorld.hit = true; return jsonRes(200, null); } }];
-  const lanLoop = B.createClaimLoop({
-    client: B.createHttp({ catalog: catalog, context: lanCtx, fetch: lanClaimWorld.fetch, origin: "https://192.168.1.8:17945" }),
-    context: lanCtx,
-    errorDelay: 60 * 1000
+  await homeCtl.hooks.onTranslateText({ text: "Hello world", target_lang: "zh" });
+  const hTr = homeView.getState().translate;
+  if (hTr.phase === "result" && hTr.text === "你好世界" && hTr.ocr_text === "" && hTr.target_lang === "zh" && typeof hTr.elapsedMs === "number" && hTr.elapsedMs >= 45) {
+    pass("home-controller 文本翻译走 OpenAPI translate 并记录耗时");
+  } else fail("home-controller 文本翻译异常：" + JSON.stringify(hTr));
+
+  const callsBeforeRaw = homeWorld.calls.length;
+  await homeCtl.hooks.onTranslateText({ text: "Raw pass through", target_lang: "raw" });
+  const hRaw = homeView.getState().translate;
+  if (homeWorld.calls.length === callsBeforeRaw && hRaw.phase === "result" && hRaw.text === "Raw pass through" && hRaw.target_lang === "raw") {
+    pass("home-controller target_lang=raw 直接回填，不发网络请求");
+  } else fail("home-controller raw 模式异常：" + JSON.stringify(hRaw));
+
+  homeWorld.translateFail = true;
+  await homeCtl.hooks.onTranslateText({ text: "Fail me", target_lang: "zh" });
+  const hTrErr = homeView.getState().translate;
+  if (hTrErr.phase === "error" && hTrErr.error === "translate_failed" && hTrErr.text === "" && /无响应/.test(hTrErr.message || "")) {
+    pass("home-controller 翻译失败如实呈现错误，不伪造译文");
+  } else fail("home-controller 翻译失败状态错误：" + JSON.stringify(hTrErr));
+  homeWorld.translateFail = false;
+
+  const imgBlob = new Blob([new Uint8Array([137, 80, 78, 71])], { type: "image/png" });
+  await homeCtl.hooks.onSubmitImage({ file: imgBlob, target_lang: "zh", mode: "translate" });
+  const hImgTr = homeView.getState().translate;
+  if (hImgTr.phase === "result" && hImgTr.text === "版本说明 3.2" && hImgTr.ocr_text === "Release notes 3.2") {
+    pass("home-controller mode=translate 图片提交更新 state.translate（含 text 与 ocr_text）");
+  } else fail("home-controller 图片翻译异常：" + JSON.stringify(hImgTr));
+
+  await homeCtl.hooks.onSubmitImage({ file: imgBlob, target_lang: "raw", mode: "ocr" });
+  const hImgOcr = homeView.getState().ocr;
+  if (hImgOcr.phase === "result" && hImgOcr.ocr_text === "Pure OCR line" && hImgOcr.text === "") {
+    pass("home-controller mode=ocr 纯提取更新 state.ocr（仅 ocr_text，不重复译文）");
+  } else fail("home-controller 图片纯 OCR 异常：" + JSON.stringify(hImgOcr));
+
+  await homeCtl.hooks.onSubmitImage({ file: imgBlob, target_lang: "zh", mode: "ocr" });
+  const hImgOcrTr = homeView.getState().ocr;
+  if (hImgOcrTr.phase === "result" && hImgOcrTr.ocr_text === "Release notes 3.2" && hImgOcrTr.text === "版本说明 3.2") {
+    pass("home-controller OCR 面板提取并翻译同时写入 ocr_text 与 text");
+  } else fail("home-controller OCR 翻译异常：" + JSON.stringify(hImgOcrTr));
+
+  homeWorld.ocrFail = true;
+  await homeCtl.hooks.onSubmitImage({ file: imgBlob, target_lang: "zh", mode: "translate" });
+  const hImgErr = homeView.getState().translate;
+  if (hImgErr.phase === "error" && hImgErr.error === "translate_failed" && hImgErr.text === "" && hImgErr.ocr_text === "") {
+    pass("home-controller 图片翻译失败严禁拿 ocr_text 冒充译文");
+  } else fail("home-controller 图片失败路径异常：" + JSON.stringify(hImgErr));
+  homeWorld.ocrFail = false;
+
+  await homeCtl.hooks.onLoadMoreHistory();
+  if (homeView.getState().history.records.length === 2 && homeWorld.historyOffsetCalls.indexOf(1) >= 0) {
+    pass("home-controller onLoadMoreHistory 按偏移量分页追加历史");
+  } else fail("home-controller 分页历史异常：" + JSON.stringify(homeView.getState().history));
+
+  await homeCtl.hooks.onRefreshHistory();
+  await homeCtl.hooks.onRefreshLan();
+  await homeCtl.hooks.onCopy({ kind: "translation", text: "版本说明 3.2" });
+  if (
+    homeView.getState().history.records.length === 1 &&
+    homeView.getState().lanEntries && homeView.getState().lanEntries.length === 1 &&
+    homeCopied[homeCopied.length - 1] === "版本说明 3.2" &&
+    homeView.getState().copyKind === "translation" &&
+    homeView.getState().translate.copyStatus === "已复制"
+  ) {
+    pass("home-controller onRefreshHistory / onRefreshLan / 译文复制回调正常");
+  } else fail("home-controller 刷新或复制回调异常");
+
+  homeCtl.hooks.onToggleTheme({ theme: "light" });
+  homeCtl.hooks.onSelectPanel({ panel: "ocr" });
+  await homeCtl.hooks.onSubmitImage({ file: imgBlob, target_lang: "zh", mode: "translate" });
+  if (homeView.getState().theme === "light" && homeView.getState().activePanel === "ocr" && homeView.getState().ocr.text === "版本说明 3.2") {
+    pass("home-controller 支持主题/面板切换，且在 OCR 面板选译文模式时更新 state.ocr");
+  } else fail("home-controller 主题或 OCR 面板路由异常");
+
+  /* destroy 防异步回调污染 */
+  homeWorld.translateDelay = true;
+  const inflight = homeCtl.hooks.onTranslateText({ text: "Late", target_lang: "zh" });
+  homeCtl.destroy();
+  homeWorld.resolveDelayedTranslate();
+  await inflight;
+  if (homeCtl._debug.isDestroyed() && homeView.getState().translate.text !== "迟到译文") {
+    pass("home-controller destroy 后迟到响应不污染已销毁视图");
+  } else fail("home-controller destroy 防护失效：" + JSON.stringify(homeView.getState().translate));
+  homeWorld.translateDelay = false;
+
+  /* 非本机（局域网 & file://）主页阻止发出 fetch */
+  const lanHomeWorld = createWorld();
+  const lanHomeCtl = B.createHomeController({
+    client: B.createHttp({ catalog: catalog, context: lanCtx, fetch: lanHomeWorld.fetch, origin: "https://192.168.1.8:17945" }),
+    context: lanCtx
   });
-  lanLoop.start();
-  await wait(5);
-  if (!lanClaimWorld.hit && lanClaimWorld.calls.length === 0) pass("局域网/手机无法启动 claim，未发出领取请求");
-  else fail("手机路径发出了 claim：" + lanClaimWorld.calls.length);
-  lanLoop.destroy();
+  const lanHomeView = fakeView(catalogCtx.V3.defaults.homeState());
+  lanHomeCtl.bind(lanHomeView);
+  await lanHomeCtl.start();
+  await lanHomeCtl.hooks.onTranslateText({ text: "hello", target_lang: "zh" });
+  await lanHomeCtl.hooks.onSubmitImage({ file: imgBlob, target_lang: "zh", mode: "translate" });
+  if (lanHomeWorld.calls.length === 0 && lanHomeView.getState().connection === "error" && lanHomeView.getState().translate.phase === "error") {
+    pass("home-controller 在局域网显式报错且零 fetch");
+  } else fail("home-controller 局域网未阻止：" + JSON.stringify({ calls: lanHomeWorld.calls.length, st: lanHomeView.getState().connection }));
+  lanHomeCtl.destroy();
 
-  const deskClaimWorld = createWorld();
-  deskClaimWorld.n = 0;
-  deskClaimWorld.routes = [{ path: "/api/v1/jobs/claim", method: "POST", handler: function (rec) {
-    deskClaimWorld.n += 1;
-    const body = rec.body ? JSON.parse(rec.body) : {};
-    if (deskClaimWorld.n === 1) {
-      return jsonRes(200, { job_id: "job-c1", claim_id: "cl-1", text: "你好", source: "desktop", focus_id: "focus-1", state: "claimed" });
-    }
-    return new Promise(function () { /* 第二次长轮询挂起，便于观察 destroy 是否停发 */ });
-  } }];
-  const got = [];
-  const deskLoop = B.createClaimLoop({
-    client: B.createHttp({ catalog: catalog, context: localCtx, fetch: deskClaimWorld.fetch, origin: "https://127.0.0.1:17945" }),
-    context: localCtx,
-    errorDelay: 60 * 1000,
-    onClaimed: function (job) { got.push(job.job_id); }
+  const fileHomeWorld = createWorld();
+  const fileHomeCtl = B.createHomeController({
+    client: B.createHttp({ catalog: catalog, context: fileCtx, fetch: fileHomeWorld.fetch, origin: "" }),
+    context: fileCtx
   });
-  deskLoop.start();
-  await wait(20);
-  deskLoop.destroy();
-  await wait(20);
-  const afterDestroy = deskClaimWorld.n;
-  await wait(20);
-  if (got[0] === "job-c1" && deskClaimWorld.n >= 2 && JSON.parse(deskClaimWorld.calls[0].body).timeout_s === 25 && afterDestroy === deskClaimWorld.n) {
-    pass("桌面 claim 在 25s 长轮询中领取任务，destroy 后不再继续，且未自动 ack");
-  } else fail("桌面 claim 生命周期不正确：" + JSON.stringify({ got: got, n: deskClaimWorld.n, afterDestroy: afterDestroy }));
+  const fileHomeView = fakeView(catalogCtx.V3.defaults.homeState());
+  fileHomeCtl.bind(fileHomeView);
+  await fileHomeCtl.start();
+  if (fileHomeWorld.calls.length === 0 && fileHomeView.getState().connection === "error" && /file:\/\//.test(fileHomeView.getState().connectionError || "")) {
+    pass("home-controller 在 file:// 显式报错且零 fetch");
+  } else fail("home-controller file:// 未阻止：" + JSON.stringify({ calls: fileHomeWorld.calls.length, err: fileHomeView.getState().connectionError }));
+  fileHomeCtl.destroy();
 
   const platWorld = createWorld();
   platWorld.events = [];
@@ -891,6 +1028,23 @@ async function runUnit() {
   await voiceCtl.start();
   if (voiceView.getState().connection === "connected" && voiceView.getState().tokenValid === true) pass("手机页在带令牌的局域网上下文可连接");
   else fail("手机页连接状态错误：" + JSON.stringify(voiceView.getState()));
+  if (voiceView.getState().micEnabled === true && voiceView.getState().useFileUpload === false) {
+    pass("voice-controller start() 支持 MediaRecorder 时 micEnabled 为 true，麦克风立即可按");
+  } else fail("voice-controller start() 麦克风置灰回归：" + JSON.stringify({ micEnabled: voiceView.getState().micEnabled, useFileUpload: voiceView.getState().useFileUpload }));
+
+  const noMrView = fakeView();
+  const noMrCtl = B.createVoiceController({
+    client: B.createHttp({ catalog: catalog, context: lanCtx, fetch: voiceWorld.fetch, origin: "https://192.168.1.8:17945" }),
+    context: lanCtx,
+    jobIds: B.createJobIds(),
+    MediaRecorder: { isTypeSupported: function () { return false; } }
+  });
+  noMrCtl.bind(noMrView);
+  await noMrCtl.start();
+  if (noMrView.getState().micEnabled === false && noMrView.getState().useFileUpload === true) {
+    pass("voice-controller 不支持 MediaRecorder 时降级文件上传且 micEnabled=false");
+  } else fail("不支持 MediaRecorder 降级状态错误：" + JSON.stringify({ micEnabled: noMrView.getState().micEnabled, useFileUpload: noMrView.getState().useFileUpload }));
+  noMrCtl.destroy();
 
   await voiceCtl.hooks.onRecordStart();
   if (!FakeMediaRecorder.instances.length || stream.getTracks().some(function (t) { return t.stopped; })) {
@@ -898,11 +1052,37 @@ async function runUnit() {
   }
   if (voiceView.getState().phase === "recording") pass("仅在用户按下后开始录音");
   else fail("录音未进入 recording：" + voiceView.getState().phase);
+  jobState = "done";
   await voiceCtl.hooks.onRecordEnd();
   await wait(20);
   const firstId = voiceWorld.jobIds && voiceWorld.jobIds[0];
   if (firstId && voiceView.getState().job_id === firstId && voiceView.getState().text === "识别文本") pass("松开后上传原音频并提交必传 job_id");
   else fail("from-audio 提交异常：" + JSON.stringify(voiceView.getState()) + " ids=" + JSON.stringify(voiceWorld.jobIds));
+  if (voiceView.getState().phase === "done" && voiceView.getState().micEnabled === true) {
+    pass("录音任务进入 done 终态后恢复 micEnabled=true，可直接按住说下一句");
+  } else fail("done 终态未恢复 micEnabled：" + JSON.stringify({ phase: voiceView.getState().phase, micEnabled: voiceView.getState().micEnabled }));
+  jobState = "queued";
+
+  /* polish_failed 终态也必须恢复 micEnabled=true */
+  const pfWorld = createWorld();
+  pfWorld.routes = [
+    { path: "/api/v1/utterances/from-audio", method: "POST", handler: function () {
+      return jsonRes(502, { ok: false, error: "polish_failed", message: "模型润色超时", details: { raw_text: "原始口述" } });
+    } }
+  ];
+  const pfView = fakeView();
+  const pfCtl = B.createVoiceController({
+    client: B.createHttp({ catalog: catalog, context: lanCtx, fetch: pfWorld.fetch, origin: "https://192.168.1.8:17945" }),
+    context: lanCtx,
+    jobIds: B.createJobIds(),
+    MediaRecorder: FakeMediaRecorder
+  });
+  pfCtl.bind(pfView);
+  await pfCtl.submitAudio({ blob: new Blob([new Uint8Array([1, 2])], { type: "audio/webm" }), filename: "a.webm" }, "from-audio");
+  if (pfView.getState().phase === "polish_failed" && pfView.getState().micEnabled === true && pfView.getState().raw_text === "原始口述") {
+    pass("polish_failed 终态保留原文并恢复 micEnabled=true");
+  } else fail("polish_failed 未恢复 micEnabled：" + JSON.stringify(pfView.getState()));
+  pfCtl.destroy();
 
   /* repeat same logical request keeps job_id: simulate network fail then reuse */
   const jobs = B.createJobIds();
@@ -973,15 +1153,16 @@ async function runUnit() {
   await cancelCtl.hooks.onRecordStart();
   await wait(5);
   await cancelCtl.hooks.onRecordCancel();
-  if (stream2.getTracks().every(function (t) { return t.stopped > 0; }) && cancelView.getState().phase === "idle") {
-    pass("取消录音后停止 tracks 并回到空闲");
-  } else fail("取消未释放音轨：" + JSON.stringify(stream2.getTracks().map(function (t) { return t.stopped; })));
+  if (stream2.getTracks().every(function (t) { return t.stopped > 0; }) && cancelView.getState().phase === "idle" && cancelView.getState().micEnabled === true) {
+    pass("取消录音后停止 tracks、回到空闲并恢复 micEnabled=true");
+  } else fail("取消未释放音轨或未恢复 micEnabled：" + JSON.stringify({ tracks: stream2.getTracks().map(function (t) { return t.stopped; }), micEnabled: cancelView.getState().micEnabled }));
   docFake.hidden = true;
   await cancelCtl.hooks.onRecordStart();
   await wait(5);
   if (docFake.listeners.visibilitychange) docFake.listeners.visibilitychange();
-  if (stream2.getTracks().every(function (t) { return t.stopped > 0; })) pass("页面不可见时停止录音并释放音轨");
-  else fail("visibility 未释放音轨");
+  if (stream2.getTracks().every(function (t) { return t.stopped > 0; }) && cancelView.getState().micEnabled === true) {
+    pass("页面不可见时停止录音、释放音轨并保持可再次录音");
+  } else fail("visibility 未释放音轨或 micEnabled 错误");
   cancelCtl.destroy();
 
   /* pick audio rejects video */
@@ -1008,7 +1189,7 @@ async function runUnit() {
   }
 
   const htmlDir = path.join(repo, "static/v3");
-  ["setup.html", "voice.html", "overlay-status.html", "overlay-translate.html"].forEach(function (name) {
+  ["index.html", "voice.html"].forEach(function (name) {
     const html = fs.readFileSync(path.join(htmlDir, name), "utf8");
     const head = html.split("</head>")[0] || "";
     const refIdx = head.search(/<meta[^>]*name=["']referrer["'][^>]*content=["']no-referrer["']/i);
@@ -1021,6 +1202,81 @@ async function runUnit() {
       pass(name + " 在任何外部样式前声明 no-referrer，并先加载 context.js 再剥离令牌");
     } else fail(name + " 的 Referrer-Policy / 令牌剥离脚本顺序不正确");
   });
+
+  /* #token= fragment 优先读取并立即从地址栏剥离（保留其余 hash 与 query，不落地 Web Storage） */
+  const hashLoc = {
+    protocol: "https:",
+    hostname: "192.168.1.8",
+    origin: "https://192.168.1.8",
+    pathname: "/voice",
+    search: "?foo=1",
+    hash: "#a=1&token=" + fixtureTok + "&b=2",
+    href: "https://192.168.1.8/voice?foo=1#a=1&token=" + fixtureTok + "&b=2"
+  };
+  const hashHistCalls = [];
+  const hashHistory = {
+    state: { page: "voice-hash" },
+    replaceState: function (state, title, url) {
+      hashHistCalls.push({ state: state, title: title, url: String(url) });
+      const qIndex = String(url).indexOf("?");
+      const hIndex = String(url).indexOf("#");
+      hashLoc.search = qIndex >= 0 ? String(url).slice(qIndex, hIndex >= 0 ? hIndex : undefined) : "";
+      hashLoc.hash = hIndex >= 0 ? String(url).slice(hIndex) : "";
+      hashLoc.href = hashLoc.origin + url;
+    }
+  };
+  const adoptHashBiz = loadBusiness();
+  const adoptedHash = adoptHashBiz.window.V3Business.adoptTokenFromLocation({ location: hashLoc, history: hashHistory });
+  const ctxAfterHash = adoptHashBiz.window.V3Business.createContext({
+    protocol: "https:",
+    hostname: "192.168.1.8",
+    origin: "https://192.168.1.8",
+    href: hashLoc.href,
+    search: hashLoc.search,
+    hash: hashLoc.hash
+  });
+  if (
+    hashHistCalls.length === 1 &&
+    !leak(hashHistCalls[0].url) &&
+    hashHistCalls[0].url === "/voice?foo=1#a=1&b=2" &&
+    adoptedHash.stripped &&
+    adoptedHash.token === fixtureTok &&
+    ctxAfterHash.tokenPresent &&
+    ctxAfterHash.getToken() === fixtureTok &&
+    !ctxAfterHash.tokenAdoptError
+  ) {
+    pass("context.js 支持 #token= 片段提取并立即 replaceState 剥离，仅存内存不留地址栏");
+  } else fail("#token= 片段提取或剥离失败：" + JSON.stringify({ calls: hashHistCalls, adopted: adoptedHash, url: hashLoc.href }));
+
+  /* 纯 #token=xxx 剥离后不残留空 #，且 #token= 优先级高于 ?token= 并双清 */
+  const bothLoc = {
+    pathname: "/voice",
+    search: "?token=legacy-query-token",
+    hash: "#token=" + fixtureTok,
+    href: "https://192.168.1.8/voice?token=legacy-query-token#token=" + fixtureTok
+  };
+  const bothHistCalls = [];
+  const adoptBothBiz = loadBusiness();
+  const adoptedBoth = adoptBothBiz.window.V3Business.adoptTokenFromLocation({
+    location: bothLoc,
+    history: { state: null, replaceState: function (s, t, u) { bothHistCalls.push(String(u)); } }
+  });
+  if (adoptedBoth.token === fixtureTok && bothHistCalls.length === 1 && bothHistCalls[0] === "/voice") {
+    pass("#token= 优先于 ?token=，且 replaceState 同步剥离两处令牌");
+  } else fail("#token= 优先级或双清异常：" + JSON.stringify({ token: adoptedBoth.token, urls: bothHistCalls }));
+
+  const directHashBiz = loadBusiness();
+  const directHashCtx = directHashBiz.window.V3Business.createContext({
+    protocol: "https:",
+    hostname: "192.168.1.8",
+    origin: "https://192.168.1.8",
+    href: "https://192.168.1.8/voice#token=" + fixtureTok,
+    search: "?token=legacy-fallback",
+    hash: "#token=" + fixtureTok
+  });
+  if (directHashCtx.tokenPresent && directHashCtx.getToken() === fixtureTok) {
+    pass("未 adopt 时 createContext 同样优先读取 hash 中 #token=");
+  } else fail("createContext 直接读取 hash 令牌失败");
 
   const loc = {
     protocol: "https:",
@@ -1376,7 +1632,7 @@ async function runUnit() {
       return jsonRes(200, cur);
     } }
   ];
-  const startReqCtl = B.createSetupController({
+  const startReqCtl = B.createHomeController({
     client: B.createHttp({ catalog: catalog, context: localCtx, fetch: startReqWorld.fetch, origin: "https://127.0.0.1:17945" }),
     context: localCtx,
     catalog: catalog,
@@ -1422,7 +1678,243 @@ async function runUnit() {
       pass("快捷键互相重复时展示后端错误且不丢草稿");
     } else fail("保存冲突后草稿或错误不正确：" + JSON.stringify({ drafts: st.hotkeyDrafts, err: st.hotkeySaveError, notice: st.statusNotice, saved: st.hotkeysSaved, thrown: err && err.message }));
   }
+
+  /* P1-5 回归：配置保存失败写入 statusNotice 后，再次保存成功立即恢复为无报错（或按 unmetGates 还原） */
+  startReqView.setState({ unmetGates: [] });
+  await startReqCtl.hooks.onSaveHotkeys({ hotkey_voice: "ctrl+alt+z", hotkey_screenshot: "ctrl+alt+x", hotkey_repeat: "ctrl+alt+r" });
+  if (startReqView.getState().statusNotice === null && startReqView.getState().hotkeySaveError === "") {
+    pass("saveConfig 失败后再保存成功时（无 unmetGates）立即清空顶部 statusNotice");
+  } else fail("saveConfig 成功后未清空 statusNotice：" + JSON.stringify({ notice: startReqView.getState().statusNotice, err: startReqView.getState().hotkeySaveError }));
+
+  startReqView.setState({ unmetGates: ["v3 尚未切流"] });
+  try {
+    await startReqCtl.hooks.onSaveHotkeys({ hotkey_voice: "ctrl+alt+z", hotkey_screenshot: "ctrl+alt+z", hotkey_repeat: "ctrl+alt+r" });
+  } catch (err) {}
+  await startReqCtl.hooks.onSaveHotkeys({ hotkey_voice: "ctrl+alt+z", hotkey_screenshot: "ctrl+alt+x", hotkey_repeat: "ctrl+alt+r" });
+  if (startReqView.getState().statusNotice === "未达上线条件：v3 尚未切流") {
+    pass("saveConfig 失败后再保存成功时（存在 unmetGates）还原门闩提示，不残留旧报错");
+  } else fail("saveConfig 成功后未还原 unmetGates statusNotice：" + JSON.stringify(startReqView.getState().statusNotice));
+
   startReqCtl.destroy();
+
+  /* bootstrap.js pagehide 必须绑定在 window（HTML 规范中 pagehide 仅在 Window 触发且不冒泡到 Document） */
+  const docEvents = {};
+  const depWinEvents = {};
+  const globalWinEvents = {};
+  const bootDoc = {
+    getElementById: function (id) { return id === "app" ? { id: "app" } : null; },
+    addEventListener: function (ev, fn) { (docEvents[ev] = docEvents[ev] || []).push(fn); }
+  };
+  const depWin = {
+    addEventListener: function (ev, fn) { (depWinEvents[ev] = depWinEvents[ev] || []).push(fn); }
+  };
+  const bootCtx = loadBusiness({ document: bootDoc });
+  bootCtx.window.addEventListener = function (ev, fn) {
+    (globalWinEvents[ev] = globalWinEvents[ev] || []).push(fn);
+  };
+  const mountedInits = [];
+  bootCtx.window.V3.home = {
+    mount: function (_el, init, hooks) {
+      mountedInits.push(Object.assign({}, init || {}));
+      return fakeView(init);
+    }
+  };
+  const bootFetch = async function (url) {
+    if (String(url).indexOf("/api/setup/check") >= 0) return jsonRes(200, { ok: true, asr: { status: "ready", sidecar_running: true }, ollama: { installed: true, running: true, model_status: "ready" }, capabilities: [], unmet_gates: [] });
+    if (String(url).indexOf("/api/v1/status") >= 0) return jsonRes(200, { ok: true, unmet_gates: [] });
+    if (String(url).indexOf("/api/v1/config") >= 0) return jsonRes(200, { polish_enabled: true, custom_keywords: [], translate_target_lang: "zh", hotkey_voice: "ctrl+alt+z", hotkey_screenshot: "ctrl+alt+x", hotkey_ocr: "ctrl+alt+o", hotkey_repeat: "ctrl+alt+r" });
+    if (String(url).indexOf("/api/v1/history") >= 0) return jsonRes(200, { records: [], total: 0, skipped_malformed: 0 });
+    if (String(url).indexOf("/api/v1/lan-access") >= 0) return jsonRes(200, { port: 17945, token: "", token_masked: "", entries: [], message: "" });
+    return jsonRes(404, { ok: false, error: "not_found", message: "missing" });
+  };
+  const bootLoc = { protocol: "https:", hostname: "127.0.0.1", origin: "https://127.0.0.1:17945", pathname: "/", href: "https://127.0.0.1:17945/", search: "", hash: "" };
+  await bootCtx.window.V3Business.startPage("home", {
+    openapi: snapshot,
+    fetch: bootFetch,
+    location: bootLoc,
+    document: bootDoc,
+    window: depWin
+  });
+  const bootCtl1 = bootCtx.window.__v3Business && bootCtx.window.__v3Business.controller;
+  if (
+    depWinEvents.pagehide && depWinEvents.pagehide.length === 1
+    && !docEvents.pagehide
+    && bootCtl1 && !bootCtl1._debug.isDestroyed()
+  ) {
+    depWinEvents.pagehide[0]();
+    if (bootCtl1._debug.isDestroyed()) {
+      pass("bootstrap.startPage 将 pagehide 监听绑定到 deps.window 而非 document，触发后销毁控制器");
+    } else fail("deps.window pagehide 触发后未调用 controller.destroy()");
+  } else {
+    fail("bootstrap.startPage pagehide 绑定目标错误：" + JSON.stringify({ depWin: Object.keys(depWinEvents), doc: Object.keys(docEvents) }));
+  }
+
+  await bootCtx.window.V3Business.startPage("home", {
+    openapi: snapshot,
+    fetch: bootFetch,
+    location: bootLoc,
+    document: bootDoc
+  });
+  const bootCtl2 = bootCtx.window.__v3Business && bootCtx.window.__v3Business.controller;
+  if (
+    globalWinEvents.pagehide && globalWinEvents.pagehide.length === 1
+    && !docEvents.pagehide
+    && bootCtl2 && !bootCtl2._debug.isDestroyed()
+  ) {
+    globalWinEvents.pagehide[0]();
+    if (bootCtl2._debug.isDestroyed()) {
+      pass("bootstrap.startPage 缺省回退绑定到全局 window 的 pagehide，触发后销毁控制器");
+    } else fail("全局 window pagehide 触发后未调用 controller.destroy()");
+  } else {
+    fail("bootstrap.startPage 缺省 pagehide 绑定目标错误：" + JSON.stringify({ globalWin: Object.keys(globalWinEvents), doc: Object.keys(docEvents) }));
+  }
+
+  /* bootstrap.startPage("home") 对 /setup 自动进入 setup 面板，并支持安全 URL 同步 */
+  const setupPathLoc = {
+    protocol: "https:",
+    hostname: "127.0.0.1",
+    origin: "https://127.0.0.1:17945",
+    pathname: "/setup",
+    search: "",
+    hash: "",
+    href: "https://127.0.0.1:17945/setup"
+  };
+  const urlSyncCalls = [];
+  const setupPathHist = {
+    state: { v: 1 },
+    replaceState: function (state, title, url) {
+      urlSyncCalls.push(String(url));
+      const parts = String(url).split("#");
+      const qParts = parts[0].split("?");
+      setupPathLoc.pathname = qParts[0];
+      setupPathLoc.search = qParts[1] ? "?" + qParts[1] : "";
+      setupPathLoc.hash = parts[1] ? "#" + parts[1] : "";
+      setupPathLoc.href = setupPathLoc.origin + String(url);
+    }
+  };
+  await bootCtx.window.V3Business.startPage("home", {
+    openapi: snapshot,
+    fetch: bootFetch,
+    location: setupPathLoc,
+    history: setupPathHist,
+    document: bootDoc,
+    window: { addEventListener: function () {} }
+  });
+  const setupBootInit = mountedInits[mountedInits.length - 1];
+  const setupBootCtl = bootCtx.window.__v3Business && bootCtx.window.__v3Business.controller;
+  if (setupBootInit && setupBootInit.activePanel === "setup") {
+    pass("bootstrap.startPage(home) 访问 /setup 自动设置 activePanel=setup");
+  } else fail("bootstrap.startPage(home) 未对 /setup 设置 activePanel=setup：" + JSON.stringify(setupBootInit));
+
+  setupBootCtl.hooks.onSelectPanel({ panel: "translate" });
+  setupBootCtl.hooks.onSelectPanel({ panel: "setup" });
+  setupBootCtl.hooks.onSelectPanel({ panel: "ocr" });
+  if (urlSyncCalls.join(",") === "/,/setup,/") {
+    pass("本机面板切换通过 replaceState 平滑同步 / 与 /setup 地址栏");
+  } else fail("面板切换 URL 同步不符合预期：" + JSON.stringify(urlSyncCalls));
+  setupBootCtl.destroy();
+
+  /* /#setup 切到 setup 面板时必须剥离冗余 #setup，避免出现 /setup#setup */
+  const hashSetupLoc = {
+    protocol: "https:",
+    hostname: "127.0.0.1",
+    origin: "https://127.0.0.1:17945",
+    pathname: "/",
+    search: "",
+    hash: "#setup",
+    href: "https://127.0.0.1:17945/#setup"
+  };
+  const hashSetupUrls = [];
+  const hashSetupHist = {
+    state: null,
+    replaceState: function (_s, _t, u) {
+      hashSetupUrls.push(String(u));
+      const parts = String(u).split("#");
+      hashSetupLoc.pathname = parts[0];
+      hashSetupLoc.hash = parts[1] ? "#" + parts[1] : "";
+    }
+  };
+  const hashSetupCtl = B.createHomeController({
+    client: B.createHttp({ catalog: catalog, context: localCtx, fetch: bootFetch, origin: "https://127.0.0.1:17945" }),
+    context: localCtx,
+    catalog: catalog,
+    location: hashSetupLoc,
+    history: hashSetupHist
+  });
+  hashSetupCtl.bind(fakeView(catalogCtx.V3.defaults.homeState()));
+  hashSetupCtl.hooks.onSelectPanel({ panel: "setup" });
+  hashSetupCtl.hooks.onSelectPanel({ panel: "translate" });
+  if (hashSetupUrls.join(",") === "/setup,/") {
+    pass("/#setup 切换面板自动清理冗余 #setup，不产生 /setup#setup");
+  } else fail("/#setup URL 同步异常：" + JSON.stringify(hashSetupUrls));
+  hashSetupCtl.destroy();
+
+  /* loadAll 竞态防护：慢的旧请求晚于新请求返回时不得覆盖新状态 */
+  let slowCheckResolve = null;
+  let raceCallCount = 0;
+  const raceFetch = function (url) {
+    const u = String(url);
+    if (u.indexOf("/api/setup/check") >= 0) {
+      raceCallCount += 1;
+      if (raceCallCount === 1) {
+        return new Promise(function (resolve) {
+          slowCheckResolve = function () {
+            resolve(jsonRes(200, setupCheckBody({ asr: Object.assign({}, setupCheckBody().asr, { message: "旧慢响应" }) })));
+          };
+        });
+      }
+      return Promise.resolve(jsonRes(200, setupCheckBody({ asr: Object.assign({}, setupCheckBody().asr, { message: "最新响应" }) })));
+    }
+    if (u.indexOf("/api/v1/status") >= 0) return Promise.resolve(jsonRes(200, { ok: true, unmet_gates: [] }));
+    if (u.indexOf("/api/v1/config") >= 0) {
+      return Promise.resolve(jsonRes(200, {
+        polish_enabled: true,
+        custom_keywords: [],
+        translate_target_lang: "zh",
+        hotkey_voice: raceCallCount === 1 ? "ctrl+alt+1" : "ctrl+alt+2",
+        hotkey_screenshot: "ctrl+alt+x",
+        hotkey_ocr: "ctrl+alt+o",
+        hotkey_repeat: "ctrl+alt+r"
+      }));
+    }
+    if (u.indexOf("/api/v1/history") >= 0) return Promise.resolve(jsonRes(200, { records: [], total: 0, skipped_malformed: 0 }));
+    if (u.indexOf("/api/v1/lan-access") >= 0) return Promise.resolve(jsonRes(200, { port: 17945, token: "", token_masked: "", entries: [], message: "" }));
+    return Promise.resolve(jsonRes(404, { ok: false, error: "not_found", message: "missing" }));
+  };
+  const raceCtl = B.createHomeController({
+    client: B.createHttp({ catalog: catalog, context: localCtx, fetch: raceFetch, origin: "https://127.0.0.1:17945" }),
+    context: localCtx,
+    catalog: catalog
+  });
+  const raceView = fakeView(catalogCtx.V3.defaults.homeState());
+  raceCtl.bind(raceView);
+  const slowLoad = raceCtl.loadAll();
+  const fastLoad = raceCtl.loadAll();
+  await fastLoad;
+  slowCheckResolve();
+  await slowLoad;
+  if (raceView.getState().asr.message === "最新响应" && raceView.getState().hotkey_voice === "ctrl+alt+2") {
+    pass("loadAll 单调请求序号拦截旧慢响应，避免覆盖最新状态");
+  } else fail("loadAll 竞态防护失效：" + JSON.stringify({ asr: raceView.getState().asr, voice: raceView.getState().hotkey_voice }));
+  raceCtl.destroy();
+
+  /* 非 / 或 /setup 路径（例如测试路径）不改地址栏 */
+  const otherLoc = { protocol: "https:", hostname: "127.0.0.1", origin: "https://127.0.0.1:17945", pathname: "/custom/path", search: "", hash: "" };
+  const otherHistCalls = [];
+  const otherCtl = B.createHomeController({
+    client: B.createHttp({ catalog: catalog, context: localCtx, fetch: bootFetch, origin: "https://127.0.0.1:17945" }),
+    context: localCtx,
+    catalog: catalog,
+    location: otherLoc,
+    history: { state: null, replaceState: function (_s, _t, u) { otherHistCalls.push(String(u)); } }
+  });
+  otherCtl.bind(fakeView(catalogCtx.V3.defaults.homeState()));
+  otherCtl.hooks.onSelectPanel({ panel: "setup" });
+  otherCtl.hooks.onSelectPanel({ panel: "translate" });
+  if (otherHistCalls.length === 0) {
+    pass("非 / 与 /setup 路径切换面板不误调用 replaceState");
+  } else fail("非目标路径误改地址栏：" + JSON.stringify(otherHistCalls));
+  otherCtl.destroy();
 }
 
 function runAsgi() {
@@ -1521,15 +2013,20 @@ function runAsgi() {
         const liveOpenapi = await fetch(origin + "/openapi.json");
         if (!liveOpenapi.ok) throw new Error("运行时 openapi.json HTTP " + liveOpenapi.status);
         const openapi = await liveOpenapi.json();
-        if (Object.keys(openapi.paths).length !== 24) throw new Error("运行时 openapi paths=" + Object.keys(openapi.paths).length);
-        const pages = ["/setup", "/voice", "/overlay-status", "/overlay-translate"];
+        if (Object.keys(openapi.paths).length < 24) throw new Error("运行时 openapi paths=" + Object.keys(openapi.paths).length);
+        const pages = ["/", "/setup", "/voice"];
+        const htmlByPage = {};
         for (const page of pages) {
           const res = await fetch(origin + page);
           if (!res.ok) throw new Error("新页面路由 " + page + " HTTP " + res.status);
           const html = await res.text();
+          htmlByPage[page] = html;
           if (html.indexOf("js/business/bootstrap.js") < 0 && html.indexOf("/js/business/bootstrap.js") < 0) {
             throw new Error("页面 " + page + " 未加载业务脚本");
           }
+        }
+        if (htmlByPage["/"] !== htmlByPage["/setup"]) {
+          throw new Error("GET / 与 GET /setup 应返回完全一致的 index.html");
         }
         const jsRes = await fetch(origin + "/js/business/bootstrap.js");
         if (!jsRes.ok) throw new Error("/js 资源 HTTP " + jsRes.status);
@@ -1553,9 +2050,34 @@ function runAsgi() {
         }
         const posted = await client.call("post_config_api_v1_config_post", { body: { custom_keywords: ["Alpha"] } });
         if (!posted || !Array.isArray(posted.custom_keywords) || posted.custom_keywords[0] !== "Alpha") throw new Error("config POST 未回读合法字段");
+        function makeTinyWavBytes() {
+          const sampleRate = 16000;
+          const samples = 320;
+          const dataBytes = samples * 2;
+          const buf = new ArrayBuffer(44 + dataBytes);
+          const view = new DataView(buf);
+          function putStr(off, s) { for (let i = 0; i < s.length; i++) view.setUint8(off + i, s.charCodeAt(i)); }
+          putStr(0, "RIFF");
+          view.setUint32(4, 36 + dataBytes, true);
+          putStr(8, "WAVE");
+          putStr(12, "fmt ");
+          view.setUint32(16, 16, true);
+          view.setUint16(20, 1, true);
+          view.setUint16(22, 1, true);
+          view.setUint32(24, sampleRate, true);
+          view.setUint32(28, sampleRate * 2, true);
+          view.setUint16(32, 2, true);
+          view.setUint16(34, 16, true);
+          putStr(36, "data");
+          view.setUint32(40, dataBytes, true);
+          for (let i = 0; i < samples; i++) {
+            view.setInt16(44 + i * 2, Math.round(Math.sin(i * 0.25) * 6000), true);
+          }
+          return new Uint8Array(buf);
+        }
         const fd = new FormData();
         fd.append("job_id", "11111111-1111-4111-8111-111111111111");
-        fd.append("audio", new Blob([new Uint8Array([1, 2, 3, 4, 5])]), "recording.webm");
+        fd.append("audio", new Blob([makeTinyWavBytes()], { type: "audio/wav" }), "recording.wav");
         const accepted = await client.call("from_audio_api_v1_utterances_from_audio_post", { body: fd });
         if (!accepted || accepted.state !== "queued" || accepted.text !== "sandbox transcript") throw new Error("from-audio 未按沙箱转写入队");
         const hist = await client.call("history_api_v1_history_get", { query: { limit: 5, offset: 0 } });

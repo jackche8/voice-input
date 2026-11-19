@@ -16,16 +16,20 @@ import httpx
 
 from _asr import AsrSidecarClient
 from _asr_provider import SidecarStreamProvider
+from _audio_codec import decode_audio_to_pcm16k
 from _config import ConfigStore, migrate_to_product_config
 from _contracts import (
+    DEFAULT_OLLAMA_BASE_URL,
     PRODUCT_ASR_MODEL,
     SIDECAR_DEFAULT_BASE_URL,
     ErrorCode,
     LogicError,
+    OcrTextBlock,
     PolishRequest,
     PolishResponse,
     SetupProgress,
     SetupTaskKind,
+    SttResponse,
     TranslateRequest,
     TranslateResponse,
 )
@@ -37,10 +41,11 @@ from _jobs import JobStore
 from _jobs_service import JobsService
 from _linux.conflicts import scan_hotkey_conflicts
 from _ocr import image_to_text
-from _ollama import DEFAULT_OLLAMA_BASE_URL, OllamaClient
+from _ocr_layout import extract_ocr_layout
+from _ollama import OllamaClient
 from _polish import polish_text
 from _session_finals import SessionFinalIndex
-from _translate import translate_text
+from _translate import translate_blocks as translate_ocr_blocks, translate_text
 from _utterance import UtteranceService
 from _v3.auth import SERVER_PORT, AuthSettings
 from _v3.lan_access import LanAccessService, list_physical_lan_ipv4
@@ -159,7 +164,13 @@ def _tesseract_languages() -> list[str]:
 
 
 def _client(base_url: str, adapters: SystemAdapters, *, timeout: httpx.Timeout | float) -> httpx.Client:
-    return httpx.Client(base_url=base_url, timeout=timeout, transport=adapters.http_transport, follow_redirects=True)
+    return httpx.Client(
+        base_url=base_url,
+        timeout=timeout,
+        transport=adapters.http_transport,
+        follow_redirects=True,
+        trust_env=False,
+    )
 
 
 def asr_start_with_preflight(
@@ -169,6 +180,7 @@ def asr_start_with_preflight(
     sidecar_probe: Callable[[], SidecarProbe],
     run: Callable[..., subprocess.CompletedProcess],
     which: Callable[[str], str | None],
+    environ: Mapping[str, str] | None = None,
 ) -> SetupAction:
     """设置页「启动识别服务」：已加载 → 不再 start；单元已在运行/启动中 → 不预检，交给 start 动作按实际状态判定；
     否则先做与 sidecar 同源的显存预检（读单元真实 ExecStart），不足或无法判断 → 失败且不 start。
@@ -185,7 +197,7 @@ def asr_start_with_preflight(
             # 顶层导入会让 runpy 在执行 __main__ 前已载入该模块并打印 RuntimeWarning 混进启动输出。
             from _v3.gpu_preflight import asr_gpu_preflight_for_unit
 
-            result = asr_gpu_preflight_for_unit(unit, run=run, which=which)
+            result = asr_gpu_preflight_for_unit(unit, run=run, which=which, environ=environ)
             if not result.ok:
                 raise LogicError(
                     ErrorCode.dependency_failed,
@@ -218,7 +230,12 @@ def _setup_service(
 
     def hotkey_scan():
         cfg = config.load()
-        bindings = HotkeyBindings(voice=cfg.hotkey_voice, screenshot=cfg.hotkey_screenshot, repeat=cfg.hotkey_repeat)
+        bindings = HotkeyBindings(
+            voice=cfg.hotkey_voice,
+            screenshot=cfg.hotkey_screenshot,
+            repeat=cfg.hotkey_repeat,
+            ocr=cfg.hotkey_ocr,
+        )
         return scan_hotkey_conflicts(bindings, run=adapters.run, which=adapters.which)
 
     def capabilities(session: str):
@@ -273,6 +290,7 @@ def _setup_service(
             sidecar_probe=sidecar_probe,
             run=adapters.run,
             which=adapters.which,
+            environ=adapters.environ,
         ),
         SetupTaskKind.asr_download: asr_download_action(
             python=paths.asr_python,
@@ -315,11 +333,28 @@ def compose_production_runtime(
     asr = AsrSidecarClient(base_url=endpoints.sidecar_url, transport=adapters.http_transport)
     ollama = OllamaClient(base_url=endpoints.ollama_url, transport=adapters.http_transport)
 
+    def transcribe(audio: bytes, *, language: str | None = None, context: str | None = None) -> SttResponse:
+        return asr.transcribe(
+            audio,
+            language=language,
+            context=context,
+            filename="audio.pcm",
+            content_type="audio/pcm",
+        )
+
     def polish(request: PolishRequest, *, model: str | None = None) -> PolishResponse:
         return polish_text(request, model=model or config.load().ollama_model, client=ollama)
 
     def translate(request: TranslateRequest) -> TranslateResponse:
         return translate_text(request, model=config.load().ollama_model, client=ollama)
+
+    def translate_blocks(blocks: list[OcrTextBlock], *, target_lang: str) -> list[OcrTextBlock]:
+        return translate_ocr_blocks(
+            blocks,
+            target_lang=target_lang,
+            model=config.load().ollama_model,
+            client=ollama,
+        )
 
     utterance = UtteranceService(
         jobs=jobs,
@@ -328,7 +363,7 @@ def compose_production_runtime(
         config=config,
         finals=finals,
         polish=polish,
-        transcribe=asr.transcribe,
+        transcribe=transcribe,
     )
     return Runtime(
         config=config,
@@ -338,10 +373,13 @@ def compose_production_runtime(
         finals=finals,
         utterance=utterance,
         auth=AuthSettings(token=token, port=endpoints.port),
-        transcribe=asr.transcribe,
+        transcribe=transcribe,
         polish=polish,
         translate=translate,
+        translate_blocks=translate_blocks,
         ocr=image_to_text,
+        ocr_layout=extract_ocr_layout,
+        decode_audio=decode_audio_to_pcm16k,
         stream_provider=SidecarStreamProvider(asr),
         setup=_setup_service(paths, endpoints, adapters, config),
         lan=LanAccessService(token=token, list_ips=adapters.list_ips, port=endpoints.port),

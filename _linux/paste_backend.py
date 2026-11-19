@@ -1,29 +1,153 @@
-"""真实注入后端：把已定稿文本送到当前焦点窗口，并在粘贴后归还用户原剪贴板。
+"""真实注入后端：把已定稿文本送到当前焦点窗口，并在粘贴后无损归还用户原剪贴板（含图片）。
 
-焦点比对在 `_inject.FocusBoundInjector`（按 job 绑定的焦点）完成，本模块只负责"怎么打出去"。
-证据规则：
-- IBus 直接提交成功 / 粘贴按键已完整发出 → proved_output
-- 剪贴板写入失败或所有按键通道都不可用（一个键都没发）→ proved_none
-- 按键发送途中异常 → 无法证明，partial_or_unknown
-
-输入层级（迁自旧 daemon._type_text，语义不变）：
-Tier 1: IBus commit_text —— 输入法框架直接提交（最可靠，无剪贴板副作用）
-Tier 2: uinput —— 内核级独立虚拟设备（不触碰用户物理修饰键，首选粘贴方式）
-Tier 3: xdotool / wtype —— 子进程合成粘贴键（回退，检查返回码）
-Tier 4: pynput —— XTest 合成按键（最后回退）
+焦点比对在 `_inject.FocusBoundInjector`（按 job 绑定的焦点）完成，本模块负责输入与窗口级安全护栏：
+1. 自窗口拦截保护：若焦点落在自身进程或 `ollama-voice-input` 浮窗，立即拒绝盲粘并返回明确原因（proved_none）。
+2. 智能粘贴键选择：X11 与 Wayland 默认均发 `Ctrl+V`；仅当 `terminal=True` 或 X11/XWayland 窗口
+   `WM_CLASS` 命中终端模拟器列表时发 `Ctrl+Shift+V`（根治 Wayland 硬发 `Ctrl+Shift+V` 导致浏览器/编辑器失效）。
+3. 剪贴板图片无损保护：支持 `SystemClipboard.snapshot()` 快照原始图片字节与 MIME，粘贴后延迟 `0.55s` 精确写回。
 """
 from __future__ import annotations
 
+import contextlib
+import os
 import shutil
 import subprocess
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
 
+from _focus import TERMINALS
 from _inject import InjectEvidence
-from _linux.clipboard import Clipboard
+from _linux.clipboard import Clipboard, ClipboardSnapshot, SystemClipboard
 from _linux.ibus import IBusCommitter
 from _linux.inject_guard import InjectGuard
 from _linux.modifiers import ModifierJanitor
+
+PASTE_RESTORE_DELAY_S = 0.55
+_SELF_WM_KEYWORDS = ("ollama-voice-input", "ollama_voice_input")
+
+
+@dataclass(frozen=True)
+class FocusedWindowInfo:
+    window_id: int = 0
+    wm_class: tuple[str, ...] = ()
+    wm_name: str = ""
+    pid: int = 0
+    is_terminal: bool = False
+    is_self: bool = False
+
+
+def probe_x11_window_info(
+    display_factory=None,
+    *,
+    self_pid: int | None = None,
+) -> FocusedWindowInfo:
+    """探测当前 X11 / XWayland 焦点顶层窗口的 WM_CLASS、标题与 _NET_WM_PID。
+
+    在 Wayland 下若当前焦点是原生 Wayland 窗口，XWayland `get_input_focus` 返回 PointerRoot/None，
+    此时安全返回空 `FocusedWindowInfo`（`is_terminal=False, is_self=False`），默认采用 `Ctrl+V`。
+    """
+    if display_factory is None:
+        if not os.environ.get("DISPLAY"):
+            return FocusedWindowInfo()
+        try:
+            from Xlib import display as xdisplay
+        except Exception:
+            return FocusedWindowInfo()
+        factory = xdisplay.Display
+    else:
+        factory = display_factory
+
+    try:
+        dpy = factory()
+    except Exception:
+        return FocusedWindowInfo()
+
+    own_pid = os.getpid() if self_pid is None else self_pid
+    try:
+        focus = dpy.get_input_focus().focus
+        if not focus or isinstance(focus, int):
+            return FocusedWindowInfo()
+        root = dpy.screen().root
+        pid_atom = None
+        name_atom = None
+        try:
+            pid_atom = dpy.intern_atom("_NET_WM_PID")
+            name_atom = dpy.intern_atom("_NET_WM_NAME")
+        except Exception:
+            pass
+
+        window = focus
+        top_id = int(getattr(focus, "id", 0) or 0)
+        wm_class: tuple[str, ...] = ()
+        wm_name = ""
+        win_pid = 0
+
+        for _ in range(32):
+            wid = int(getattr(window, "id", 0) or 0)
+            if wid:
+                top_id = wid
+            if not wm_class:
+                try:
+                    cls = window.get_wm_class()
+                    if cls:
+                        wm_class = tuple(str(x) for x in cls if x)
+                except Exception:
+                    pass
+            if not wm_name:
+                if name_atom:
+                    try:
+                        prop = window.get_full_property(name_atom, 0)
+                        if prop and prop.value:
+                            val = prop.value
+                            wm_name = val.decode("utf-8", errors="replace") if isinstance(val, (bytes, bytearray)) else str(val)
+                    except Exception:
+                        pass
+                if not wm_name:
+                    try:
+                        raw_name = window.get_wm_name()
+                        if raw_name:
+                            wm_name = raw_name.decode("utf-8", errors="replace") if isinstance(raw_name, (bytes, bytearray)) else str(raw_name)
+                    except Exception:
+                        pass
+            if not win_pid and pid_atom:
+                try:
+                    prop = window.get_full_property(pid_atom, 0)
+                    if prop and prop.value:
+                        win_pid = int(prop.value[0])
+                except Exception:
+                    pass
+            try:
+                parent = window.query_tree().parent
+            except Exception:
+                break
+            if parent is None or parent == window or parent == root:
+                break
+            window = parent
+
+        lowered_classes = tuple(c.lower() for c in wm_class)
+        is_terminal = any(c in TERMINALS for c in lowered_classes)
+        lowered_name = wm_name.lower()
+        is_self = bool(
+            (win_pid and win_pid == own_pid)
+            or any(any(kw in c for kw in _SELF_WM_KEYWORDS) for c in lowered_classes)
+            or any(kw in lowered_name for kw in _SELF_WM_KEYWORDS)
+        )
+        return FocusedWindowInfo(
+            window_id=top_id,
+            wm_class=wm_class,
+            wm_name=wm_name,
+            pid=win_pid,
+            is_terminal=is_terminal,
+            is_self=is_self,
+        )
+    except Exception:
+        return FocusedWindowInfo()
+    finally:
+        try:
+            dpy.close()
+        except Exception:
+            pass
 
 
 class _PasteInterrupted(RuntimeError):
@@ -42,6 +166,7 @@ class LinuxPasteBackend:
         run: Callable[..., subprocess.CompletedProcess] = subprocess.run,
         which: Callable[[str], str | None] = shutil.which,
         sleep: Callable[[float], None] = time.sleep,
+        window_probe: Callable[[], FocusedWindowInfo] | None = None,
     ) -> None:
         self.session_type = session_type
         self.guard = guard
@@ -52,6 +177,12 @@ class LinuxPasteBackend:
         self._sleep = sleep
         self._xdotool = which("xdotool")
         self._wtype = which("wtype")
+        if window_probe is not None:
+            self._window_probe = window_probe
+        elif isinstance(clipboard, SystemClipboard):
+            self._window_probe = probe_x11_window_info
+        else:
+            self._window_probe = FocusedWindowInfo
 
     # ------------------------------------------------------------------
     def deliver(self, text: str, *, terminal: bool = False) -> InjectEvidence:
@@ -60,32 +191,56 @@ class LinuxPasteBackend:
             self.guard.open_window(3.0)  # 注入期间抓取器忽略回流按键
             try:
                 self._sleep(0.1)  # 等待焦点稳定
+                info = self._window_probe()
+                if info.is_self:
+                    detail = f"当前焦点位于自身窗口 ({info.wm_class or info.wm_name or info.pid})，已拦截盲粘"
+                    print(f"  输入: [BLOCKED] {detail}", flush=True)
+                    return InjectEvidence(False, False, True, method="self_window_blocked", detail=detail)
+                effective_terminal = bool(terminal or info.is_terminal)
                 if self.ibus.commit(text):
                     print(f"  输入: Tier1 IBus 直接提交成功 ({len(text)} 字)", flush=True)
                     return InjectEvidence(True, True, False, method="ibus", detail="已输入")
-                return self._paste_with_restore(text, terminal=terminal)
+                return self._paste_with_restore(text, terminal=effective_terminal)
             finally:
                 self.guard.open_window(0.2)  # 注入尾窗，覆盖回流事件延迟
 
+    def _take_snapshot(self) -> ClipboardSnapshot | str:
+        snap_fn = getattr(self.clipboard, "snapshot", None)
+        if callable(snap_fn):
+            return snap_fn()
+        return self.clipboard.read()
+
+    def _restore(self, saved: ClipboardSnapshot | str, injected_text: str) -> None:
+        if self.clipboard.read() != injected_text:
+            return
+        if isinstance(saved, ClipboardSnapshot):
+            restore_fn = getattr(self.clipboard, "restore_snapshot", None)
+            if callable(restore_fn):
+                restore_fn(saved)
+                return
+            self.clipboard.write(saved.text if saved.kind == "text" else "")
+            return
+        self.clipboard.write(saved)
+
     def _paste_with_restore(self, text: str, *, terminal: bool) -> InjectEvidence:
-        """先存用户剪贴板 → 写入本次文本 → 粘贴 → 仅在剪贴板仍是本次结果时恢复，避免覆盖用户新复制的内容。"""
-        old_clipboard = self.clipboard.read()
+        """快照原剪贴板（含 image/png）→ 写入文本 → 粘贴 → 延迟 0.55s 后仅在剪贴板未变时无损恢复。"""
+        saved = self._take_snapshot()
         error = self._write_verified(text)
         if error is not None:
             return InjectEvidence(False, False, True, method="clipboard", detail=error)
         try:
             method = self._send_paste(terminal=terminal)
         except _PasteInterrupted as exc:
-            self._restore(old_clipboard, text)
+            self._restore(saved, text)
             return InjectEvidence(False, False, False, method="paste", detail=str(exc))
         if method is None:
-            self._restore(old_clipboard, text)
+            self._restore(saved, text)
             print("  输入: [ERROR] 所有输入方式均不可用！", flush=True)
             return InjectEvidence(
                 False, False, True, method="none", detail="无法模拟粘贴：xdotool/uinput/pynput 均不可用"
             )
-        self._sleep(0.3)
-        self._restore(old_clipboard, text)
+        self._sleep(PASTE_RESTORE_DELAY_S)
+        self._restore(saved, text)
         return InjectEvidence(True, True, False, method=method, detail="已发送粘贴")
 
     def _write_verified(self, text: str) -> str | None:
@@ -108,29 +263,26 @@ class LinuxPasteBackend:
         self._sleep(0.3)
         return None
 
-    def _restore(self, old_clipboard: str, text: str) -> None:
-        if self.clipboard.read() == text:
-            self.clipboard.write(old_clipboard)
-
     # ------------------------------------------------------------------
     def _send_paste(self, *, terminal: bool) -> str | None:
         """返回成功的粘贴方式名；一个键都没发出返回 None；发送途中失败抛 _PasteInterrupted。"""
         print(f"  输入: 使用剪贴板粘贴 (终端={terminal}, 会话={self.session_type})", flush=True)
-        # 注入前等用户物理修饰键真正松开，避免与按住的 Ctrl/Alt 组合成误触发
         self.janitor.wait_released()
         if self.session_type == "wayland":
-            # Wayland 无法检测焦点窗口类型，始终 Ctrl+Shift+V（终端需要 Shift，其他应用视为"粘贴纯文本"）
-            if self._uinput_paste(True):
-                return "uinput"
-            if self._wtype and self._run_ok(
-                [self._wtype, "-M", "ctrl", "-M", "shift", "-k", "v", "-m", "shift", "-m", "ctrl"]
-            ):
-                return "wtype"
-        else:
-            # X11: 优先 uinput（独立设备，无 --clearmodifiers 重按竞态）
+            # Wayland 默认发送标准 Ctrl+V；仅在探测到终端模拟器时发送 Ctrl+Shift+V
             if self._uinput_paste(terminal):
                 return "uinput"
-            # X11 回退: xdotool（不用 --clearmodifiers；注入前已等修饰键松开；查返回码）
+            if self._wtype:
+                wtype_cmd = (
+                    [self._wtype, "-M", "ctrl", "-M", "shift", "-k", "v", "-m", "shift", "-m", "ctrl"]
+                    if terminal
+                    else [self._wtype, "-M", "ctrl", "-k", "v", "-m", "ctrl"]
+                )
+                if self._run_ok(wtype_cmd):
+                    return "wtype"
+        else:
+            if self._uinput_paste(terminal):
+                return "uinput"
             if self._xdotool:
                 combo = "ctrl+shift+v" if terminal else "ctrl+v"
                 if self._run_ok([self._xdotool, "key", combo]):
@@ -149,11 +301,7 @@ class LinuxPasteBackend:
         return True
 
     def _uinput_paste(self, is_term: bool) -> bool:
-        """用 uinput 合成 Ctrl(+Shift)+V 粘贴，成功返回 True。
-
-        press→syn→release→syn 全程配对，finally 幂等清零并补一次 syn，确保 release 帧真正被
-        内核消费（否则 release 滞留内核队列，消费者视角按键持续卡住）。
-        """
+        """用 uinput 合成 Ctrl(+Shift)+V 粘贴，成功返回 True。"""
         uinput = self.janitor.uinput
         if not uinput:
             return False
@@ -194,25 +342,28 @@ class LinuxPasteBackend:
         kb, Key = self.janitor.kb, self.janitor.Key
         if kb is None:
             return None
+        kb_lock = getattr(self.janitor, "kb_lock", None)
+        guard_ctx = kb_lock if kb_lock is not None else contextlib.nullcontext()
         pressed_keys: list = [Key.ctrl]
         if terminal:
             pressed_keys.append(Key.shift)
         held: list = []
-        try:
-            for k in pressed_keys:
-                kb.press(k)
-                held.append(k)
-            kb.tap("v")
-        except Exception as exc:
-            print(f"  输入: Tier4 pynput 失败: {exc}", flush=True)
-            if held:
-                raise _PasteInterrupted(f"pynput 粘贴中途失败: {exc}") from exc
-            return None
-        finally:
-            for k in reversed(held):
-                try:
-                    kb.release(k)
-                except Exception:
-                    pass
-            self.janitor.clear_pynput()
+        with guard_ctx:
+            try:
+                for k in pressed_keys:
+                    kb.press(k)
+                    held.append(k)
+                kb.tap("v")
+            except Exception as exc:
+                print(f"  输入: Tier4 pynput 失败: {exc}", flush=True)
+                if held:
+                    raise _PasteInterrupted(f"pynput 粘贴中途失败: {exc}") from exc
+                return None
+            finally:
+                for k in reversed(held):
+                    try:
+                        kb.release(k)
+                    except Exception:
+                        pass
+                self.janitor.clear_pynput()
         return "pynput"

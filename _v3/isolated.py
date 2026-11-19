@@ -1,7 +1,7 @@
 """显式隔离候选组合入口。复用 build_sandbox_runtime + create_app，不另建业务栈。
 
 调用方必须传入隔离 root、测试 token，以及（可选）证书、回环服务地址、已构造的能力。
-不读取 live 配置/队列/历史/token，不绑定 17945/17946/11434，不把夹具当成生产。
+不读取 live 配置/队列/历史/token，不绑定 17945/17946/17947/11434，不把夹具当成生产。
 compose_production_runtime 仍保持未达标门闩，本入口不得绕过或宣称生产就绪。
 """
 from __future__ import annotations
@@ -37,7 +37,7 @@ from _v3.setup_service import SetupService
 from _v3_app import create_app
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-FORBIDDEN_PORTS = frozenset({17945, 17946, 11434})
+FORBIDDEN_PORTS = frozenset({17945, 17946, 17947, 11434})
 ISOLATED_UNMET_GATES: tuple[str, ...] = (
     "isolated candidate composition: 非生产，未切流，夹具不得当成官方引擎。",
 ) + PRODUCTION_UNMET_GATES

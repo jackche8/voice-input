@@ -1,4 +1,4 @@
-"""扫描 GNOME 桌面级快捷键冲突（只读 gsettings）。不修改任何系统设置。
+"""扫描 GNOME 桌面级快捷键冲突（只读 gsettings，覆盖 voice / screenshot / ocr / repeat 四键）。
 
 读取来源：5 个 GNOME 键位 schema、media-keys 自定义快捷键、GNOME 全局快捷键授权表
 `org.gnome.settings-daemon.global-shortcuts`（其它应用经 portal 登记的组合键；排除本应用 app id）。
@@ -85,8 +85,6 @@ def _drop_variant_brackets(raw: str) -> str:
 
 
 def _parse_string_list(raw: str) -> list[str] | None:
-    """解析 `['<Super>a']` / `'<Alt>z'` / `@as []`；不是字符串或字符串列表类型返回 None（不是快捷键键值）。
-    看起来是字符串/列表但解析失败抛 _Unread。"""
     text = _strip_type(raw)
     if not text or text[0] not in "['\"":
         return None
@@ -102,8 +100,7 @@ def _parse_string_list(raw: str) -> list[str] | None:
 
 
 def parse_global_shortcuts(raw: str) -> list[tuple[str, list[str]]]:
-    """解析一个应用的 global-shortcuts `shortcuts` 值：[(shortcut_id, [accel...])]。
-    只取实际出现 'shortcuts' 的条目；格式不符抛 _Unread。"""
+    """解析一个应用的 global-shortcuts `shortcuts` 值：[(shortcut_id, [accel...])]。"""
     text = _strip_type(raw)
     try:
         value = ast.literal_eval(_drop_variant_brackets(text))
@@ -130,12 +127,13 @@ def scan_hotkey_conflicts(
     run: Runner = subprocess.run,
     which: Callable[[str], str | None] = shutil.which,
 ) -> ConflictScan:
-    """只读扫描；返回已读到的冲突与未能读取的来源。"""
+    """只读扫描；返回已读到的冲突与未能读取的来源（含 voice / screenshot / ocr / repeat 四键）。"""
     if not which("gsettings"):
         return ConflictScan(conflicts=(), unread=("gsettings 不可用，未能读取任何 GNOME 快捷键登记",))
     wanted = {
         "voice": normalize_accel(bindings.voice),
         "screenshot": normalize_accel(bindings.screenshot),
+        "ocr": normalize_accel(bindings.ocr),
         "repeat": normalize_accel(bindings.repeat),
     }
     conflicts: list[str] = []

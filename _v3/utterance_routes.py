@@ -1,6 +1,8 @@
 """产品 utterance 路由：只调用唯一业务服务，不在此重写幂等或 fail-closed。"""
 from __future__ import annotations
 
+import asyncio
+
 from fastapi import APIRouter, File, Form, Request, UploadFile
 
 from _contracts import (
@@ -17,7 +19,7 @@ from _contracts import (
     UtteranceSource,
 )
 from _v3.limits import AUDIO_UPLOAD_NOTE, read_single_form_file
-from _v3.runtime import Runtime
+from _v3.runtime import Runtime, decode_uploaded_audio
 
 
 def _accepted(record: JobRecord) -> UtteranceAccepted:
@@ -32,11 +34,13 @@ def _accepted(record: JobRecord) -> UtteranceAccepted:
 
 def build_utterance_router(runtime: Runtime) -> APIRouter:
     router = APIRouter(tags=["utterances"])
+
     @router.post("/api/v1/utterances", response_model=UtteranceAccepted)
-    def create_utterance(body: UtteranceCreate) -> UtteranceAccepted:
+    async def create_utterance(body: UtteranceCreate) -> UtteranceAccepted:
         if body.source != UtteranceSource.desktop:
             raise LogicError(ErrorCode.invalid_request, "桌面 utterance 的 source 必须是 desktop")
-        return _accepted(runtime.utterance.submit_session_final(body))
+        record = await asyncio.to_thread(runtime.utterance.submit_session_final, body)
+        return _accepted(record)
 
     @router.post("/api/v1/utterances/from-audio", response_model=UtteranceAccepted, description=AUDIO_UPLOAD_NOTE)
     async def from_audio(
@@ -47,9 +51,10 @@ def build_utterance_router(runtime: Runtime) -> APIRouter:
         focus_id: str = Form(default=""),
         audio: UploadFile | None = File(default=None),
     ) -> UtteranceAccepted:
-        del audio
         if not job_id or not job_id.strip():
             raise LogicError(ErrorCode.invalid_request, "job_id 必传，服务器不会代为生成")
+        upload_ct = audio.content_type if audio is not None else None
+        upload_name = audio.filename if audio is not None else None
         payload = await read_single_form_file(
             request,
             field="audio",
@@ -57,13 +62,26 @@ def build_utterance_router(runtime: Runtime) -> APIRouter:
             missing="必须提供音频文件",
         )
         body = UtteranceFromAudio(job_id=job_id.strip(), language=language, context=context)
-        return _accepted(runtime.utterance.submit_from_audio(body, payload, focus_id=focus_id))
+        pcm = await asyncio.to_thread(
+            decode_uploaded_audio,
+            runtime,
+            payload,
+            content_type=upload_ct,
+            filename=upload_name,
+        )
+        record = await asyncio.to_thread(
+            runtime.utterance.submit_from_audio,
+            body,
+            pcm,
+            focus_id=focus_id,
+        )
+        return _accepted(record)
 
     @router.post(
         "/api/v1/utterances/resend",
         response_model=UtteranceResendQueued | UtteranceResendNeedsConfirmation,
     )
-    def resend(body: UtteranceResendRequest) -> UtteranceResendQueued | UtteranceResendNeedsConfirmation:
-        return runtime.utterance.submit_resend(body)
+    async def resend(body: UtteranceResendRequest) -> UtteranceResendQueued | UtteranceResendNeedsConfirmation:
+        return await asyncio.to_thread(runtime.utterance.submit_resend, body)
 
     return router

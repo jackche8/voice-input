@@ -66,17 +66,18 @@ HOST_REGISTRY_IFACE = "org.freedesktop.host.portal.Registry"
 _PORTAL_HOST_REGISTERED = False
 
 
-def register_portal_host_app(bus=None) -> bool:
+def register_portal_host_app(bus=None, *, force: bool = False, dbus_mod=None) -> bool:
     """把本进程注册成 host app，给 xdg-desktop-portal 一个明确的 app_id。
 
     systemd 服务没有桌面上下文，门户会报 "An app id is required"；
     org.freedesktop.host.portal.Registry 是官方给非沙箱宿主应用的注册入口。
+    `force=True` 时绕过进程级缓存强制重注册（用于 portal 进程重启后恢复）。
     """
     global _PORTAL_HOST_REGISTERED
-    if _PORTAL_HOST_REGISTERED:
+    if _PORTAL_HOST_REGISTERED and not force:
         return True
     try:
-        dbus = dbus_module()
+        dbus = dbus_mod if dbus_mod is not None else dbus_module()
         if bus is None:
             bus = dbus.SessionBus()
         obj = bus.get_object(PORTAL_NAME, PORTAL_PATH)
@@ -91,7 +92,8 @@ def register_portal_host_app(bus=None) -> bool:
         )
         iface.Register(app_id, options)
         _PORTAL_HOST_REGISTERED = True
-        print(f"  快捷键: portal host app 已注册 ({app_id})", flush=True)
+        suffix = "（重启后重注册）" if force else ""
+        print(f"  快捷键: portal host app 已注册{suffix} ({app_id})", flush=True)
         return True
     except Exception as exc:
         print(f"  快捷键: portal host app 注册失败 ({exc})", flush=True)

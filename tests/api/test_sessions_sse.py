@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import threading
 from pathlib import Path
 
-from _contracts import ErrorCode, SIDECAR_CHUNK_HEADER, SessionClosedReason
+import pytest
+
+from _contracts import ErrorCode, LogicError, SIDECAR_CHUNK_HEADER, SessionClosedReason, SessionFinalEvent
 from _v3_app import build_sandbox_runtime, create_app
 from tests.api.conftest import TEST_TOKEN, lan_client, lan_headers, local_client, local_headers
 from tests.api.providers import FixtureAsrProvider, fixture_transcribe
@@ -140,3 +143,76 @@ def test_unauthorized_sse_is_403(app):
 def test_fixture_provider_is_not_official_engine():
     provider = FixtureAsrProvider()
     assert provider.official_engine is False
+
+
+class BlockingFinishProvider(FixtureAsrProvider):
+    def __init__(self) -> None:
+        super().__init__(final_text="blocking-final")
+        self.entered_finish = threading.Event()
+        self.release_finish = threading.Event()
+
+    def finish(self, session_id: str) -> SessionFinalEvent:
+        self.entered_finish.set()
+        assert self.release_finish.wait(timeout=5.0), "finish barrier timed out"
+        return super().finish(session_id)
+
+
+def test_finishing_state_rejects_concurrent_chunk_finish_and_cancel_with_conflict(tmp_path: Path):
+    provider = BlockingFinishProvider()
+    runtime = build_sandbox_runtime(
+        root=tmp_path / "finishing-conflict",
+        token=TEST_TOKEN,
+        transcribe=fixture_transcribe,
+        stream_provider=provider,
+    )
+    app = create_app(runtime)
+    client = local_client(app)
+    sid = client.post("/api/v1/recognize/sessions", json={"language": "zh"}, headers=local_headers()).json()["session_id"]
+    hub = app.state.sessions
+
+    result_box: dict[str, object] = {}
+
+    def run_finish() -> None:
+        try:
+            result_box["closed"] = hub.finish(sid)
+        except BaseException as exc:  # pragma: no cover
+            result_box["exc"] = exc
+
+    worker = threading.Thread(target=run_finish, daemon=True)
+    worker.start()
+    try:
+        assert provider.entered_finish.wait(timeout=5.0), "provider.finish was not entered"
+        assert hub._sessions[sid].state == "finishing"
+
+        with pytest.raises(LogicError) as chunk_exc:
+            hub.accept_chunk(sid, 0, _pcm())
+        assert chunk_exc.value.code == ErrorCode.conflict
+
+        with pytest.raises(LogicError) as finish_exc:
+            hub.finish(sid)
+        assert finish_exc.value.code == ErrorCode.conflict
+
+        with pytest.raises(LogicError) as cancel_exc:
+            hub.cancel(sid)
+        assert cancel_exc.value.code == ErrorCode.conflict
+
+        chunk_http = client.post(
+            f"/api/v1/recognize/sessions/{sid}/chunks",
+            content=_pcm(),
+            headers={**local_headers(), SIDECAR_CHUNK_HEADER: "0", "Content-Type": "application/octet-stream"},
+        )
+        assert chunk_http.status_code == 409 and chunk_http.json()["error"] == ErrorCode.conflict
+
+        finish_http = client.post(f"/api/v1/recognize/sessions/{sid}/finish", headers=local_headers())
+        assert finish_http.status_code == 409 and finish_http.json()["error"] == ErrorCode.conflict
+
+        cancel_http = client.post(f"/api/v1/recognize/sessions/{sid}/cancel", headers=local_headers())
+        assert cancel_http.status_code == 409 and cancel_http.json()["error"] == ErrorCode.conflict
+    finally:
+        provider.release_finish.set()
+        worker.join(timeout=5.0)
+
+    assert "exc" not in result_box, result_box
+    assert result_box["closed"].reason == SessionClosedReason.finished
+    assert hub._sessions[sid].state == "finished"
+    assert provider.cancelled == set()

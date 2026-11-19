@@ -45,7 +45,7 @@ class FixtureStreamProvider:
 def fixture_transcribe(audio: bytes, *, language: str | None = None, context: str | None = None) -> SttResponse:
     del context
     try:
-        text = audio.decode("utf-8")
+        text = audio.decode("utf-8").strip()
         if text and text.isprintable() and "\x00" not in text:
             if text.startswith("FAIL:"):
                 from _contracts import ErrorCode, LogicError

@@ -11,6 +11,7 @@
     "translate_target_lang",
     "hotkey_voice",
     "hotkey_screenshot",
+    "hotkey_ocr",
     "hotkey_repeat"
   ];
 
@@ -49,6 +50,7 @@
     state.translate_target_lang = config.translate_target_lang != null ? config.translate_target_lang : null;
     state.hotkey_voice = config.hotkey_voice || "";
     state.hotkey_screenshot = config.hotkey_screenshot || "";
+    state.hotkey_ocr = config.hotkey_ocr || "";
     state.hotkey_repeat = config.hotkey_repeat || "";
     return state;
   }

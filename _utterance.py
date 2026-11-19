@@ -244,7 +244,6 @@ class UtteranceService:
                 ErrorCode.invalid_request,
                 "resend 必须显式提供 original_job_id，不能省略或扫描同文猜测",
             )
-        inherited_focus = focus_id or ""
         original = self._jobs.get(request.original_job_id)
         if isinstance(original, JobQueryUnknown) or original.found is False:
             raise LogicError(
@@ -252,9 +251,8 @@ class UtteranceService:
                 f"原 job 不存在: {request.original_job_id}",
             )
         record = original.job
-        if focus_id is None:
-            focus_id = request.focus_id
-        inherited_focus = focus_id if focus_id is not None else record.focus_id
+        effective_focus = focus_id if focus_id is not None else request.focus_id
+        inherited_focus = effective_focus if effective_focus is not None else record.focus_id
         if record.state == JobState.delivery_unknown and not request.confirm:
             return UtteranceResendNeedsConfirmation(
                 original_job_id=record.job_id,
@@ -273,6 +271,7 @@ class UtteranceService:
             source=UtteranceSource.resend,
             focus_id=inherited_focus,
             original_job_id=request.original_job_id,
+            skip_polish=True,
             payload={
                 "kind": "resend",
                 "job_id": request.job_id,
@@ -295,6 +294,7 @@ class UtteranceService:
         payload: dict[str, object],
         original_job_id: str | None = None,
         session_id: str | None = None,
+        skip_polish: bool = False,
     ) -> JobRecord:
         if not job_id:
             raise LogicError(ErrorCode.invalid_request, "job_id 必传")
@@ -322,8 +322,13 @@ class UtteranceService:
                     details={"job_id": job_id},
                 )
             else:
-                cfg = self._config.load()
-                final_text, polish_flag, polish_error = self._run_polish(raw_text, language, cfg)
+                if skip_polish:
+                    final_text = raw_text
+                    polish_flag = HistoryPolish.skipped
+                    polish_error = None
+                else:
+                    cfg = self._config.load()
+                    final_text, polish_flag, polish_error = self._run_polish(raw_text, language, cfg)
                 now = _iso(self._clock())
                 history = _history_with_meta(
                     HistoryRecord(
@@ -372,6 +377,9 @@ class UtteranceService:
                         exc.details,
                     ) from exc
             if polish_error is not None:
+                polish_details = dict(polish_error.details or {})
+                polish_details["raw_text"] = raw_text
+                polish_details["job_id"] = job_id
                 failed = _with_hash(
                     self._failed_record(
                         job_id=job_id,
@@ -387,12 +395,16 @@ class UtteranceService:
                 )
                 self._jobs.enqueue(failed)
                 self._events.publish(
-                    ProductErrorEvent(error=polish_error.code, message=polish_error.message)
+                    ProductErrorEvent(
+                        error=polish_error.code,
+                        message=polish_error.message,
+                        details=dict(polish_details),
+                    )
                 )
                 raise LogicError(
                     ErrorCode.polish_failed,
                     polish_error.message,
-                    polish_error.details,
+                    polish_details,
                 ) from polish_error
             record = _with_hash(
                 JobRecord(
@@ -428,8 +440,10 @@ class UtteranceService:
             )
         if record.state == JobState.failed:
             detail = record.detail or "job 已失败，未入队"
+            details: dict[str, object] = {"job_id": record.job_id, "state": record.state}
             if detail.startswith("polish failed"):
                 code = ErrorCode.polish_failed
+                details["raw_text"] = record.text
             elif detail.startswith("history write failed"):
                 code = ErrorCode.history_io
             else:
@@ -437,7 +451,7 @@ class UtteranceService:
             raise LogicError(
                 code,
                 detail,
-                details={"job_id": record.job_id, "state": record.state},
+                details=details,
             )
 
     def _run_polish(

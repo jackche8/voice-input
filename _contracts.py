@@ -497,6 +497,32 @@ class OcrTranslateResponse(BaseModel):
     target_lang: str
 
 
+class OcrTextBlock(BaseModel):
+    """识别到的单个文字区域及其局部采样背景/前景色，供原位遮挡译文浮窗直接渲染。"""
+
+    model_config = ConfigDict(extra="forbid")
+    bbox: tuple[int, int, int, int] = Field(
+        description="(x, y, width, height) 像素坐标，相对于所提交图片左上角"
+    )
+    ocr_text: str
+    translated_text: str = ""
+    bg_color: str = Field(default="#ffffff", description="采样自文字框外围边缘的不透明背景色 #RRGGBB")
+    fg_color: str = Field(default="#0f172a", description="高对比度前景文字色 #RRGGBB")
+
+
+class OcrInplaceResponse(BaseModel):
+    """POST /api/v1/ocr-inplace 响应：同时携带整段文本与分块原位排版坐标。"""
+
+    model_config = ConfigDict(extra="forbid")
+    ok: Literal[True] = True
+    text: str
+    ocr_text: str
+    target_lang: str
+    image_width: int = Field(ge=1)
+    image_height: int = Field(ge=1)
+    blocks: list[OcrTextBlock] = Field(default_factory=list)
+
+
 # ---------------------------------------------------------------------------
 # 历史（处理记录，不是投递记录）
 # ---------------------------------------------------------------------------
@@ -544,6 +570,7 @@ class AppConfig(BaseModel):
     baidu_appkey: str = ""
     hotkey_voice: str = "ctrl+alt+z"
     hotkey_screenshot: str = "ctrl+alt+x"
+    hotkey_ocr: str = "ctrl+alt+o"
     hotkey_repeat: str = "ctrl+alt+r"
     vision_model: str | None = None
     voice_mode: str | None = None
@@ -572,6 +599,8 @@ class ApiStatusResponse(BaseModel):
 
 PRODUCT_OLLAMA_MODEL = "qwen3.5:4b"
 PRODUCT_ASR_MODEL = "Qwen/Qwen3-ASR-1.7B"
+DEFAULT_OLLAMA_PORT = 17947
+DEFAULT_OLLAMA_BASE_URL = f"http://127.0.0.1:{DEFAULT_OLLAMA_PORT}"
 
 
 class AppConfigView(BaseModel):
@@ -583,6 +612,7 @@ class AppConfigView(BaseModel):
     translate_target_lang: str
     hotkey_voice: str
     hotkey_screenshot: str
+    hotkey_ocr: str = "ctrl+alt+o"
     hotkey_repeat: str
     ollama_model: str = Field(description="产品固定纠错/翻译模型，只读")
 
@@ -596,6 +626,7 @@ class AppConfigUpdate(BaseModel):
     translate_target_lang: str | None = Field(default=None, min_length=1)
     hotkey_voice: str | None = Field(default=None, min_length=1)
     hotkey_screenshot: str | None = Field(default=None, min_length=1)
+    hotkey_ocr: str | None = Field(default=None, min_length=1)
     hotkey_repeat: str | None = Field(default=None, min_length=1)
 
 
@@ -795,6 +826,8 @@ def contract_models() -> tuple[type[BaseModel], ...]:
         TranslateRequest,
         TranslateResponse,
         OcrTranslateResponse,
+        OcrTextBlock,
+        OcrInplaceResponse,
         HistoryRecord,
         HistoryListResponse,
         AppConfig,
@@ -863,6 +896,8 @@ __all__ = [
     "ApiStatusResponse",
     "AppConfig",
     "ChunkAccepted",
+    "DEFAULT_OLLAMA_BASE_URL",
+    "DEFAULT_OLLAMA_PORT",
     "ErrorBody",
     "ErrorCode",
     "HistoryListResponse",
@@ -880,6 +915,8 @@ __all__ = [
     "JobState",
     "JobStoreDocument",
     "LogicError",
+    "OcrInplaceResponse",
+    "OcrTextBlock",
     "OcrTranslateResponse",
     "PolishRequest",
     "PolishResponse",

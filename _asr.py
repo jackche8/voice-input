@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable, Iterator
+from typing import Any, NoReturn
 
 import httpx
 
@@ -45,6 +46,40 @@ def _assert_no_forbidden_runtime() -> None:
             )
 
 
+def _raise_http_error(status_code: int, body_text: str, *, prefix: str = "ASR sidecar") -> NoReturn:
+    snippet = (body_text or "")[:300]
+    if status_code == 504:
+        code = ErrorCode.timeout
+    elif status_code == 409:
+        code = ErrorCode.conflict
+    elif status_code == 404:
+        code = ErrorCode.not_found
+    elif status_code in (400, 422):
+        code = ErrorCode.invalid_request
+    else:
+        code = ErrorCode.asr_unavailable
+    message = f"{prefix} 返回 HTTP {status_code}"
+    details: dict[str, Any] = {"status_code": status_code, "body": snippet}
+    try:
+        parsed = json.loads(body_text) if body_text else None
+    except ValueError:
+        parsed = None
+    if isinstance(parsed, dict):
+        raw_code = parsed.get("error")
+        if isinstance(raw_code, str):
+            try:
+                code = ErrorCode(raw_code)
+            except ValueError:
+                pass
+        raw_message = parsed.get("message")
+        if isinstance(raw_message, str) and raw_message.strip():
+            message = raw_message.strip()
+        raw_details = parsed.get("details")
+        if isinstance(raw_details, dict):
+            details = {**raw_details, "status_code": status_code}
+    raise LogicError(code, message, details=details)
+
+
 class AsrSidecarClient:
     def __init__(
         self,
@@ -61,6 +96,7 @@ class AsrSidecarClient:
             base_url=self.base_url,
             timeout=timeout_s,
             transport=transport,
+            trust_env=False,
         )
 
     def close(self) -> None:
@@ -84,17 +120,7 @@ class AsrSidecarClient:
                 ErrorCode.asr_unavailable, f"无法连接 ASR sidecar: {exc}"
             ) from exc
         if resp.status_code >= 400:
-            snippet = (resp.text or "")[:300]
-            code = ErrorCode.not_found if resp.status_code == 404 else ErrorCode.asr_unavailable
-            if resp.status_code in (400, 422):
-                code = ErrorCode.invalid_request
-            if resp.status_code == 409:
-                code = ErrorCode.conflict
-            raise LogicError(
-                code,
-                f"ASR sidecar 返回 HTTP {resp.status_code}",
-                details={"status_code": resp.status_code, "body": snippet},
-            )
+            _raise_http_error(resp.status_code, resp.text or "")
         return resp
 
     def transcribe(
@@ -197,12 +223,8 @@ class AsrSidecarClient:
                 if attach_response is not None:
                     attach_response(resp)
                 if resp.status_code >= 400:
-                    snippet = (resp.read().decode("utf-8", errors="replace") if not resp.is_closed else "")[:300]
-                    raise LogicError(
-                        ErrorCode.asr_unavailable,
-                        f"ASR 事件流返回 HTTP {resp.status_code}",
-                        details={"status_code": resp.status_code, "body": snippet},
-                    )
+                    body_text = resp.read().decode("utf-8", errors="replace") if not resp.is_closed else ""
+                    _raise_http_error(resp.status_code, body_text, prefix="ASR 事件流")
                 yield from _parse_sse_events(resp.iter_lines())
         except LogicError:
             raise

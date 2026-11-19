@@ -33,6 +33,7 @@ REQUIRED_PATHS = {
     "/api/v1/polish",
     "/api/v1/translate",
     "/api/v1/ocr-translate",
+    "/api/v1/ocr-inplace",
     "/api/v1/history",
     "/api/v1/events",
     "/api/v1/config",
@@ -62,6 +63,8 @@ def test_generated_openapi_has_real_paths_and_sse_schemas(tmp_path: Path):
         "ErrorBody",
         "ApiStatusResponse",
         "UtteranceResendNeedsConfirmation",
+        "OcrInplaceResponse",
+        "OcrTextBlock",
     ):
         assert name in schemas, name
     events = first["paths"]["/api/v1/recognize/sessions/{session_id}/events"]["get"]
@@ -110,9 +113,12 @@ def test_openapi_security_and_errors_are_derived(tmp_path: Path):
     lan = spec["paths"]["/api/v1/stt"]["post"]
     local = spec["paths"]["/api/v1/status"]["get"]
     claim = spec["paths"]["/api/v1/jobs/claim"]["post"]
+    ocr_inplace = spec["paths"]["/api/v1/ocr-inplace"]["post"]
     assert lan["security"] == [{"VoiceToken": []}]
     assert local.get("security") == []
     assert claim.get("security") == []
+    assert ocr_inplace.get("security") == []
+    assert "403" in ocr_inplace["responses"] and "413" in ocr_inplace["responses"]
     assert "403" in lan["responses"] and "413" in lan["responses"]
     assert "403" in local["responses"]
     assert "413" not in local["responses"]

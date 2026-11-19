@@ -47,12 +47,13 @@ def _app_headers(comp) -> dict[str, str]:
 
 @contextmanager
 def fake_sidecar(*, engine: FakeEngine | None = None) -> Iterator[tuple[FakeEngine, LoopbackASGIServer, AsrSidecarClient, SidecarStreamProvider]]:
+    pre_open = {p for p in FORBIDDEN if _port_open(p)}
     engine = engine or FakeEngine(text="sidecar-fixture-final")
     server = LoopbackASGIServer(create_sidecar_app(engine))
     server.start()
     assert server.port not in FORBIDDEN_PORTS
-    assert not _port_open(17945)
-    assert not _port_open(17946)
+    for reserved in set(FORBIDDEN) - pre_open:
+        assert not _port_open(reserved), f"隔离 sidecar 启动意外占用了保留端口: {reserved}"
     client = AsrSidecarClient(base_url=server.base_url)
     provider = SidecarStreamProvider(client)
     try:
@@ -65,8 +66,8 @@ def fake_sidecar(*, engine: FakeEngine | None = None) -> Iterator[tuple[FakeEngi
         still = [t.name for t in threading.enumerate() if t.name.startswith("sidecar-sse-") or t.name == f"asgi-loopback-{port}"]
         assert not still, f"关闭后仍有残留线程: {still}"
         assert not _port_open(port), f"sidecar 端口未释放: {port}"
-        for reserved in FORBIDDEN:
-            assert not _port_open(reserved), f"保留端口被占用: {reserved}"
+        for reserved in set(FORBIDDEN) - pre_open:
+            assert not _port_open(reserved), f"保留端口被测试新占用: {reserved}"
 
 
 class _AppSsePump:

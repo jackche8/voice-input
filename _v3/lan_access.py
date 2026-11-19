@@ -112,7 +112,7 @@ class LanAccessService:
         self._make_qr = make_qr
 
     def _url(self, ip: str, token: str) -> str:
-        return f"https://{ip}:{self._port}{VOICE_PAGE_PATH}?token={quote(token, safe='')}"
+        return f"https://{ip}:{self._port}{VOICE_PAGE_PATH}#token={quote(token, safe='')}"
 
     def describe(self) -> LanAccessResponse:
         token = self._token
@@ -122,7 +122,7 @@ class LanAccessService:
             LanAccessEntry(
                 ip=ip,
                 url=self._url(ip, token),
-                url_masked=f"https://{ip}:{self._port}{VOICE_PAGE_PATH}?token={masked}",
+                url_masked=f"https://{ip}:{self._port}{VOICE_PAGE_PATH}#token={masked}",
                 qr_svg=self._make_qr(self._url(ip, token)),
             )
             for ip in ips

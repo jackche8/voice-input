@@ -5,6 +5,31 @@
   const RAW = "今天下午三点我们在会议室讨论一下新版本的发布计化，嗯，还有千问的接入方案";
   const POLISHED = "今天下午三点，我们在会议室讨论一下新版本的发布计划，还有 Qwen 的接入方案。";
 
+  const SAMPLE_HISTORY = {
+    records: [
+      {
+        timestamp: "11-09 10:42",
+        raw_text: RAW,
+        final_text: POLISHED,
+        language: "zh",
+        source: "desktop",
+        polish: "on",
+        job_id: "job-1"
+      },
+      {
+        timestamp: "11-09 10:37",
+        raw_text: "把这个函数拆成两个，一个负责读取一个负责校验",
+        final_text: "把这个函数拆成两个，一个负责读取一个负责校验",
+        language: "zh",
+        source: "web",
+        polish: "failed",
+        job_id: "job-2"
+      }
+    ],
+    total: 2,
+    skipped_malformed: 0
+  };
+
   global.V3Fixtures = {
     RAW: RAW,
     POLISHED: POLISHED,
@@ -14,6 +39,7 @@
       asr: {
         name: "Qwen3-ASR-1.7B",
         status: "ready",
+        sidecarRunning: true,
         sizeLabel: "3.5 GB",
         deviceLabel: "GPU 加速",
         action: null
@@ -32,36 +58,18 @@
       translate_target_lang: "zh",
       hotkey_voice: "ctrl+alt+z",
       hotkey_screenshot: "ctrl+alt+x",
+      hotkey_ocr: "ctrl+alt+o",
       hotkey_repeat: "ctrl+alt+r",
-      lanEntries: [{ url: "https://example.invalid/voice?token=test", qrSvg: null }],
+      lanEntries: [{
+        ip: "192.0.2.8",
+        urlMasked: "https://example.invalid/voice#token=a8f3••••7c21",
+        qrSvg: null
+      }],
       tokenMasked: "a8f3••••7c21",
       tokenPresent: true,
       serviceUrl: "https://example.invalid",
       localUrl: "https://127.0.0.1:8765",
-      history: {
-        records: [
-          {
-            timestamp: "11-09 10:42",
-            raw_text: RAW,
-            final_text: POLISHED,
-            language: "zh",
-            source: "desktop",
-            polish: "on",
-            job_id: "job-1"
-          },
-          {
-            timestamp: "11-09 10:37",
-            raw_text: "把这个函数拆成两个，一个负责读取一个负责校验",
-            final_text: "把这个函数拆成两个，一个负责读取一个负责校验",
-            language: "zh",
-            source: "web",
-            polish: "failed",
-            job_id: "job-2"
-          }
-        ],
-        total: 2,
-        skipped_malformed: 0
-      },
+      history: SAMPLE_HISTORY,
       capabilities: [
         { name: "portal 截图（Wayland）", available: true },
         { name: "xclip（剪贴板）", available: false, installCommand: "sudo apt install xclip" }
@@ -99,45 +107,74 @@
         action: "start"
       }
     },
-    statusPartial: {
+    homeConnected: {
       connection: "connected",
-      events: [
-        {
-          event: "partial",
-          session_id: "s-1",
-          stable_text: "今天下午三点我们在会议室讨论",
-          tail_text: "一下新版"
-        }
-      ]
-    },
-    statusUnknown: {
-      connection: "connected",
+      theme: "dark",
+      activePanel: "translate",
+      asr: {
+        name: "Qwen3-ASR-1.7B",
+        status: "ready",
+        sidecarRunning: true,
+        message: ""
+      },
+      ollama: {
+        modelName: "qwen3.5:4b",
+        installed: true,
+        running: true,
+        modelStatus: "ready",
+        message: ""
+      },
+      hotkey_voice: "ctrl+alt+z",
+      hotkey_screenshot: "ctrl+alt+x",
+      hotkey_ocr: "ctrl+alt+o",
       hotkey_repeat: "ctrl+alt+r",
-      events: [
-        { event: "delivery_unknown", job_id: "job-9", text: POLISHED }
-      ]
+      translate_target_lang: "zh",
+      history: SAMPLE_HISTORY,
+      lanEntries: [{
+        ip: "192.0.2.8",
+        url: "https://example.invalid/voice#token=secret-should-be-stripped-by-ui",
+        urlMasked: "https://example.invalid/voice#token=sec••••ui",
+        qrSvg: "<svg xmlns='http://www.w3.org/2000/svg' width='12' height='12'></svg>"
+      }],
+      tokenMasked: "sec••••ui",
+      tokenPresent: true
     },
-    statusError: {
+    homeTranslateResult: {
       connection: "connected",
-      hotkey_repeat: "ctrl+alt+r",
-      events: [
-        { event: "error", error: "asr_unavailable", message: "语音模型未就绪" }
-      ]
+      translate: {
+        phase: "result",
+        sourceText: "Release notes 3.2",
+        target_lang: "zh",
+        text: "版本说明 3.2",
+        ocr_text: "Release notes 3.2",
+        elapsedMs: 128,
+        error: null,
+        message: ""
+      }
     },
-    translateResult: {
+    homeTranslateError: {
       connection: "connected",
-      phase: "result",
-      text: "版本说明 3.0",
-      ocr_text: "Release notes 3.0",
-      target_lang: "zh"
+      translate: {
+        phase: "error",
+        target_lang: "zh",
+        text: "",
+        ocr_text: "Release notes 3.2",
+        error: "translate_failed",
+        message: "本地模型无响应（Ollama 未运行）。"
+      }
     },
-    translateError: {
+    homeOcrResult: {
       connection: "connected",
-      phase: "error",
-      error: "translate_failed",
-      message: "本地模型无响应（Ollama 未运行）。",
-      ocr_text: "Release notes 3.0",
-      text: ""
+      ocr: {
+        phase: "result",
+        mode: "translate",
+        target_lang: "zh",
+        fileName: "capture.png",
+        ocr_text: "Hello OCR world",
+        text: "你好 OCR 世界",
+        error: null,
+        message: ""
+      }
     },
     voicePolishFail: {
       connection: "connected",

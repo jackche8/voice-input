@@ -1,12 +1,12 @@
-/* 方向 A 设计令牌与公共原子。颜色、字体、间距只来自这里的变量。 */
+/* 统一设计令牌与公共原子（方案 C Studio C 浅/深双主题）。颜色、字体、间距只来自这里的变量。 */
 :root {
-  --font-sans: "Noto Sans CJK SC", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
-  --font-mono: "JetBrains Mono", "SFMono-Regular", Consolas, monospace;
+  --font-sans: "Noto Sans CJK SC", "PingFang SC", "Microsoft YaHei", system-ui, -apple-system, sans-serif;
+  --font-mono: "JetBrains Mono", "Noto Sans Mono CJK SC", "SFMono-Regular", Consolas, ui-monospace, monospace;
   --fs-xs: 12px;
   --fs-sm: 13px;
   --fs-md: 14px;
   --fs-lg: 16px;
-  --fs-xl: 22px;
+  --fs-xl: 20px;
   --sp-1: 4px;
   --sp-2: 8px;
   --sp-3: 12px;
@@ -16,22 +16,30 @@
   --radius-sm: 6px;
   --radius-md: 8px;
   --radius-lg: 12px;
+  --radius-xl: 14px;
   --radius-pill: 999px;
-  --c-bg: #f6f7f8;
+  --c-bg: #f4f6fa;
+  --c-rail: #eef1f6;
   --c-surface: #ffffff;
-  --c-text: #1f2328;
-  --c-muted: #656d76;
-  --c-border: #d8dee4;
-  --c-accent: #0f766e;
-  --c-accent-hover: #115e59;
+  --c-surface-2: #f1f4f9;
+  --c-text: #1b1f2a;
+  --c-muted: #5d6578;
+  --c-border: #d8dee9;
+  --c-accent: #2563eb;
+  --c-accent-hover: #1d4ed8;
+  --c-accent-solid: #2563eb;
+  --c-accent-solid-hover: #1d4ed8;
   --c-on-accent: #ffffff;
-  --c-accent-soft: #e6f4f2;
-  --c-ok: #1a7f37;
-  --c-ok-soft: #dafbe1;
-  --c-warn: #9a6700;
-  --c-warn-soft: #fff8c5;
-  --c-danger: #cf222e;
-  --c-danger-soft: #ffebe9;
+  --c-accent-soft: #dbeafe;
+  --c-ok: #16a34a;
+  --c-ok-soft: #dcfce7;
+  --c-warn: #b45309;
+  --c-warn-soft: #fef3c7;
+  --c-danger: #dc2626;
+  --c-danger-solid: #dc2626;
+  --c-danger-soft: #fee2e2;
+  --qr-bg: #ffffff;
+  --qr-fg: #1b1f2a;
   --hud-bg: rgba(17, 24, 39, 0.92);
   --hud-solid: #111827;
   --hud-text: #f3f4f6;
@@ -42,9 +50,63 @@
   --hud-busy: #fbbf24;
   --hud-danger: #fca5a5;
   --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.06);
+  --shadow-studio: 0 12px 32px rgba(15, 23, 42, 0.08);
   --shadow-hud: 0 8px 24px rgba(0, 0, 0, 0.35);
   --dur-fast: 120ms;
   --focus-ring: 0 0 0 3px var(--c-accent-soft), 0 0 0 1px var(--c-accent);
+}
+
+[data-theme="light"] {
+  --c-bg: #f4f6fa;
+  --c-rail: #eef1f6;
+  --c-surface: #ffffff;
+  --c-surface-2: #f1f4f9;
+  --c-text: #1b1f2a;
+  --c-muted: #5d6578;
+  --c-border: #d8dee9;
+  --c-accent: #2563eb;
+  --c-accent-hover: #1d4ed8;
+  --c-accent-solid: #2563eb;
+  --c-accent-solid-hover: #1d4ed8;
+  --c-on-accent: #ffffff;
+  --c-accent-soft: #dbeafe;
+  --c-ok: #16a34a;
+  --c-ok-soft: #dcfce7;
+  --c-warn: #b45309;
+  --c-warn-soft: #fef3c7;
+  --c-danger: #dc2626;
+  --c-danger-solid: #dc2626;
+  --c-danger-soft: #fee2e2;
+  --qr-bg: #ffffff;
+  --qr-fg: #1b1f2a;
+  --shadow-studio: 0 12px 32px rgba(15, 23, 42, 0.08);
+}
+
+[data-theme="dark"] {
+  --c-bg: #0d1117;
+  --c-rail: #131820;
+  --c-surface: #161b22;
+  --c-surface-2: #1f2630;
+  --c-text: #e6edf3;
+  --c-muted: #8b949e;
+  --c-border: #30363d;
+  --c-accent: #58a6ff;
+  --c-accent-hover: #79c0ff;
+  --c-accent-solid: #1f6feb;
+  --c-accent-solid-hover: #1d4ed8;
+  --c-on-accent: #ffffff;
+  --c-accent-soft: rgba(56, 139, 253, 0.16);
+  --c-ok: #3fb950;
+  --c-ok-soft: rgba(63, 185, 80, 0.16);
+  --c-warn: #d29922;
+  --c-warn-soft: rgba(210, 153, 34, 0.16);
+  --c-danger: #f85149;
+  --c-danger-solid: #c92a2a;
+  --c-danger-soft: rgba(248, 81, 73, 0.16);
+  --qr-bg: #ffffff;
+  --qr-fg: #1b1f2a;
+  --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.28);
+  --shadow-studio: 0 16px 40px rgba(0, 0, 0, 0.35);
 }
 
 *, *::before, *::after { box-sizing: border-box; }
@@ -86,11 +148,14 @@ body {
 }
 .btn:hover:not(:disabled) { border-color: var(--c-accent); }
 .btn.primary {
-  background: var(--c-accent);
-  border-color: var(--c-accent);
+  background: var(--c-accent-solid);
+  border-color: var(--c-accent-solid);
   color: var(--c-on-accent);
 }
-.btn.primary:hover:not(:disabled) { background: var(--c-accent-hover); }
+.btn.primary:hover:not(:disabled) {
+  background: var(--c-accent-solid-hover);
+  border-color: var(--c-accent-solid-hover);
+}
 .btn:disabled, .btn[aria-disabled="true"] { opacity: 0.55; cursor: not-allowed; }
 .btn:focus-visible { outline: none; box-shadow: var(--focus-ring); }
 

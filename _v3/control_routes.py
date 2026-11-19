@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import asyncio
 
-import queue
 from fastapi import APIRouter, Request
 from fastapi.responses import StreamingResponse
 
@@ -26,6 +25,7 @@ from _v3.runtime import Runtime, effective_unmet_gates
 
 def build_control_router(runtime: Runtime) -> APIRouter:
     router = APIRouter(tags=["control"])
+
     @router.get("/api/v1/history", response_model=HistoryListResponse)
     def history(limit: int = 50, offset: int = 0) -> HistoryListResponse:
         return runtime.history.list_records(limit=limit, offset=offset)
@@ -46,21 +46,39 @@ def build_control_router(runtime: Runtime) -> APIRouter:
                 "transcribe": runtime.transcribe is not None,
                 "polish": runtime.polish is not None,
                 "translate": runtime.translate is not None,
+                "translate_blocks": runtime.translate_blocks is not None,
                 "ocr": runtime.ocr is not None,
+                "ocr_layout": runtime.ocr_layout is not None,
+                "decode_audio": runtime.decode_audio is not None,
                 "stream_provider": runtime.stream_provider is not None,
             },
         )
 
     @router.get("/api/v1/events", responses=sse_openapi("ProductSSEEventEnvelope"), response_class=StreamingResponse)
     async def product_events(request: Request) -> StreamingResponse:
+        loop = asyncio.get_running_loop()
         overflow = {"flag": False}
-        q: queue.Queue = queue.Queue(maxsize=runtime.sse_queue_max)
+        q: asyncio.Queue = asyncio.Queue(maxsize=runtime.sse_queue_max)
 
-        def listener(event):
+        def _enqueue(event) -> None:
+            if overflow["flag"]:
+                return
             try:
                 q.put_nowait(event)
-            except queue.Full:
+            except asyncio.QueueFull:
                 overflow["flag"] = True
+
+        def listener(event) -> None:
+            try:
+                if asyncio.get_running_loop() is loop:
+                    _enqueue(event)
+                    return
+            except RuntimeError:
+                pass
+            try:
+                loop.call_soon_threadsafe(_enqueue, event)
+            except RuntimeError:
+                pass
 
         runtime.events.subscribe(listener)
 
@@ -80,10 +98,7 @@ def build_control_router(runtime: Runtime) -> APIRouter:
                         ProductSSEEventEnvelope.model_validate(err.model_dump())
                         yield format_sse(err)
                         return
-                    try:
-                        event = await asyncio.to_thread(q.get, True, 0.2)
-                    except queue.Empty:
-                        continue
+                    event = await q.get()
                     ProductSSEEventEnvelope.model_validate(
                         event.model_dump() if hasattr(event, "model_dump") else event
                     )

@@ -144,8 +144,11 @@ def test_unknown_job_query_is_not_failed(tmp_path: Path):
 
 
 def test_ack_wrong_claim_or_missing(tmp_path: Path):
+    bus = EventBus()
+    seen: list[object] = []
+    bus.subscribe(seen.append)
     store = JobStore(tmp_path / "jobs.json")
-    svc = JobsService(store, EventBus())
+    svc = JobsService(store, bus)
     with pytest.raises(LogicError) as ei:
         svc.ack("nope", JobAckRequest(claim_id="c", result=AckResult.complete))
     assert ei.value.code == ErrorCode.not_found
@@ -156,9 +159,23 @@ def test_ack_wrong_claim_or_missing(tmp_path: Path):
     assert ei2.value.code == ErrorCode.conflict
     done = svc.ack("j1", JobAckRequest(claim_id=claimed.claim_id, result=AckResult.complete))
     assert done.state == JobState.done
+    typed_count = sum(1 for item in seen if getattr(item, "event", None) == "typed")
+    assert typed_count == 1
+    # 同一 (claim_id, result) 重复 ACK 幂等返回，不重复发事件
+    done_again = svc.ack("j1", JobAckRequest(claim_id=claimed.claim_id, result=AckResult.complete))
+    assert done_again.state == JobState.done
+    assert sum(1 for item in seen if getattr(item, "event", None) == "typed") == 1
+    # 不同 claim_id 仍抛 conflict
     with pytest.raises(LogicError) as ei3:
-        svc.ack("j1", JobAckRequest(claim_id=claimed.claim_id, result=AckResult.complete))
+        svc.ack("j1", JobAckRequest(claim_id="other-claim", result=AckResult.complete))
     assert ei3.value.code == ErrorCode.conflict
+    # 同一 claim_id 但不同结果（试图改写已终态）仍抛 conflict
+    with pytest.raises(LogicError) as ei4:
+        svc.ack("j1", JobAckRequest(claim_id=claimed.claim_id, result=AckResult.none))
+    assert ei4.value.code == ErrorCode.conflict
+    with pytest.raises(LogicError) as ei5:
+        svc.ack("j1", JobAckRequest(claim_id=claimed.claim_id, result=AckResult.partial_or_unknown))
+    assert ei5.value.code == ErrorCode.conflict
 
 
 def test_concurrent_claim_only_one_winner(tmp_path: Path):

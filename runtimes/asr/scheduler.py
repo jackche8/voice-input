@@ -1,7 +1,8 @@
-"""最简实时优先调度：同一时刻只有一个官方推理。流式优先于整段转写。
+"""最简实时优先调度：同一时刻只有一个推理占用，槽位原子移交零饥饿竞态。
 
-不抢占已经开始的推理；新到的流式请求排在等待中的 batch 之前。
-已有活动流式会话时，再开流式直接 conflict。不做多 runtime fallback。
+流式优先于等待中的整段转写；不抢占已开始的推理。
+release() 在同一把互斥锁内把槽位所有权直接移交给队首有效等待者，
+杜绝「先置 None 再唤醒导致新请求插队抢占、等待者醒来抛 409 conflict 或槽位泄露」的竞态。
 """
 from __future__ import annotations
 
@@ -18,7 +19,9 @@ Kind = Literal["stream", "batch"]
 @dataclass
 class _Waiter:
     kind: Kind
+    session_id: str | None
     event: threading.Event
+    granted: bool = False
     cancelled: bool = False
 
 
@@ -34,50 +37,89 @@ class EngineScheduler:
         with self._guard:
             return self._active_stream_id
 
+    def _has_pending_stream_unlocked(self) -> bool:
+        return any(w.kind == "stream" and not w.cancelled for w in self._waiters)
+
     def acquire_stream(self, session_id: str, *, timeout_s: float = 120.0) -> None:
         with self._guard:
-            if self._active == "stream" or self._active_stream_id is not None:
+            if (
+                self._active == "stream"
+                or self._active_stream_id is not None
+                or self._has_pending_stream_unlocked()
+            ):
                 raise LogicError(ErrorCode.conflict, "已有识别会话在进行，sidecar 只支持单会话")
             if self._active is None:
                 self._active = "stream"
                 self._active_stream_id = session_id
                 return
-            waiter = _Waiter(kind="stream", event=threading.Event())
+            waiter = _Waiter(kind="stream", session_id=session_id, event=threading.Event())
             self._waiters.appendleft(waiter)
-        if not waiter.event.wait(timeout=timeout_s):
-            waiter.cancelled = True
-            raise LogicError(ErrorCode.timeout, "等待让出官方引擎超时")
+
+        waiter.event.wait(timeout=timeout_s)
         with self._guard:
-            if self._active is not None:
-                raise LogicError(ErrorCode.conflict, "官方引擎仍被占用")
-            self._active = "stream"
-            self._active_stream_id = session_id
+            if waiter.granted:
+                return
+            waiter.cancelled = True
+            try:
+                self._waiters.remove(waiter)
+            except ValueError:
+                pass
+            raise LogicError(ErrorCode.timeout, "等待让出官方引擎超时")
 
     def acquire_batch(self, *, timeout_s: float = 120.0) -> None:
         with self._guard:
             if self._active is None and not self._waiters:
                 self._active = "batch"
+                self._active_stream_id = None
                 return
-            waiter = _Waiter(kind="batch", event=threading.Event())
+            waiter = _Waiter(kind="batch", session_id=None, event=threading.Event())
             self._waiters.append(waiter)
-        if not waiter.event.wait(timeout=timeout_s):
-            waiter.cancelled = True
-            raise LogicError(ErrorCode.timeout, "等待整段转写槽位超时")
+
+        waiter.event.wait(timeout=timeout_s)
         with self._guard:
-            if self._active is not None:
-                raise LogicError(ErrorCode.conflict, "官方引擎仍被占用")
-            self._active = "batch"
+            if waiter.granted:
+                return
+            waiter.cancelled = True
+            try:
+                self._waiters.remove(waiter)
+            except ValueError:
+                pass
+            raise LogicError(ErrorCode.timeout, "等待整段转写槽位超时")
+
+    def _handoff_unlocked(self) -> None:
+        while self._waiters:
+            waiter = self._waiters.popleft()
+            if waiter.cancelled:
+                continue
+            self._active = waiter.kind
+            self._active_stream_id = (
+                waiter.session_id if waiter.kind == "stream" else None
+            )
+            waiter.granted = True
+            waiter.event.set()
+            return
+        self._active = None
+        self._active_stream_id = None
+
+    def release_stream(self, session_id: str) -> bool:
+        """原子释放指定流式会话占用的槽位并移交队首等待者；非当前持有者则 no-op 返回 False。"""
+        with self._guard:
+            if self._active != "stream" or self._active_stream_id != session_id:
+                return False
+            self._handoff_unlocked()
+            return True
+
+    def release_batch(self) -> bool:
+        """原子释放整段转写槽位并移交队首等待者；当前非 batch 占槽则 no-op 返回 False。"""
+        with self._guard:
+            if self._active != "batch":
+                return False
+            self._handoff_unlocked()
+            return True
 
     def release(self) -> None:
         with self._guard:
-            self._active = None
-            self._active_stream_id = None
-            while self._waiters:
-                waiter = self._waiters.popleft()
-                if waiter.cancelled:
-                    continue
-                waiter.event.set()
-                return
+            self._handoff_unlocked()
 
     def hold_stream(self, session_id: str) -> Any:
         return _Held(self, "stream", session_id)
@@ -101,6 +143,8 @@ class _Held:
         return self._sched
 
     def __exit__(self, *exc: object) -> None:
-        # 流式会话在 finish/cancel 前保持占用；batch 结束即释放。
         if self._kind == "batch":
-            self._sched.release()
+            self._sched.release_batch()
+
+
+__all__ = ["EngineScheduler", "Kind"]

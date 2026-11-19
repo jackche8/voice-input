@@ -1,6 +1,7 @@
-"""按会话选择按键所有权后端；portal 负责动作，观察器补旧 XTEST/活动。
+"""按会话选择按键所有权后端；portal 负责动作，观察器补旧 XTEST/活动与物理修饰键状态。
 
-Wayland：portal GlobalShortcuts 独占；失败才回退 evdev/XI2 观察器并明确告警"按键未独占"。
+Wayland：portal GlobalShortcuts 独占；失败才回退 evdev/XI2 观察器并明确告警"按键未独占"，
+且在 portal 服务重启恢复时自动切回 portal 独占。
 X11：XGrabKey 独占；失败回退观察器。
 """
 from __future__ import annotations
@@ -22,6 +23,8 @@ class HotkeyManager:
         self._portal = None
         self._closed = False
         self.backend_name = "none"
+        if self.ctx.janitor is not None and getattr(self.ctx.janitor, "evdev_any_modifier_down", None) is None:
+            self.ctx.janitor.evdev_any_modifier_down = self.evdev_any_modifier_down
 
     def _all_objects(self) -> list:
         seen: set[int] = set()
@@ -32,6 +35,18 @@ class HotkeyManager:
             seen.add(id(obj))
             out.append(obj)
         return out
+
+    def evdev_any_modifier_down(self) -> bool:
+        """供 ModifierJanitor 在 Wayland 下查询物理修饰键是否仍处于按下态。"""
+        for obj in self._all_objects():
+            probe = getattr(obj, "any_modifier_down", None)
+            if callable(probe):
+                try:
+                    if probe():
+                        return True
+                except Exception:
+                    pass
+        return False
 
     @property
     def voice_active(self) -> bool:
@@ -53,23 +68,36 @@ class HotkeyManager:
                     return bool(obj.has_stuck_modifiers())
                 except Exception:
                     pass
-        # 没有卡键检测能力时：X11 保持旧的“无条件清 XTest”兜底；
-        # Wayland portal 的修饰键归 compositor，盲目清 XTest 反而会干扰用户。
         return self.ctx.session_type != "wayland"
 
-    def force_stop_voice(self) -> None:
+    def _clear_voice_flags(self) -> None:
         for obj in self._all_objects():
-            if getattr(obj, "voice_active", False):
+            reset_fn = getattr(obj, "reset_voice", None)
+            if callable(reset_fn):
+                try:
+                    reset_fn()
+                except Exception:
+                    pass
+            elif getattr(obj, "voice_active", False):
                 try:
                     obj.voice_active = False
                 except Exception:
                     pass
+
+    def reset_voice(self) -> None:
+        """看门狗超时后复位全部后端的 `voice_active` 状态并释放残留修饰键（不重复调用 `voice_stop`）。"""
+        self._clear_voice_flags()
+        if self.ctx.janitor is not None:
+            self.ctx.janitor.release_hotkey(self.ctx.bindings.voice)
+
+    def force_stop_voice(self) -> None:
+        self._clear_voice_flags()
         try:
             self.ctx.actions.voice_stop()  # 看门狗到时 = finish，不是 cancel
         except Exception:
             pass
-        # 强制复位是最后兜底；此时释放一次修饰键比卡住更安全。
-        self.ctx.janitor.release_hotkey(self.ctx.bindings.voice)
+        if self.ctx.janitor is not None:
+            self.ctx.janitor.release_hotkey(self.ctx.bindings.voice)
 
     def start(self) -> None:
         if self.ctx.session_type == "wayland":
@@ -116,20 +144,27 @@ class HotkeyManager:
         self.active = self._portal
         self.backend_name = "portal"
         for obj in self.observers:
-            # portal 覆盖 compositor 级按键；观察器只保留活动/卡键检测，
-            # 不再触发动作，避免 XWayland 源合并导致的潜在双触发。
+            # portal 覆盖 compositor 级按键；观察器只保留活动/修饰键物理检测，避免双触发。
             obj.actions_enabled = False
-        print("  快捷键: portal 已接管；观察器仅做键盘活动", flush=True)
+            if isinstance(obj, XInputHotkeyGrabber):
+                obj.only_xtest_sources = True
+        print("  快捷键: portal 已接管；观察器仅做键盘活动与修饰键探测", flush=True)
 
     def _on_portal_failed(self) -> None:
-        if self._portal is not None:
+        if self._portal is not None and not getattr(self._portal, "watching_owner", False):
             try:
                 self._portal.cleanup()
             except Exception:
                 pass
         if self.active is self._portal:
             self.active = None
-        self._activate_fallback()
+        try:
+            self._activate_fallback()
+        except RuntimeError as exc:
+            # 若正在监听 portal 总线重连，不在此处让异常崩掉 D-Bus 信号回调
+            if not getattr(self._portal, "watching_owner", False):
+                raise
+            print(f"  快捷键: {exc}（等待 portal 服务恢复）", flush=True)
 
     def _activate_fallback(self) -> None:
         if self.active is not None:
@@ -144,8 +179,6 @@ class HotkeyManager:
         for obj in self.observers:
             obj.actions_enabled = True
             if isinstance(obj, XInputHotkeyGrabber):
-                # 有 evdev 时，XInput 只负责 XTEST，避免物理键双触发；
-                # 只有 XInput 时，它必须接管所有它能看到的按键。
                 obj.only_xtest_sources = has_evdev
         self.active = next(
             (obj for obj in self.observers if isinstance(obj, EvdevHotkeyGrabber)),

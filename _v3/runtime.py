@@ -10,9 +10,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from _activation import PRODUCTION_UNMET_GATES
+from _audio_codec import decode_audio_to_pcm16k, is_pcm16le_silent
 from _config import ConfigStore, default_config_path
 from _contracts import (
     AppConfig,
+    ErrorCode,
+    LogicError,
+    OcrTextBlock,
     PolishRequest,
     PolishResponse,
     SttResponse,
@@ -34,7 +38,53 @@ from _v3.setup_service import SetupService
 TranscribeFn = Callable[..., SttResponse]
 PolishFn = Callable[[PolishRequest], PolishResponse]
 TranslateFn = Callable[[TranslateRequest], TranslateResponse]
+TranslateBlocksFn = Callable[..., list[OcrTextBlock]]
 OcrFn = Callable[..., str]
+OcrLayoutFn = Callable[..., tuple[int, int, str, list[OcrTextBlock]]]
+DecodeAudioFn = Callable[..., bytes]
+
+
+def _default_translate_blocks(translate: TranslateFn) -> TranslateBlocksFn:
+    def _run(blocks: list[OcrTextBlock], *, target_lang: str) -> list[OcrTextBlock]:
+        norm = (target_lang or "").strip()
+        if not norm:
+            raise LogicError(ErrorCode.invalid_request, "target_lang 不能为空")
+        if norm.lower() == "raw":
+            return [b.model_copy(update={"translated_text": b.ocr_text}) for b in blocks]
+        translated: list[OcrTextBlock] = []
+        for block in blocks:
+            if not block.ocr_text.strip():
+                translated.append(block.model_copy(update={"translated_text": ""}))
+                continue
+            res = translate(TranslateRequest(text=block.ocr_text, target_lang=norm))
+            translated.append(block.model_copy(update={"translated_text": res.text}))
+        return translated
+
+    return _run
+
+
+def decode_uploaded_audio(
+    runtime: "Runtime",
+    payload: bytes,
+    *,
+    content_type: str | None = None,
+    filename: str | None = None,
+) -> bytes:
+    """统一解码上传音频容器为 16kHz mono s16le PCM 并执行 RMS 静音检测。"""
+    if not payload:
+        raise LogicError(ErrorCode.invalid_request, "音频不能为空")
+    base_ct = (content_type or "").split(";", 1)[0].strip().lower()
+    effective_ct = content_type
+    if base_ct in ("", "application/octet-stream"):
+        fname = (filename or "").strip().lower()
+        if fname.endswith((".pcm", ".raw", ".s16le")):
+            effective_ct = "audio/pcm"
+    pcm = runtime.decode_audio(payload, content_type=effective_ct)
+    if not pcm:
+        raise LogicError(ErrorCode.invalid_request, "音频不能为空")
+    if is_pcm16le_silent(pcm):
+        raise LogicError(ErrorCode.invalid_request, "音频为静音，无法转写")
+    return pcm
 
 
 class UnmetRuntimeGates(RuntimeError):
@@ -96,7 +146,10 @@ class Runtime:
     transcribe: TranscribeFn | None = None
     polish: PolishFn | None = None
     translate: TranslateFn | None = None
+    translate_blocks: TranslateBlocksFn | None = None
     ocr: OcrFn | None = None
+    ocr_layout: OcrLayoutFn | None = None
+    decode_audio: DecodeAudioFn = decode_audio_to_pcm16k
     stream_provider: StreamingAsrProvider | None = None
     setup: SetupService | None = None
     lan: LanAccessService | None = None
@@ -118,7 +171,10 @@ def build_sandbox_runtime(
     transcribe: TranscribeFn | None = None,
     polish: PolishFn | None = None,
     translate: TranslateFn | None = None,
+    translate_blocks: TranslateBlocksFn | None = None,
     ocr: OcrFn | None = None,
+    ocr_layout: OcrLayoutFn | None = None,
+    decode_audio: DecodeAudioFn | None = None,
     stream_provider: StreamingAsrProvider | None = None,
     setup: SetupService | None = None,
     lan_ips: Callable[[], list[str]] | None = None,
@@ -157,6 +213,11 @@ def build_sandbox_runtime(
     )
     upload_tmp = assert_sandbox_path(root / "upload-tmp")
     upload_tmp.mkdir(parents=True, exist_ok=True)
+    effective_translate_blocks = (
+        translate_blocks
+        if translate_blocks is not None
+        else (_default_translate_blocks(translate) if translate is not None else None)
+    )
     return Runtime(
         config=config,
         history=history,
@@ -168,7 +229,10 @@ def build_sandbox_runtime(
         transcribe=transcribe,
         polish=polish,
         translate=translate,
+        translate_blocks=effective_translate_blocks,
         ocr=ocr,
+        ocr_layout=ocr_layout,
+        decode_audio=decode_audio_to_pcm16k if decode_audio is None else decode_audio,
         stream_provider=stream_provider,
         setup=setup,
         lan=None if lan_ips is None else LanAccessService(token=token, list_ips=lan_ips, port=port),

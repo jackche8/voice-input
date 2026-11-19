@@ -170,6 +170,22 @@ def origin_allowed(
     return True
 
 
+def sec_fetch_site_allowed(request: Request, *, path: str | None = None) -> bool:
+    """浏览器 Fetch Metadata CSRF 防护：拒绝 cross-site 访问 API 或变更方法，不影响非浏览器请求。"""
+    site = (request.headers.get("sec-fetch-site") or "").strip().lower()
+    if site != "cross-site":
+        return True
+    if request.method.upper() not in {"GET", "HEAD"}:
+        return False
+    raw_path = path if path is not None else request.url.path
+    canon = canonical_request_path(raw_path)
+    if canon is None:
+        return False
+    if canon.startswith("/api/") or canon == "/openapi.json":
+        return False
+    return True
+
+
 def access_mode(method: str, path: str) -> str:
     """local = 仅本机；lan_token = 本机或局域网+token；lan_public = 本机或局域网对端的只读界面资源。
 
@@ -199,7 +215,7 @@ def access_mode(method: str, path: str) -> str:
         return "lan_token"
     if path in {"/api/v1/stt", "/api/v1/polish", "/api/v1/translate"}:
         return "lan_token"
-    if path == "/api/v1/ocr-translate":
+    if path in {"/api/v1/ocr-translate", "/api/v1/ocr-inplace"}:
         return "local"
     if path == "/api/v1/history":
         return "lan_token"

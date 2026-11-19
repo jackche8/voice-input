@@ -17,6 +17,9 @@ function fail(msg) { failures.push(msg); }
 function pass(msg) { passes.push(msg); }
 
 const jsFiles = fs.readdirSync(v3js).filter((n) => n.endsWith(".js")).map((n) => path.join(v3js, n));
+if (!jsFiles.some((f) => path.basename(f) === "home.js") || !jsFiles.some((f) => path.basename(f) === "setup-panel.js")) {
+  fail("缺少 static/v3/js/home.js 或 static/v3/js/setup-panel.js");
+}
 for (const file of jsFiles) {
   try {
     execFileSync("node", ["--check", file], { stdio: "pipe" });
@@ -39,8 +42,18 @@ else pass("固定识别模型为 Qwen3-ASR-1.7B");
 if (V3.labels.FIXED_MODELS.ollama !== "qwen3.5:4b") fail("固定纠错模型名不正确");
 else pass("固定纠错模型为 qwen3.5:4b");
 
-if (V3.labels.SETUP_MENUS.length !== 8) fail("菜单不是 8 项：" + V3.labels.SETUP_MENUS.length);
-else pass("模板 A 八个菜单齐全");
+const setupTabIds = Array.isArray(V3.labels.SETUP_TABS) ? V3.labels.SETUP_TABS.map((t) => t.id) : [];
+if (
+  setupTabIds.length !== 6 ||
+  setupTabIds.join(",") !== "models,voice,shot,keys,api,sys" ||
+  setupTabIds.includes("lan") ||
+  setupTabIds.includes("hist")
+) {
+  fail("SETUP_TABS 应为 6 项且不含重复 lan/hist：" + JSON.stringify(setupTabIds));
+} else pass("SETUP_TABS 六项子标签齐全且无 lan/hist 重复");
+if (Object.prototype.hasOwnProperty.call(V3.labels, "SETUP_MENUS")) {
+  fail("labels.js 仍导出已废弃的 SETUP_MENUS");
+} else pass("labels.js 已清理废弃导出 SETUP_MENUS");
 
 if (V3.labels.source("desktop") !== "本机" || V3.labels.source("web") !== "手机" || V3.labels.source("resend") !== "重发") {
   fail("来源标签不正确");
@@ -65,16 +78,43 @@ if (V3.labels.formatError("delivery_failed", "输入目标已消失", { job_id: 
   fail("delivery_failed 未展示 details.job_id：" + V3.labels.formatError("delivery_failed", "输入目标已消失", { job_id: "job-delivery-1" }));
 } else pass("delivery_failed 展示错误码、原文和 details.job_id");
 
-const setup = V3.defaults.setupState();
-if (setup.connection !== "disconnected") fail("设置默认不是未连接");
-if (setup.asr.status !== "unknown" || setup.ollama.modelStatus !== "unknown") fail("默认模型状态不得为 ready");
-if (setup.asr.sidecarRunning === true) fail("默认 sidecarRunning 不得当作已运行");
-if (Object.prototype.hasOwnProperty.call(setup, "hotkeyHint")) fail("defaults 仍含已删除的 hotkeyHint");
-if (setup.polish_enabled !== null) fail("未读取时不能把润色开关写成已选");
-if (setup.translate_target_lang !== null) fail("未读取时不能把目标语言写成已选");
-if (setup.hotkey_voice !== "") fail("未读取时不能写死快捷键");
-if (setup.history.records.length !== 0) fail("默认历史非空");
-else pass("默认设置状态为未连接且无成功数据");
+if (V3.labels.hotkeyLabel("hotkey_ocr") !== "纯 OCR 识别") fail("hotkey_ocr 标签不正确：" + V3.labels.hotkeyLabel("hotkey_ocr"));
+else pass("hotkey_ocr 中文标签为 纯 OCR 识别");
+if (V3.labels.formatHotkey("ctrl+alt+o") !== "Ctrl+Alt+O") fail("formatHotkey 不正确：" + V3.labels.formatHotkey("ctrl+alt+o"));
+else pass("formatHotkey 格式化正确");
+const homeNavIds = Array.isArray(V3.labels.HOME_NAVS) ? V3.labels.HOME_NAVS.map((n) => n.id) : [];
+if (homeNavIds.length !== 5 || homeNavIds.join(",") !== "translate,ocr,history,lan,setup") {
+  fail("HOME_NAVS 应为 5 项（含 setup）：" + JSON.stringify(homeNavIds));
+} else pass("方案 C 主页五项导航齐全（含 setup）");
+
+const home = V3.defaults.homeState();
+if (
+  home.connection !== "disconnected" ||
+  home.activePanel !== "translate" ||
+  home.setupTab !== "models" ||
+  home.asr.status !== "unknown" ||
+  home.asr.sidecarRunning === true ||
+  home.ollama.modelStatus !== "unknown" ||
+  home.polish_enabled !== null ||
+  home.keywordsDraft !== null ||
+  home.translate_target_lang !== null ||
+  home.hotkey_voice !== "" ||
+  home.hotkey_ocr !== "" ||
+  Object.prototype.hasOwnProperty.call(home, "hotkeyHint") ||
+  !Array.isArray(home.unmetGates) ||
+  home.unmetGates.length !== 0 ||
+  home.capabilities !== null ||
+  home.apiPaths !== null ||
+  home.history.records.length !== 0 ||
+  home.translate.phase !== "empty" ||
+  home.translate.text !== "" ||
+  home.ocr.phase !== "empty" ||
+  home.ocr.ocr_text !== "" ||
+  home.lanEntries !== null ||
+  home.tokenPresent !== false
+) {
+  fail("homeState 默认状态不合法：" + JSON.stringify(home));
+} else pass("homeState 统一桌面默认状态合法（未连接、含全部设置字段且无成功示例/明文令牌）");
 
 function ev(init) {
   return Object.assign({ ctrlKey: false, altKey: false, shiftKey: false, metaKey: false, key: "", code: "" }, init || {});
@@ -120,16 +160,34 @@ else {
   const superA = V3.hotkey.fromKeyboardEvent(ev({ metaKey: true, key: "a", code: "KeyA" }));
   if (superA.value === "super+a" && superA.consumed === true) pass("Meta 转为 super");
   else fail("super 转换失败：" + JSON.stringify(superA));
+
+  const shiftOnly = V3.hotkey.fromKeyboardEvent(ev({ shiftKey: true, key: "O", code: "KeyO" }));
+  if (shiftOnly.value === "shift+o" && shiftOnly.consumed === true && shiftOnly.warning && /Shift/.test(shiftOnly.warning)) {
+    pass("单独 Shift+Key 给出占用大写/上档警告");
+  } else fail("Shift+Key 警告缺失：" + JSON.stringify(shiftOnly));
+
+  const ocrKey = V3.hotkey.fromKeyboardEvent(ev({ ctrlKey: true, altKey: true, key: "o", code: "KeyO" }));
+  if (ocrKey.value === "ctrl+alt+o" && ocrKey.consumed === true && !ocrKey.warning) {
+    pass("Ctrl+Alt+O 录为 ctrl+alt+o 且无警告");
+  } else fail("Ctrl+Alt+O 转换失败：" + JSON.stringify(ocrKey));
 }
 
-const merged = V3.defaults.merge(setup, { asr: { status: "failed", message: "下载中断" } });
+if (
+  Object.prototype.hasOwnProperty.call(V3.defaults, "setupState")
+  || Object.prototype.hasOwnProperty.call(V3.defaults, "statusState")
+  || Object.prototype.hasOwnProperty.call(V3.defaults, "translateState")
+) {
+  fail("defaults.js 仍导出已废弃的 setupState / statusState / translateState");
+} else pass("defaults.js 已清理废弃导出 setupState、statusState 与 translateState");
+
+const merged = V3.defaults.merge(home, { asr: { status: "failed", message: "下载中断" } });
 if (merged.asr.status !== "failed" || merged.asr.name !== "Qwen3-ASR-1.7B") fail("状态合并不正确");
-if (setup.asr.status !== "unknown") fail("合并污染了默认对象");
+if (home.asr.status !== "unknown") fail("合并污染了默认对象");
 else pass("状态合并保留固定模型名且不污染默认值");
 
-const trans = V3.defaults.translateState();
-if (trans.phase !== "empty" || trans.text) fail("翻译浮层默认不得有译文");
-else pass("翻译浮层默认空/未连接");
+const mergedHome = V3.defaults.merge(home, { translate: { phase: "result", text: "你好" } });
+if (mergedHome.translate.phase !== "result" || home.translate.phase !== "empty") fail("homeState 合并污染了默认对象");
+else pass("homeState 深度合并保留默认字段且不污染默认值");
 
 const report = { passes, failures };
 fs.writeFileSync(path.join(logDir, "check_unit.json"), JSON.stringify(report, null, 2));

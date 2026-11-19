@@ -1,7 +1,7 @@
 # 模板：install.sh 经 _v3/units.py 渲染到 ~/.config/systemd/user；@...@ 为占位符，不要直接复制。
 [Unit]
-Description=Ollama Voice Input - 全局快捷键守护进程
-After=ollama-voice-server.service
+Description=Ollama Voice Input - 全局快捷键与跨平台桌面守护进程
+After=graphical-session.target ollama-voice-server.service
 Wants=ollama-voice-server.service
 StartLimitBurst=5
 StartLimitIntervalSec=60
@@ -11,13 +11,12 @@ StartLimitIntervalSec=60
 ExecCondition=@VENV@/bin/python3 @DIR@/_activation.py check
 RestartPreventExitStatus=78
 # Type=notify + WatchdogSec: 主循环卡死时(不再喂狗) systemd 在 20s 后 SIGABRT 重启。
-# 直接 exec python，不改 GID：sg/ setgid 会让进程不可 dumpable，
+# 直接 exec python，不改 GID：sg/setgid 会让进程不可 dumpable，
 # xdg-desktop-portal 无法打开 /proc/PID/root → GlobalShortcuts/Screenshot 被拒。
 Type=notify
 NotifyAccess=main
 WatchdogSec=20
 WorkingDirectory=@DIR@
-Environment=GDK_BACKEND=x11
 Environment=PYTHONUNBUFFERED=1
 @CUDA_ENV@
 ExecStart=@VENV@/bin/python3 @DIR@/daemon.py
@@ -26,4 +25,4 @@ Restart=always
 RestartSec=3
 
 [Install]
-WantedBy=default.target
+WantedBy=graphical-session.target

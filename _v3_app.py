@@ -4,6 +4,9 @@
 """
 from __future__ import annotations
 
+import asyncio
+import logging
+from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 
 from fastapi import FastAPI
@@ -19,6 +22,7 @@ from _v3.auth import (
     is_local_client,
     origin_allowed,
     request_host_allowed,
+    sec_fetch_site_allowed,
     token_matches,
 )
 from _v3.capability_routes import build_capability_router
@@ -86,6 +90,11 @@ class AccessGuardMiddleware:
                 )
             if not token_matches(extract_token(request), self._runtime.auth.token):
                 return JSONResponse(status_code=403, content=forbidden("token 无效或缺失"))
+        if not sec_fetch_site_allowed(request, path=path):
+            return JSONResponse(
+                status_code=403,
+                content=forbidden("跨站请求被拒绝 (Sec-Fetch-Site CSRF 防护)"),
+            )
         origin = request.headers.get("origin")
         if origin:
             if not origin_allowed(
@@ -172,22 +181,15 @@ class AccessGuardMiddleware:
             await response(scope, receive, send)
 
 
+SESSION_SWEEP_INTERVAL_S = 30.0
+
+
 def create_app(runtime: Runtime, *, static_v3: Path | None = None) -> FastAPI:
     """static_v3 给出时挂唯一生产界面（static/v3）；不给则只有 API。"""
     if not isinstance(runtime, Runtime):
         raise TypeError("create_app 必须传入显式 Runtime，禁止无参默认指向 live 存储")
     if runtime.upload_tmp is not None:
         ensure_upload_tmp(runtime.upload_tmp)
-    app = FastAPI(
-        title="ollama-voice-input v1",
-        version="0.0.0-v3-api",
-        description=_DESCRIPTION,
-        docs_url=None,
-        redoc_url=None,
-    )
-    app.state.runtime = runtime
-    install_exception_handlers(app)
-    app.add_middleware(AccessGuardMiddleware, runtime=runtime)
     hub = RecognizeSessionHub(
         finals=runtime.finals,
         provider=runtime.stream_provider,
@@ -199,6 +201,44 @@ def create_app(runtime: Runtime, *, static_v3: Path | None = None) -> FastAPI:
         sse_queue_max=runtime.sse_queue_max,
         product_events=runtime.events,
     )
+
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI):
+        stop_event = asyncio.Event()
+
+        async def _sweep_loop() -> None:
+            while not stop_event.is_set():
+                try:
+                    await asyncio.wait_for(stop_event.wait(), timeout=SESSION_SWEEP_INTERVAL_S)
+                    break
+                except TimeoutError:
+                    try:
+                        await asyncio.to_thread(hub.sweep)
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception:
+                        logging.getLogger(__name__).exception("后台会话清理任务执行异常，将继续下一轮")
+
+        task = asyncio.create_task(_sweep_loop(), name="v3-session-sweep")
+        try:
+            yield
+        finally:
+            stop_event.set()
+            task.cancel()
+            with suppress(asyncio.CancelledError):
+                await task
+
+    app = FastAPI(
+        title="ollama-voice-input v1",
+        version="0.0.0-v3-api",
+        description=_DESCRIPTION,
+        docs_url=None,
+        redoc_url=None,
+        lifespan=lifespan,
+    )
+    app.state.runtime = runtime
+    install_exception_handlers(app)
+    app.add_middleware(AccessGuardMiddleware, runtime=runtime)
     app.state.sessions = hub
     app.include_router(build_recognize_router(hub, runtime.max_chunk_bytes))
     app.include_router(build_utterance_router(runtime))

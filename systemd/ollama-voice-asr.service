@@ -16,7 +16,7 @@ WorkingDirectory=@DIR@
 Environment=PYTHONUNBUFFERED=1
 Environment=HF_HOME=@HF_HOME@
 Environment=HF_HUB_OFFLINE=1
-ExecStart=@ASR_PYTHON@ -m runtimes.asr serve --host 127.0.0.1 --port 17946 --load --warmup --model @ASR_MODEL_DIR@
+ExecStart=@ASR_PYTHON@ -m runtimes.asr serve --host 127.0.0.1 --port 17946 --backend auto --gpu-memory-utilization 0.45 --max-model-len 4096 --load --warmup --model @ASR_MODEL_DIR@
 # sidecar 自己 setsid 并只回收自己派生的子孙（含 vLLM EngineCore）；SIGTERM 后给足退出时间。
 KillMode=mixed
 TimeoutStopSec=30

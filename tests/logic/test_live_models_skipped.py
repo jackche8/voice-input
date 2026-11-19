@@ -1,7 +1,6 @@
 """真实模型链路：4b 未下载、长录音未达标时必须显式 skip，不得报绿。"""
 from __future__ import annotations
 
-import json
 import os
 from pathlib import Path
 
@@ -18,7 +17,8 @@ ROOT = Path(__file__).resolve().parents[2]
 def _4b_present() -> tuple[bool, str]:
     url = os.environ.get("OLLAMA_BASE_URL", DEFAULT_OLLAMA_BASE_URL).rstrip("/")
     try:
-        resp = httpx.get(f"{url}/api/tags", timeout=2.0)
+        with httpx.Client(timeout=2.0, trust_env=False) as http_client:
+            resp = http_client.get(f"{url}/api/tags")
     except httpx.HTTPError as exc:
         return False, f"无法连接 Ollama ({url}): {exc}"
     if resp.status_code != 200:

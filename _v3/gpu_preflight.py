@@ -20,10 +20,11 @@ import argparse
 import contextlib
 import io
 import math
+import os
 import shutil
 import subprocess
 import sys
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 
 from _contracts import LogicError
@@ -108,13 +109,56 @@ def query_gpus(*, run: Runner = subprocess.run, which: Callable[[str], str | Non
     return gpus
 
 
+def _select_target_gpu(
+    gpus: list[GpuMemory],
+    environ: Mapping[str, str] | None = None,
+) -> tuple[GpuMemory | None, str | None]:
+    """单卡直接选中；多卡仅在 CUDA_VISIBLE_DEVICES 明确指定唯一 1 张 GPU（索引或 UUID）时定位该卡。"""
+    listing = "；".join(f"#{g.index} {g.name} 空闲 {g.free_mib}/{g.total_mib} MiB" for g in gpus)
+    env = os.environ if environ is None else environ
+    raw_cvd = env.get("CUDA_VISIBLE_DEVICES")
+    if raw_cvd is not None:
+        if not raw_cvd.strip():
+            return None, "CUDA_VISIBLE_DEVICES 为空，未暴露任何 GPU"
+        tokens = [part.strip() for part in raw_cvd.split(",") if part.strip()]
+        if not tokens:
+            return None, "CUDA_VISIBLE_DEVICES 为空，未暴露任何 GPU"
+        if len(tokens) > 1:
+            return (
+                None,
+                f"CUDA_VISIBLE_DEVICES={raw_cvd!r} 指定了多张 GPU（检测到 {len(gpus)} 张：{listing}），无法确定 vLLM 将使用哪一张，不做假定",
+            )
+        selector = tokens[0]
+        matches = [g for g in gpus if g.index == selector or g.uuid == selector]
+        if not matches and selector.startswith(("GPU-", "MIG-")):
+            matches = [g for g in gpus if g.uuid.startswith(selector)]
+        if len(matches) == 1:
+            return matches[0], None
+        if len(matches) > 1:
+            return (
+                None,
+                f"CUDA_VISIBLE_DEVICES={raw_cvd!r} 匹配到多张 GPU（{listing}），无法确定 vLLM 将使用哪一张，不做假定",
+            )
+        return (
+            None,
+            f"CUDA_VISIBLE_DEVICES={raw_cvd!r} 未匹配到任何可用 GPU（检测到：{listing}）",
+        )
+    if len(gpus) == 1:
+        return gpus[0], None
+    return (
+        None,
+        f"检测到 {len(gpus)} 张 GPU（{listing}），无法确定 vLLM 将使用哪一张，不做假定",
+    )
+
+
 def asr_gpu_preflight(
     exec_argv: Sequence[str],
     *,
     run: Runner = subprocess.run,
     which: Callable[[str], str | None] = shutil.which,
+    environ: Mapping[str, str] | None = None,
 ) -> PreflightResult:
-    """按 sidecar 实际参数与实时显存判定能否新启动 ASR。只在单卡时判定；多卡无法确定 vLLM 用哪张 → unknown。"""
+    """按 sidecar 实际参数与实时显存判定能否新启动 ASR。单卡或 CUDA_VISIBLE_DEVICES 指定唯一单卡时判定；其余多卡 → unknown。"""
     try:
         util = asr_utilization_from_argv(exec_argv)
     except ValueError as exc:
@@ -123,14 +167,13 @@ def asr_gpu_preflight(
         gpus = query_gpus(run=run, which=which)
     except ValueError as exc:
         return PreflightResult(kind="unknown", reason=f"显存探测失败：{exc}", utilization=util)
-    if len(gpus) != 1:
-        listing = "；".join(f"#{g.index} {g.name} 空闲 {g.free_mib}/{g.total_mib} MiB" for g in gpus)
+    gpu, reason = _select_target_gpu(gpus, environ=environ)
+    if gpu is None:
         return PreflightResult(
             kind="unknown",
-            reason=f"检测到 {len(gpus)} 张 GPU（{listing}），无法确定 vLLM 将使用哪一张，不做假定",
+            reason=reason or "无法确定目标 GPU",
             utilization=util,
         )
-    gpu = gpus[0]
     required_bytes = math.ceil(gpu.total_mib * MIB * util)  # 同 vllm request_memory：ceil(total × util)
     required_mib = math.ceil(required_bytes / MIB)
     fields = dict(utilization=util, required_mib=required_mib, free_mib=gpu.free_mib, total_mib=gpu.total_mib, gpu=f"#{gpu.index} {gpu.name}")
@@ -155,6 +198,7 @@ def asr_gpu_preflight_for_unit(
     *,
     run: Runner = subprocess.run,
     which: Callable[[str], str | None] = shutil.which,
+    environ: Mapping[str, str] | None = None,
 ) -> PreflightResult:
     """读单元真实 ExecStart（systemd_unit_state，只读）后预检；读不到 → unknown。"""
     try:
@@ -163,7 +207,7 @@ def asr_gpu_preflight_for_unit(
         return PreflightResult(kind="unknown", reason=exc.message)
     if len(state.exec_start) != 1:
         return PreflightResult(kind="unknown", reason=f"{unit} 的 ExecStart 有 {len(state.exec_start)} 条，无法确定 sidecar 参数")
-    return asr_gpu_preflight(state.exec_start[0].argv, run=run, which=which)
+    return asr_gpu_preflight(state.exec_start[0].argv, run=run, which=which, environ=environ)
 
 
 def main(argv: Sequence[str] | None = None) -> int:

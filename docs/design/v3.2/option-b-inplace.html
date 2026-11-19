@@ -1,0 +1,695 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>方案 B（推荐）· 识别位置逐段背景遮挡原位翻译 + 多模翻译主页 — UI 模板</title>
+<style>
+:root {
+  --font-sans: "Noto Sans CJK SC", "PingFang SC", "Microsoft YaHei", system-ui, -apple-system, sans-serif;
+  --font-mono: "JetBrains Mono", "Noto Sans Mono CJK SC", ui-monospace, monospace;
+  --fs-xs: 12px; --fs-sm: 13px; --fs-md: 14px; --fs-lg: 16px; --fs-xl: 22px;
+  --sp-1: 4px; --sp-2: 8px; --sp-3: 12px; --sp-4: 16px; --sp-5: 24px;
+  --r-sm: 8px; --r-md: 12px; --r-lg: 16px; --r-pill: 999px;
+
+  --c-bg: #f3f5f8;
+  --c-surface: #ffffff;
+  --c-surface-soft: #f8fafc;
+  --c-text: #0f172a;
+  --c-muted: #64748b;
+  --c-border: #e2e8f0;
+  --c-accent: #0d9488;
+  --c-accent-hover: #0f766e;
+  --c-accent-soft: #ccfbf1;
+  --c-ok: #15803d; --c-ok-soft: #dcfce7;
+  --c-warn: #b45309; --c-warn-soft: #fef3c7;
+  --c-danger: #dc2626; --c-danger-soft: #fee2e2;
+
+  --hud-bg: rgba(15, 23, 42, 0.92);
+  --hud-text: #f8fafc;
+  --hud-muted: #94a3b8;
+  --hud-border: rgba(255, 255, 255, 0.14);
+  --shadow-sm: 0 1px 3px rgba(15, 23, 42, 0.06);
+  --shadow-lg: 0 12px 32px rgba(15, 23, 42, 0.10);
+  --shadow-hud: 0 14px 36px rgba(2, 6, 23, 0.42);
+}
+
+* { box-sizing: border-box; }
+body { margin: 0; font-family: var(--font-sans); background: #dde3ec; color: var(--c-text); font-size: var(--fs-md); line-height: 1.55; }
+[hidden] { display: none !important; }
+
+/* 顶部候选方案导航（预览外壳） */
+.preview-bar {
+  position: sticky; top: 0; z-index: 100;
+  background: #0f172a; color: #f1f5f9;
+  padding: 10px 20px; border-bottom: 1px solid #1e293b;
+  display: flex; flex-wrap: wrap; gap: 12px; align-items: center; justify-content: space-between;
+}
+.preview-bar .scheme-links { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+.preview-bar a {
+  color: #cbd5e1; text-decoration: none; font-size: var(--fs-xs);
+  padding: 4px 10px; border-radius: var(--r-pill); border: 1px solid #334155;
+}
+.preview-bar a.active { background: #0d9488; border-color: #0d9488; color: #fff; font-weight: 600; }
+.preview-tabs { display: flex; gap: 6px; flex-wrap: wrap; }
+.preview-tabs button {
+  font: inherit; font-size: var(--fs-xs); padding: 5px 12px;
+  border-radius: var(--r-pill); border: 1px solid #334155;
+  background: #1e293b; color: #cbd5e1; cursor: pointer;
+}
+.preview-tabs button.on { background: #f8fafc; color: #0f172a; border-color: #f8fafc; font-weight: 600; }
+
+.stage-wrap { max-width: 1260px; margin: 20px auto; padding: 0 20px 44px; }
+.stage-desc {
+  background: #fff; border: 1px solid var(--c-border); border-radius: var(--r-md);
+  padding: 12px 16px; margin-bottom: 16px; font-size: var(--fs-sm); color: var(--c-muted);
+  display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap;
+}
+.stage-desc strong { color: var(--c-text); }
+.state-pills { display: flex; gap: 6px; flex-wrap: wrap; }
+.state-pills button {
+  font: inherit; font-size: var(--fs-xs); padding: 4px 11px;
+  border-radius: var(--r-pill); border: 1px solid var(--c-border);
+  background: var(--c-surface); cursor: pointer; color: var(--c-muted);
+}
+.state-pills button.on { background: var(--c-accent); color: #fff; border-color: var(--c-accent); }
+
+/* 原子按钮与徽章 */
+.btn {
+  display: inline-flex; align-items: center; gap: 6px;
+  font: inherit; font-size: var(--fs-sm); padding: 7px 14px;
+  border-radius: var(--r-sm); border: 1px solid var(--c-border);
+  background: var(--c-surface); color: var(--c-text); cursor: pointer; transition: all 0.12s;
+}
+.btn:hover { border-color: var(--c-accent); color: var(--c-accent); }
+.btn.primary { background: var(--c-accent); border-color: var(--c-accent); color: #fff; font-weight: 600; }
+.btn.primary:hover { background: var(--c-accent-hover); color: #fff; }
+.badge {
+  display: inline-flex; align-items: center; gap: 5px;
+  font-size: var(--fs-xs); padding: 3px 10px; border-radius: var(--r-pill);
+  background: var(--c-surface-soft); border: 1px solid var(--c-border); color: var(--c-muted);
+}
+.badge.ok { background: var(--c-ok-soft); border-color: #bbf7d0; color: var(--c-ok); }
+.dot { width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
+.mono { font-family: var(--font-mono); }
+
+/* ==================== 1. 主页：多模翻译与 OCR 工作台 ==================== */
+.app-shell {
+  background: var(--c-bg); border: 1px solid var(--c-border);
+  border-radius: var(--r-lg); box-shadow: var(--shadow-lg); overflow: hidden;
+}
+.topbar {
+  background: var(--c-surface); border-bottom: 1px solid var(--c-border);
+  padding: 12px 24px; display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap;
+}
+.brand-row { display: flex; align-items: center; gap: 14px; }
+.brand-logo {
+  width: 34px; height: 34px; border-radius: 10px; background: var(--c-accent); color: #fff;
+  display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: 17px;
+}
+.nav-pills { display: flex; gap: 4px; background: var(--c-bg); padding: 4px; border-radius: 10px; }
+.nav-pills button {
+  font: inherit; font-size: var(--fs-sm); padding: 6px 14px; border: 0; border-radius: 7px;
+  background: transparent; color: var(--c-muted); cursor: pointer;
+}
+.nav-pills button.on { background: var(--c-surface); color: var(--c-text); font-weight: 600; box-shadow: var(--shadow-sm); }
+
+.main-container { max-width: 1100px; margin: 0 auto; padding: 24px; }
+
+.translator-card {
+  background: var(--c-surface); border: 1px solid var(--c-border);
+  border-radius: var(--r-lg); box-shadow: var(--shadow-sm); overflow: hidden;
+}
+.trans-toolbar {
+  padding: 12px 18px; border-bottom: 1px solid var(--c-border); background: var(--c-surface-soft);
+  display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap;
+}
+.mode-tabs { display: inline-flex; gap: 6px; }
+.mode-tabs button {
+  font: inherit; font-size: var(--fs-xs); padding: 5px 12px; border-radius: var(--r-pill);
+  border: 1px solid var(--c-border); background: var(--c-surface); color: var(--c-muted); cursor: pointer;
+}
+.mode-tabs button.on { background: var(--c-accent-soft); border-color: var(--c-accent); color: var(--c-accent-hover); font-weight: 600; }
+
+.lang-switcher { display: flex; align-items: center; gap: 8px; }
+.lang-switcher select {
+  font: inherit; font-size: var(--fs-sm); font-weight: 600; padding: 6px 12px;
+  border-radius: var(--r-sm); border: 1px solid var(--c-border); background: var(--c-surface); color: var(--c-text);
+}
+.swap-btn {
+  width: 32px; height: 32px; border-radius: 50%; border: 1px solid var(--c-border);
+  background: var(--c-surface); cursor: pointer; font-weight: 700; color: var(--c-muted);
+}
+.swap-btn:hover { color: var(--c-accent); border-color: var(--c-accent); }
+
+.trans-body { display: grid; grid-template-columns: 1fr 1fr; min-height: 320px; }
+@media (max-width: 800px) { .trans-body { grid-template-columns: 1fr; } }
+.col-src { border-right: 1px solid var(--c-border); display: flex; flex-direction: column; }
+.col-dst { background: #fbfcfd; display: flex; flex-direction: column; }
+.editor-area {
+  flex: 1; width: 100%; border: 0; resize: none; padding: 18px 20px;
+  font: inherit; font-size: 16px; line-height: 1.7; background: transparent; color: var(--c-text); outline: none;
+}
+.ocr-dropzone {
+  margin: 14px 18px 6px; padding: 14px; border: 1.5px dashed #94a3b8; border-radius: var(--r-md);
+  background: #f8fafc; display: flex; align-items: center; gap: 14px;
+}
+.ocr-thumb {
+  width: 92px; height: 58px; border-radius: 6px; background: #1e293b; color: #38bdf8;
+  font-family: var(--font-mono); font-size: 10px; padding: 6px; display: flex; align-items: center; flex: none;
+}
+.col-foot {
+  padding: 10px 18px; border-top: 1px solid var(--c-border);
+  display: flex; align-items: center; justify-content: space-between; gap: 10px; font-size: var(--fs-xs); color: var(--c-muted);
+}
+
+/* 底部快捷历史条 */
+.recent-strip {
+  margin-top: 18px; display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px;
+}
+@media (max-width: 800px) { .recent-strip { grid-template-columns: 1fr; } }
+.recent-card {
+  background: var(--c-surface); border: 1px solid var(--c-border); border-radius: var(--r-md);
+  padding: 12px 14px; cursor: pointer; transition: border-color 0.12s;
+}
+.recent-card:hover { border-color: var(--c-accent); }
+.recent-meta { display: flex; justify-content: space-between; font-size: var(--fs-xs); color: var(--c-muted); margin-bottom: 4px; }
+.recent-txt { font-size: var(--fs-sm); color: var(--c-text); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+
+/* 设置页分栏 */
+.setup-grid { display: grid; grid-template-columns: 200px 1fr; gap: 20px; }
+@media (max-width: 780px) { .setup-grid { grid-template-columns: 1fr; } }
+.setup-menu { background: var(--c-surface); border: 1px solid var(--c-border); border-radius: var(--r-md); padding: 8px; height: fit-content; }
+.setup-menu button {
+  width: 100%; text-align: left; font: inherit; font-size: var(--fs-sm); padding: 8px 12px;
+  border: 0; border-radius: var(--r-sm); background: transparent; color: var(--c-muted); cursor: pointer;
+}
+.setup-menu button.on { background: var(--c-accent-soft); color: var(--c-accent-hover); font-weight: 600; }
+.setup-panel { background: var(--c-surface); border: 1px solid var(--c-border); border-radius: var(--r-md); padding: 20px; }
+.kv-row { display: flex; justify-content: space-between; align-items: center; padding: 12px 0; border-bottom: 1px solid var(--c-border); gap: 12px; flex-wrap: wrap; }
+.kv-row:last-child { border-bottom: 0; }
+
+/* ==================== 2. 截屏翻译：识别位置原地背景遮挡（核心亮点） ==================== */
+.screen-canvas {
+  position: relative; min-height: 540px; border-radius: var(--r-lg); overflow: hidden;
+  background: #1e2430; border: 1px solid #334155; padding: 32px;
+}
+/* 模拟被框选前的桌面网页（含浅色卡片 + 深色终端区 + 按钮，验证不同背景色采样遮挡） */
+.mock-app-window {
+  position: relative; max-width: 820px; background: #ffffff; border-radius: 12px;
+  overflow: hidden; box-shadow: 0 20px 50px rgba(0,0,0,0.35);
+}
+.mock-win-head {
+  background: #f1f5f9; padding: 10px 16px; border-bottom: 1px solid #e2e8f0;
+  font-size: 12px; color: #64748b; display: flex; justify-content: space-between;
+}
+.mock-win-content { padding: 26px 30px; position: relative; }
+
+/* 框选虚线高亮边界 */
+.selection-frame {
+  position: relative; border: 2px solid #14b8a6; border-radius: 10px; padding: 18px 20px;
+  box-shadow: 0 0 0 9999px rgba(2, 6, 23, 0.32);
+}
+
+.orig-block { position: relative; margin-bottom: 14px; }
+.orig-block:last-child { margin-bottom: 0; }
+.orig-h2 { font-size: 20px; font-weight: 700; color: #0f172a; margin: 0; padding: 2px 0; }
+.orig-p { font-size: 15px; color: #334155; line-height: 1.65; margin: 0; }
+.orig-dark-box {
+  background: #0f172a; color: #e2e8f0; border-radius: 8px; padding: 12px 14px;
+  display: flex; align-items: center; justify-content: space-between; gap: 16px;
+}
+.orig-dark-note { font-size: 13px; color: #94a3b8; }
+.orig-code { font-family: var(--font-mono); font-size: 12px; color: #38bdf8; background: rgba(56,189,248,0.1); padding: 4px 8px; border-radius: 4px; }
+
+/* 方案 B 核心：按 OCR 识别到的文字块坐标 (bx,by,bw,bh) 取原背景色不透明遮挡原文字，原位填入译文！ */
+.inplace-patch {
+  position: absolute; inset: -2px -4px;
+  display: flex; align-items: center;
+  padding: 2px 6px; border-radius: 4px;
+  transition: opacity 0.15s;
+}
+.inplace-patch.light-bg {
+  background: #ffffff; /* 采样自原图浅色背景，100% 不透明遮挡底部英文 */
+  color: #0f172a;
+  box-shadow: inset 0 0 0 1px rgba(13, 148, 136, 0.22);
+}
+.inplace-patch.dark-bg {
+  background: #0f172a; /* 采样自原图深色横幅背景，100% 不透明遮挡底部英文 */
+  color: #f1f5f9;
+  box-shadow: inset 0 0 0 1px rgba(56, 189, 248, 0.28);
+}
+/* 纯 OCR 模式高亮框 */
+.ocr-box-highlight .inplace-patch {
+  background: rgba(20, 184, 166, 0.14) !important;
+  color: transparent !important;
+  border: 1.5px dashed #0d9488;
+  cursor: pointer;
+}
+
+/* 选区右上/右下悬浮胶囊控制条 */
+.overlay-pill-bar {
+  position: absolute; right: 0; bottom: -46px;
+  background: var(--hud-bg); color: var(--hud-text);
+  border: 1px solid var(--hud-border); border-radius: var(--r-pill);
+  padding: 5px 8px; box-shadow: var(--shadow-hud);
+  display: inline-flex; align-items: center; gap: 6px; font-size: var(--fs-xs); z-index: 10;
+}
+.overlay-pill-bar button {
+  font: inherit; font-size: var(--fs-xs); border: 0; background: transparent;
+  color: var(--hud-muted); padding: 4px 10px; border-radius: var(--r-pill); cursor: pointer;
+}
+.overlay-pill-bar button.on { background: #0d9488; color: #fff; font-weight: 600; }
+.overlay-pill-bar button:hover:not(.on) { color: #fff; background: rgba(255,255,255,0.1); }
+.overlay-pill-bar .div { width: 1px; height: 14px; background: var(--hud-border); }
+
+/* OCR 抽屉卡片（当切到 OCR 原文模式时） */
+.ocr-result-drawer {
+  margin-top: 56px; max-width: 820px; background: var(--hud-bg); color: var(--hud-text);
+  border: 1px solid var(--hud-border); border-radius: var(--r-md); padding: 14px 18px;
+  box-shadow: var(--shadow-hud);
+}
+
+/* ==================== 3. 左下角语音状态栏 ==================== */
+.b-hud-capsule {
+  position: absolute; left: 28px; bottom: 28px; max-width: 560px;
+  background: var(--hud-bg); color: var(--hud-text);
+  border: 1px solid var(--hud-border); border-radius: 16px;
+  padding: 10px 16px; box-shadow: var(--shadow-hud);
+  display: flex; align-items: center; gap: 12px;
+}
+.wave-bars { display: inline-flex; gap: 3px; align-items: center; height: 16px; }
+.wave-bars i { width: 3px; border-radius: 2px; background: #2dd4bf; display: inline-block; }
+
+/* ==================== 4. 手机扫码语音页 ==================== */
+.phone-card {
+  width: 368px; margin: 0 auto; background: var(--c-surface);
+  border: 1px solid var(--c-border); border-radius: 28px; padding: 22px 18px; box-shadow: var(--shadow-lg);
+}
+.ptt-circle-wrap { display: flex; flex-direction: column; align-items: center; padding: 24px 0 16px; }
+.ptt-btn {
+  width: 136px; height: 136px; border-radius: 50%; border: none;
+  background: linear-gradient(135deg, #0d9488, #0f766e); color: #fff;
+  font: inherit; font-size: 16px; font-weight: 700; cursor: pointer;
+  box-shadow: 0 10px 28px rgba(13, 148, 136, 0.35);
+  touch-action: none; user-select: none;
+}
+</style>
+</head>
+<body>
+
+<div class="preview-bar">
+  <div class="scheme-links">
+    <strong style="font-size:13px;margin-right:6px;">UI 候选模板：</strong>
+    <a href="option-a-minimal.html">方案 A · 极简双栏 + 整块遮挡（最简）</a>
+    <a href="option-b-inplace.html" class="active">方案 B · 逐段原位背景遮挡 + 多模翻译台（推荐）</a>
+    <a href="option-c-studio.html">方案 C · 侧栏工作站 + 对照遮罩</a>
+  </div>
+  <div class="preview-tabs" id="b-tabs">
+    <button class="on" data-surf="home">1. 主页翻译与 OCR 台 (/)</button>
+    <button data-surf="shot">2. 截屏逐段原位遮挡翻译 ⭐</button>
+    <button data-surf="hud">3. 左下角语音状态胶囊</button>
+    <button data-surf="phone">4. 手机语音页 (/voice)</button>
+  </div>
+</div>
+
+<div class="stage-wrap">
+  <!-- ==================== 1. 主页翻译与 OCR 工作台 ==================== -->
+  <section class="b-surf" id="b-surf-home">
+    <div class="stage-desc">
+      <div><strong>方案 B 主页设计（推荐）</strong>：主页 <code>/</code> 直接作为<strong>本地翻译 + 图片 OCR 工作台</strong>，手动粘贴文字即译、粘贴截图即做 OCR 取字或图片翻译；下方附带最近语音/翻译卡片一键复制复用。</div>
+      <div class="state-pills">
+        <button class="on" onclick="setBHome('text', this)">手动输入/粘贴文本翻译</button>
+        <button onclick="setBHome('ocr', this)">粘贴截图 → OCR 识别/翻译</button>
+        <button onclick="switchBNav('setup')">打开系统与热键设置</button>
+      </div>
+    </div>
+
+    <div class="app-shell">
+      <header class="topbar">
+        <div class="brand-row">
+          <div class="brand-logo">译</div>
+          <div>
+            <div style="font-weight:700;font-size:15px;">Ollama Voice & Translate</div>
+            <div style="font-size:12px;color:var(--c-muted);">全本地语音输入 · 原位截屏翻译 · OCR</div>
+          </div>
+          <nav class="nav-pills" style="margin-left:12px;">
+            <button class="on" id="b-nav-home" onclick="switchBNav('home')">翻译与 OCR 主页</button>
+            <button id="b-nav-setup" onclick="switchBNav('setup')">模型 · 快捷键 · 手机扫码</button>
+          </nav>
+        </div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;">
+          <span class="badge ok"><i class="dot"></i>Qwen3-ASR 1.7B</span>
+          <span class="badge ok"><i class="dot"></i>qwen3.5:4b</span>
+          <span class="badge ok"><i class="dot"></i>Wayland 热键已独占</span>
+        </div>
+      </header>
+
+      <!-- 主页：翻译与 OCR -->
+      <div class="main-container" id="b-view-home">
+        <div class="translator-card">
+          <div class="trans-toolbar">
+            <div class="mode-tabs">
+              <button class="on" id="b-mode-text" onclick="setBHome('text')">📝 文本粘贴翻译</button>
+              <button id="b-mode-ocr" onclick="setBHome('ocr')">🖼️ 图片 OCR 识别 / 翻译</button>
+            </div>
+
+            <div class="lang-switcher">
+              <select id="b-src-lang">
+                <option value="auto">自动检测语言</option>
+                <option value="en">English</option>
+                <option value="zh">简体中文</option>
+                <option value="ja">日本語</option>
+              </select>
+              <button class="swap-btn" title="互换语言与内容" onclick="swapBLang()">⇄</button>
+              <select id="b-dst-lang" onchange="runBDemoTranslate()">
+                <option value="zh">简体中文</option>
+                <option value="en">English</option>
+                <option value="ja">日本語</option>
+                <option value="ko">한국어</option>
+                <option value="raw">仅提取 OCR 原文（不翻译）</option>
+              </select>
+            </div>
+
+            <div style="display:flex;gap:8px;">
+              <button class="btn" onclick="document.getElementById('b-src').value='';document.getElementById('b-dst').value='';">清空</button>
+              <button class="btn primary" onclick="runBDemoTranslate()">翻译 (Ctrl+Enter)</button>
+            </div>
+          </div>
+
+          <div class="trans-body">
+            <div class="col-src">
+              <div class="ocr-dropzone" id="b-ocr-zone" hidden>
+                <div class="ocr-thumb">Wayland<br/>Portal<br/>Crop.png</div>
+                <div style="flex:1;min-width:0;">
+                  <div style="font-weight:600;font-size:13px;">已从剪贴板载入图片 · OCR 提取成功（chi_sim+eng）</div>
+                  <div style="font-size:12px;color:var(--c-muted);">左侧已填入识别原文（可手改修正），右侧同步输出本地译文</div>
+                </div>
+                <button class="btn" style="padding:4px 10px;font-size:12px;" onclick="setBHome('text')">清除图片</button>
+              </div>
+              <textarea class="editor-area" id="b-src" placeholder="在此输入或 Ctrl+V 粘贴任意文本进行本地翻译；&#10;直接粘贴屏幕截图或拖入图片文件，会自动执行本地 OCR 文字识别…">By separating UI components, domain logic, and business orchestration into three strict layers, every module remains testable and replaceable without side effects.</textarea>
+              <div class="col-foot">
+                <span>💡 提示：直接按 <code>Ctrl+V</code> 支持同时识别文本或剪贴板截图</span>
+                <button class="btn" style="padding:3px 10px;font-size:12px;" onclick="flashBtn(this, '原文已复制 ✓')">复制原文</button>
+              </div>
+            </div>
+
+            <div class="col-dst">
+              <textarea class="editor-area" id="b-dst" readonly>通过将 UI 组件、底层领域逻辑与业务编排严格拆分为三层，每个模块都能保持可独立测试与可替换，且不产生隐式副作用。</textarea>
+              <div class="col-foot">
+                <span>本地 <code>qwen3.5:4b</code> (<code>think:false</code>) · 耗时 0.38s</span>
+                <button class="btn primary" style="padding:4px 12px;font-size:12px;" onclick="flashBtn(this, '译文已复制 ✓')">复制结果</button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div style="margin-top:20px;display:flex;justify-content:space-between;align-items:center;">
+          <strong style="font-size:13px;color:var(--c-muted);">最近语音输入与截屏记录（点击回填到上方翻译框）</strong>
+          <span style="font-size:12px;color:var(--c-muted);">全局快捷键：<code>Ctrl+Alt+Z</code> 语音 · <code>Ctrl+Alt+X</code> 截屏原位译 · <code>Ctrl+Alt+O</code> 截屏纯 OCR</span>
+        </div>
+        <div class="recent-strip">
+          <div class="recent-card" onclick="fillFromRecent('今天先把 UI 设计定下来，然后再按模块化方案实现逻辑层与业务层。')">
+            <div class="recent-meta"><span>🎙️ 本机语音 · 已纠错</span><span>刚刚</span></div>
+            <div class="recent-txt">今天先把 UI 设计定下来，然后再按模块化方案实现逻辑层与业务层。</div>
+          </div>
+          <div class="recent-card" onclick="fillFromRecent('The GPU memory preflight ensures ASR and Ollama coexist within 16 GB VRAM.')">
+            <div class="recent-meta"><span>📸 截屏原位翻译</span><span>3 分钟前</span></div>
+            <div class="recent-txt">GPU 显存预检确保 ASR 与 Ollama 在 16 GB 显存内稳定共存。</div>
+          </div>
+          <div class="recent-card" onclick="fillFromRecent('systemctl --user status ollama-voice-daemon.service')">
+            <div class="recent-meta"><span>🔍 截屏纯 OCR 取字</span><span>10 分钟前</span></div>
+            <div class="recent-txt mono">systemctl --user status ollama-voice-daemon.service</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 设置抽屉页 -->
+      <div class="main-container" id="b-view-setup" hidden>
+        <div class="setup-grid">
+          <aside class="setup-menu">
+            <button class="on">模型与显存</button>
+            <button>全局快捷键 (4项)</button>
+            <button>语音词库与纠错</button>
+            <button>手机扫码录入</button>
+            <button>系统健康检测</button>
+          </aside>
+          <div class="setup-panel">
+            <h3 style="margin:0 0 12px;">模型与快捷键核心配置</h3>
+            <div class="kv-row">
+              <div>
+                <div style="font-weight:600;">语音识别 · Qwen3-ASR-1.7B</div>
+                <div style="font-size:12px;color:var(--c-muted);">本地 vLLM Sidecar (127.0.0.1:17946) · 显存配额已优化为 45% (约 7.2 GiB)</div>
+              </div>
+              <span class="badge ok">运行中</span>
+            </div>
+            <div class="kv-row">
+              <div>
+                <div style="font-weight:600;">纠错与翻译 · Ollama qwen3.5:4b</div>
+                <div style="font-size:12px;color:var(--c-muted);">独立回环端口 (127.0.0.1:17947，不与系统 11434 冲突) · 约 3.8 GiB</div>
+              </div>
+              <span class="badge ok">运行中</span>
+            </div>
+            <div class="kv-row">
+              <div>
+                <div style="font-weight:600;">截屏原位翻译快捷键</div>
+                <div style="font-size:12px;color:var(--c-muted);">框选后按识别出的文字块位置原位背景遮挡并显示译文</div>
+              </div>
+              <code style="background:var(--c-bg);padding:4px 12px;border-radius:6px;">Ctrl + Alt + X</code>
+            </div>
+            <div class="kv-row">
+              <div>
+                <div style="font-weight:600;">截屏纯 OCR 识别快捷键</div>
+                <div style="font-size:12px;color:var(--c-muted);">框选后秒级提取文字并可自动复制，无需等待大模型翻译</div>
+              </div>
+              <code style="background:var(--c-bg);padding:4px 12px;border-radius:6px;">Ctrl + Alt + O</code>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ==================== 2. 截屏原位翻译（逐段背景采样遮挡核心演示） ==================== -->
+  <section class="b-surf" id="b-surf-shot" hidden>
+    <div class="stage-desc">
+      <div><strong>方案 B 截屏浮窗（识别位置原地翻译 + 背景遮挡原始内容）</strong>：保留原图非文字区域（图标、命令行、排版结构），在 Tesseract 定位的<strong>每个文字块坐标处采样原背景色（白底/深色底自适应）100% 不透明盖住英文</strong>，原位渲染中文！</div>
+      <div class="state-pills">
+        <button class="on" onclick="setBShot('inplace', this)">原位背景遮挡译文（默认）</button>
+        <button onclick="setBShot('compare', this)">按住对比底层原图</button>
+        <button onclick="setBShot('ocr', this)">纯 OCR 识别提取态</button>
+      </div>
+    </div>
+
+    <div class="screen-canvas">
+      <div class="mock-app-window">
+        <div class="mock-win-head">
+          <span>🌐 docs.linux-desktop.org / wayland-input-guide</span>
+          <span>100% 缩放</span>
+        </div>
+        <div class="mock-win-content">
+          <div class="selection-frame" id="b-sel-frame">
+            <!-- 文字块 1：浅色底标题 -->
+            <div class="orig-block">
+              <h2 class="orig-h2">Wayland Global Shortcuts & In-Place Translation</h2>
+              <div class="inplace-patch light-bg" data-kind="patch" style="font-size:19px;font-weight:700;">
+                Wayland 全局快捷键与原位截屏翻译
+              </div>
+            </div>
+
+            <!-- 文字块 2：浅色底正文段落 -->
+            <div class="orig-block">
+              <p class="orig-p">Each detected text block is masked with its sampled background color so original words never bleed through, while keeping code blocks and icons untouched.</p>
+              <div class="inplace-patch light-bg" data-kind="patch" style="font-size:14.5px;line-height:1.6;">
+                每个识别出的文字块都会用采样得到的原背景色进行不透明遮盖，确保底层原文绝不透出，同时完整保留代码块与图标结构。
+              </div>
+            </div>
+
+            <!-- 文字块 3：深色横幅（左侧说明文字被深色补丁原位遮挡翻译，右侧代码命令保留原样！） -->
+            <div class="orig-dark-box">
+              <div class="orig-block" style="margin:0;flex:1;">
+                <div class="orig-dark-note">Verify active portal session status in terminal:</div>
+                <div class="inplace-patch dark-bg" data-kind="patch" style="font-size:13px;">
+                  在终端中验证当前活跃的 Portal 会话状态：
+                </div>
+              </div>
+              <span class="orig-code">$ gdbus introspect --session</span>
+            </div>
+
+            <!-- 悬浮胶囊操作栏 -->
+            <div class="overlay-pill-bar">
+              <button class="on" id="b-bar-inplace" onclick="setBShot('inplace')">原位译文</button>
+              <button id="b-bar-ocr" onclick="setBShot('ocr')">OCR 原文</button>
+              <button onmousedown="setBShot('compare')" onmouseup="setBShot('inplace')">按住看原图</button>
+              <span class="div"></span>
+              <button onclick="flashBtn(this, '译文已复制 ✓')">复制译文</button>
+              <button onclick="flashBtn(this, 'OCR已复制 ✓')">复制原文</button>
+              <span class="div"></span>
+              <button title="Esc 关闭">✕ Esc</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="ocr-result-drawer" id="b-ocr-drawer" hidden>
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
+          <strong style="font-size:13px;color:#5eead4;">🔍 OCR 提取原文（可直接划选或一键复制）</strong>
+          <button class="btn primary" style="padding:3px 10px;font-size:12px;" onclick="flashBtn(this, '已复制全部原文 ✓')">复制全部</button>
+        </div>
+        <div class="mono" style="font-size:13px;line-height:1.65;color:#e2e8f0;white-space:pre-wrap;">Wayland Global Shortcuts & In-Place Translation
+Each detected text block is masked with its sampled background color so original words never bleed through, while keeping code blocks and icons untouched.
+Verify active portal session status in terminal:  $ gdbus introspect --session</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ==================== 3. 左下角语音状态栏 ==================== -->
+  <section class="b-surf" id="b-surf-hud" hidden>
+    <div class="stage-desc">
+      <div><strong>左下角自适应透明语音胶囊</strong>：无白边真透明窗口，单条胶囊随字数自适应展开（最多两行最新流式字幕），服务端重启后自动指数退避重连。</div>
+      <div class="state-pills">
+        <button class="on" onclick="setBHud('rec', this)">录音 + 实时字幕</button>
+        <button onclick="setBHud('polish', this)">本地纠错中</button>
+        <button onclick="setBHud('done', this)">已精准注入焦点</button>
+      </div>
+    </div>
+    <div class="screen-canvas" style="min-height:280px;">
+      <div class="b-hud-capsule">
+        <span class="wave-bars">
+          <i style="height:8px"></i><i style="height:15px"></i><i style="height:11px"></i><i style="height:6px"></i>
+        </span>
+        <span id="b-hud-tag" style="color:#5eead4;font-weight:600;white-space:nowrap;">0:03 识别中</span>
+        <span style="opacity:0.25;">|</span>
+        <span id="b-hud-txt">主页设置为翻译框，<span style="color:#93c5fd;text-decoration:underline dotted;">我可以手动复制粘贴输入翻译</span></span>
+      </div>
+    </div>
+  </section>
+
+  <!-- ==================== 4. 手机语音页 ==================== -->
+  <section class="b-surf" id="b-surf-phone" hidden>
+    <div class="stage-desc">
+      <div><strong>手机局域网语音输入 (`/voice`)</strong>：圆形防误触按住说话按钮（固定 DOM 节点不闪烁重建），支持异常时一键补发识别原文到电脑当前窗口。</div>
+    </div>
+    <div class="phone-card">
+      <div style="display:flex;justify-content:space-between;align-items:center;">
+        <strong>📱 局域网语音输入</strong>
+        <span class="badge ok"><i class="dot"></i>10.0.0.110 已加密连接</span>
+      </div>
+      <div class="ptt-circle-wrap">
+        <button class="ptt-btn">按住说话</button>
+        <div style="margin-top:12px;font-size:13px;color:var(--c-muted);">松开自动转写纠错并输入电脑光标处</div>
+      </div>
+      <div style="border-top:1px solid var(--c-border);padding-top:12px;font-size:13px;">
+        <div style="font-size:12px;color:var(--c-muted);margin-bottom:6px;">最近发送</div>
+        <div style="padding:10px 12px;background:var(--c-bg);border-radius:10px;">截屏翻译要求识别位置原地翻译并且背景遮挡原始内容。</div>
+      </div>
+    </div>
+  </section>
+</div>
+
+<script>
+document.querySelectorAll('#b-tabs button').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('#b-tabs button').forEach(b => b.classList.remove('on'));
+    btn.classList.add('on');
+    const s = btn.dataset.surf;
+    document.querySelectorAll('.b-surf').forEach(sec => sec.hidden = (sec.id !== 'b-surf-' + s));
+  });
+});
+
+function switchBNav(view) {
+  document.getElementById('b-view-home').hidden = (view !== 'home');
+  document.getElementById('b-view-setup').hidden = (view !== 'setup');
+  document.getElementById('b-nav-home').classList.toggle('on', view === 'home');
+  document.getElementById('b-nav-setup').classList.toggle('on', view === 'setup');
+}
+
+function setBHome(mode, pill) {
+  switchBNav('home');
+  if (pill) {
+    pill.parentElement.querySelectorAll('button').forEach(b => b.classList.remove('on'));
+    pill.classList.add('on');
+  }
+  document.getElementById('b-mode-text').classList.toggle('on', mode === 'text');
+  document.getElementById('b-mode-ocr').classList.toggle('on', mode === 'ocr');
+  const zone = document.getElementById('b-ocr-zone');
+  const src = document.getElementById('b-src');
+  const dst = document.getElementById('b-dst');
+  if (mode === 'ocr') {
+    zone.hidden = false;
+    src.value = "Wayland Global Shortcuts & In-Place Translation\nEach detected text block is masked with its sampled background color.";
+    dst.value = "Wayland 全局快捷键与原位截屏翻译\n每个识别出的文字块都会用采样得到的原背景色进行不透明遮盖。";
+  } else {
+    zone.hidden = true;
+    src.value = "By separating UI components, domain logic, and business orchestration into three strict layers, every module remains testable and replaceable without side effects.";
+    dst.value = "通过将 UI 组件、底层领域逻辑与业务编排严格拆分为三层，每个模块都能保持可独立测试与可替换，且不产生隐式副作用。";
+  }
+}
+
+function swapBLang() {
+  const src = document.getElementById('b-src');
+  const dst = document.getElementById('b-dst');
+  const tmp = src.value;
+  src.value = dst.value;
+  dst.value = tmp;
+}
+
+function runBDemoTranslate() {
+  const lang = document.getElementById('b-dst-lang').value;
+  const src = document.getElementById('b-src').value.trim();
+  const dst = document.getElementById('b-dst');
+  if (!src) { dst.value = ''; return; }
+  if (lang === 'raw') { dst.value = src; return; }
+  if (lang === 'en') { dst.value = "First align on the UI design, then implement the underlying logic layer and assemble the business layer modularly."; return; }
+  dst.value = "通过将 UI 组件、底层领域逻辑与业务编排严格拆分为三层，每个模块都能保持可独立测试与可替换，且不产生隐式副作用。";
+}
+
+function fillFromRecent(txt) {
+  switchBNav('home');
+  document.getElementById('b-src').value = txt;
+  document.getElementById('b-dst').value = "（已载入，按 Ctrl+Enter 或点击翻译即可转换目标语言）";
+}
+
+function flashBtn(btn, msg) {
+  const old = btn.textContent;
+  btn.textContent = msg;
+  setTimeout(() => { btn.textContent = old; }, 1200);
+}
+
+function setBShot(mode, pill) {
+  if (pill) {
+    pill.parentElement.querySelectorAll('button').forEach(b => b.classList.remove('on'));
+    pill.classList.add('on');
+  }
+  const frame = document.getElementById('b-sel-frame');
+  const patches = frame.querySelectorAll('[data-kind="patch"]');
+  const drawer = document.getElementById('b-ocr-drawer');
+  document.getElementById('b-bar-inplace').classList.toggle('on', mode === 'inplace');
+  document.getElementById('b-bar-ocr').classList.toggle('on', mode === 'ocr');
+
+  frame.classList.toggle('ocr-box-highlight', mode === 'ocr');
+  drawer.hidden = (mode !== 'ocr');
+  patches.forEach(p => {
+    p.style.opacity = (mode === 'compare') ? '0' : '1';
+  });
+}
+
+function setBHud(state, pill) {
+  pill.parentElement.querySelectorAll('button').forEach(b => b.classList.remove('on'));
+  pill.classList.add('on');
+  const tag = document.getElementById('b-hud-tag');
+  const txt = document.getElementById('b-hud-txt');
+  if (state === 'rec') {
+    tag.textContent = '0:03 识别中';
+    txt.innerHTML = '主页设置为翻译框，<span style="color:#93c5fd;text-decoration:underline dotted;">我可以手动复制粘贴输入翻译</span>';
+  } else if (state === 'polish') {
+    tag.textContent = '纠错润色中';
+    txt.textContent = 'qwen3.5:4b 正在修正标点与同音字…';
+  } else {
+    tag.textContent = '已输入 ✓';
+    txt.textContent = '主页设置为翻译框，我可以手动复制粘贴输入翻译！';
+  }
+}
+</script>
+</body>
+</html>

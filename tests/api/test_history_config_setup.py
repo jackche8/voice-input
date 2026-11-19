@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from tests.api.conftest import TEST_TOKEN, lan_client, lan_headers, local_client, local_headers
+from tests.api.providers import make_text_wav
 
 
 def test_history_and_status_and_setup_not_faked(app, runtime):
@@ -9,7 +10,7 @@ def test_history_and_status_and_setup_not_faked(app, runtime):
     created = client.post(
         "/api/v1/utterances/from-audio",
         data={"job_id": "job-hist", "focus_id": "f"},
-        files={"audio": ("a.txt", b"keep", "text/plain")},
+        files={"audio": ("a.wav", make_text_wav("keep"), "audio/wav")},
         headers=local_headers(),
     )
     assert created.status_code == 200
@@ -36,7 +37,7 @@ def test_lan_history_allowed_config_forbidden(app):
     local.post(
         "/api/v1/utterances/from-audio",
         data={"job_id": "job-read", "focus_id": "f"},
-        files={"audio": ("a.txt", b"keep", "text/plain")},
+        files={"audio": ("a.wav", make_text_wav("keep"), "audio/wav")},
         headers=local_headers(),
     )
     remote = lan_client(app)

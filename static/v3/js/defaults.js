@@ -2,7 +2,7 @@
  *
  * 配置字段与 AppConfig 对齐：
  *   polish_enabled, custom_keywords, translate_target_lang,
- *   hotkey_voice, hotkey_screenshot, hotkey_repeat
+ *   hotkey_voice, hotkey_screenshot, hotkey_ocr, hotkey_repeat
  * 历史记录字段与 HistoryRecord / HistoryListResponse 对齐：
  *   timestamp, raw_text, final_text, language, mode, source, polish, job_id,
  *   records, total, skipped_malformed
@@ -16,12 +16,18 @@
 (function (V3) {
   "use strict";
 
-  function setupState() {
+  function homeState() {
     return {
       connection: "disconnected",
       connectionError: null,
+      error: null,
+      message: "",
       statusNotice: null,
       aboutText: "",
+      unmetGates: [],
+      theme: "dark",
+      activePanel: "translate",
+      setupTab: "models",
       asr: {
         name: V3.labels.FIXED_MODELS.asr,
         status: "unknown",
@@ -30,7 +36,8 @@
         deviceLabel: null,
         progress: null,
         message: null,
-        action: null
+        action: null,
+        taskId: null
       },
       ollama: {
         modelName: V3.labels.FIXED_MODELS.ollama,
@@ -41,29 +48,55 @@
         sizeLabel: null,
         progress: null,
         message: null,
-        action: null
+        action: null,
+        taskId: null
       },
       polish_enabled: null,
       custom_keywords: [],
+      keywordsDraft: null,
       keywordsSaved: false,
       translate_target_lang: null,
       targetLangOptions: null,
       targetLangSaved: false,
       hotkey_voice: "",
       hotkey_screenshot: "",
+      hotkey_ocr: "",
       hotkey_repeat: "",
       hotkeyDrafts: null,
       hotkeyCapturing: null,
       hotkeyFocus: null,
       hotkeyCaptureError: "",
+      hotkeyCaptureWarning: "",
       hotkeyCaptureHint: "",
       hotkeySaveError: "",
       hotkeysSaved: false,
-      lanEntries: null,
-      tokenMasked: "",
-      tokenPresent: false,
-      serviceUrl: "",
-      localUrl: "",
+      translate: {
+        phase: "empty",
+        sourceText: "",
+        target_lang: "zh",
+        text: "",
+        ocr_text: "",
+        elapsedMs: null,
+        error: null,
+        message: "",
+        details: null,
+        copyStatus: null,
+        copyKind: null
+      },
+      ocr: {
+        phase: "empty",
+        mode: "raw",
+        target_lang: "raw",
+        fileName: "",
+        previewUrl: "",
+        ocr_text: "",
+        text: "",
+        error: null,
+        message: "",
+        details: null,
+        copyStatus: null,
+        copyKind: null
+      },
       history: {
         records: [],
         total: null,
@@ -71,35 +104,16 @@
         loading: false,
         message: null
       },
+      lanEntries: null,
+      lanMessage: "",
+      tokenMasked: "",
+      tokenPresent: false,
+      serviceUrl: "",
+      localUrl: "",
       capabilities: null,
       apiPaths: null,
-      unmetGates: [],
       copyKind: null,
       copyStatus: null
-    };
-  }
-
-  function statusState() {
-    return {
-      connection: "disconnected",
-      events: [],
-      hotkey_repeat: "",
-      copyStatus: null
-    };
-  }
-
-  function translateState() {
-    return {
-      connection: "disconnected",
-      phase: "empty",
-      text: "",
-      ocr_text: "",
-      target_lang: "",
-      error: null,
-      message: "",
-      details: null,
-      copyStatus: null,
-      closeHint: "Esc / 点击外部关闭"
     };
   }
 
@@ -158,9 +172,7 @@
   }
 
   V3.defaults = {
-    setupState: setupState,
-    statusState: statusState,
-    translateState: translateState,
+    homeState: homeState,
     voiceState: voiceState,
     merge: merge
   };

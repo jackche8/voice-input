@@ -13,10 +13,9 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 PAGES: dict[str, str] = {
-    "/setup": "setup.html",
+    "/": "index.html",
+    "/setup": "index.html",
     "/voice": "voice.html",
-    "/overlay-status": "overlay-status.html",
-    "/overlay-translate": "overlay-translate.html",
 }
 ASSET_DIRS = ("js", "css")
 OPENAPI_SNAPSHOT_FILE = "openapi.json"
@@ -27,7 +26,11 @@ _PAGE_HEADERS = {"Referrer-Policy": "no-referrer", "Cache-Control": "no-store"}
 
 def install_pages(app: FastAPI, static_v3: Path) -> None:
     root = Path(static_v3).resolve()
-    missing = [name for name in (*PAGES.values(), *ASSET_DIRS, OPENAPI_SNAPSHOT_FILE) if not (root / name).exists()]
+    missing = [
+        name
+        for name in (*dict.fromkeys(PAGES.values()), *ASSET_DIRS, OPENAPI_SNAPSHOT_FILE)
+        if not (root / name).exists()
+    ]
     if missing:
         raise RuntimeError(f"static/v3 缺少生产界面文件: {missing}")
 

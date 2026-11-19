@@ -25,7 +25,7 @@
       return { tone: "err", text: V3.labels.formatError(state.error, state.message || "无法连接") };
     }
     if (state.tokenValid === false) {
-      return { tone: "err", text: "访问令牌无效或已更新，请在电脑「设置 → 手机录入」重新扫码进入。" };
+      return { tone: "err", text: "访问令牌无效或已更新，请在电脑工作台「手机扫码语音」重新扫码进入。" };
     }
     const phase = state.phase || "idle";
     if (phase === "recording") {
@@ -158,15 +158,109 @@
       });
     }
 
+    /* 挂载时一次性创建卡片内固定节点（特别是 .mic 按钮），避免 setState 刷新计时时销毁重建丢失 PointerCapture。 */
+    const uploadHint = V3.dom.el("p", {
+      className: "hint muted",
+      style: "font-size:var(--fs-sm);line-height:1.6"
+    });
+    const fileInput = V3.dom.el("input", {
+      type: "file",
+      accept: "audio/*",
+      capture: "microphone",
+      hidden: true,
+      "aria-label": "选择录音文件"
+    });
+    fileInput.addEventListener("change", function () {
+      const file = fileInput.files && fileInput.files[0];
+      call(hooks, "onPickAudio", file ? { file: file, name: file.name, size: file.size, type: file.type } : { file: null });
+      fileInput.value = "";
+    });
+    const uploadWrap = V3.dom.el("div", { hidden: true }, [
+      uploadHint,
+      V3.dom.el("label", { className: "upload" }, [
+        V3.dom.icon("upload"),
+        document.createTextNode("选择录音文件"),
+        fileInput
+      ])
+    ]);
+
+    const micLabelEl = V3.dom.el("span", { text: "按住说话" });
+    const micBtn = V3.dom.el("button", {
+      type: "button",
+      className: "mic",
+      "aria-pressed": "false",
+      "aria-label": "按住说话"
+    }, [
+      V3.dom.icon("mic"),
+      micLabelEl
+    ]);
+    micBtn.addEventListener("contextmenu", function (ev) {
+      ev.preventDefault();
+    });
+    micBtn.addEventListener("pointerdown", function (ev) {
+      if (ev.button != null && ev.button !== 0) return;
+      ev.preventDefault();
+      try { micBtn.setPointerCapture(ev.pointerId); } catch (err) {}
+      startRecord(ev);
+    });
+    micBtn.addEventListener("pointerup", function (ev) {
+      ev.preventDefault();
+      try {
+        if (micBtn.hasPointerCapture && micBtn.hasPointerCapture(ev.pointerId)) {
+          micBtn.releasePointerCapture(ev.pointerId);
+        }
+      } catch (err) {}
+      endRecord(ev);
+    });
+    micBtn.addEventListener("pointercancel", function () { cancelRecord(); });
+    micBtn.addEventListener("keydown", function (ev) {
+      if (ev.key === " " || ev.key === "Enter") {
+        ev.preventDefault();
+        if (!pressed) startRecord(ev);
+      }
+    });
+    micBtn.addEventListener("keyup", function (ev) {
+      if (ev.key === " " || ev.key === "Enter") {
+        ev.preventDefault();
+        endRecord(ev);
+      }
+    });
+
+    const statusEl = V3.dom.el("div", { className: "ph-status", id: "v3-ph-status" });
+    const resultSlot = V3.dom.el("div", { hidden: true });
+    const keyKbd = V3.dom.el("kbd", { text: "空格" });
+    const keyRow = V3.dom.el("div", { className: "ph-key" }, [
+      document.createTextNode("或按住 "),
+      keyKbd,
+      document.createTextNode(" 说话 "),
+      V3.dom.el("button", {
+        type: "button",
+        className: "linkbtn",
+        text: "改快捷键",
+        onClick: function () { call(hooks, "onStartChangeHotkey"); }
+      })
+    ]);
+
+    card.appendChild(uploadWrap);
+    card.appendChild(micBtn);
+    card.appendChild(statusEl);
+    card.appendChild(resultSlot);
+    card.appendChild(keyRow);
+
     function renderCard() {
-      V3.dom.empty(card);
       const ok = connected(state);
       if (state.tokenValid === false) {
         banner.hidden = false;
-        banner.textContent = "访问令牌无效或已更新，请在电脑「设置 → 手机录入」重新扫码进入。";
+        banner.textContent = "访问令牌无效或已更新，请在电脑工作台「手机扫码语音」重新扫码进入。";
       } else if (state.connection === "error" && (state.message || state.error)) {
         banner.hidden = false;
-        banner.textContent = V3.labels.formatError(state.error, state.message);
+        if (typeof state.error === "string" && state.error && !Object.prototype.hasOwnProperty.call(V3.labels.ERROR_CODE, state.error)) {
+          banner.textContent = (state.message && String(state.message) !== state.error)
+            ? state.error + "：" + String(state.message)
+            : state.error;
+        } else {
+          banner.textContent = V3.labels.formatError(state.error, state.message, state.details);
+        }
       } else {
         banner.hidden = true;
       }
@@ -182,93 +276,54 @@
         headBadge.textContent = "未连接";
       }
 
-      if (state.useFileUpload) {
-        const hint = V3.dom.el("p", {
-          className: "hint muted",
-          style: "font-size:var(--fs-sm);line-height:1.6",
-          text: state.fileUploadHint || "当前不是安全连接，浏览器不允许网页录音。请用下面按钮选择系统录音文件。选择后只通知业务层，本页不会自行上传。"
-        });
-        const input = V3.dom.el("input", {
-          type: "file",
-          accept: "audio/*",
-          capture: "microphone",
-          hidden: true,
-          disabled: !ok,
-          "aria-label": "选择录音文件"
-        });
-        input.addEventListener("change", function () {
-          const file = input.files && input.files[0];
-          call(hooks, "onPickAudio", file ? { file: file, name: file.name, size: file.size, type: file.type } : { file: null });
-          input.value = "";
-        });
-        const label = V3.dom.el("label", { className: "upload" }, [
-          V3.dom.icon("upload"),
-          document.createTextNode("选择录音文件"),
-          input
-        ]);
-        card.appendChild(hint);
-        card.appendChild(label);
+      const useUpload = !!state.useFileUpload;
+      uploadWrap.hidden = !useUpload;
+      micBtn.hidden = useUpload;
+      keyRow.hidden = useUpload;
+
+      if (useUpload) {
+        uploadHint.textContent = state.fileUploadHint || "当前不是安全连接，浏览器不允许网页录音。请用下面按钮选择系统录音文件。选择后只通知业务层，本页不会自行上传。";
+        fileInput.disabled = !ok;
       } else {
         const recording = state.phase === "recording" || pressed;
         const busy = state.phase === "uploading" || state.phase === "recognizing" ||
           state.phase === "polishing" || state.phase === "waiting" ||
           state.phase === "queued" || state.phase === "claimed";
-        const mic = V3.dom.el("button", {
-          type: "button",
-          className: "mic" + (recording ? " rec" : "") + (pressed && !recording ? " pressed" : ""),
-          disabled: !canRecord() && !recording,
-          "aria-pressed": recording ? "true" : "false",
-          "aria-label": recording ? "松开结束录音" : "按住说话"
-        }, [
-          V3.dom.icon("mic"),
-          V3.dom.el("span", { text: recording ? "松开结束" : (busy ? "处理中" : "按住说话") })
-        ]);
-        mic.addEventListener("pointerdown", function (ev) {
-          if (ev.button != null && ev.button !== 0) return;
-          ev.preventDefault();
-          try { mic.setPointerCapture(ev.pointerId); } catch (err) {}
-          startRecord(ev);
-        });
-        mic.addEventListener("pointerup", function (ev) {
-          ev.preventDefault();
-          endRecord(ev);
-        });
-        mic.addEventListener("pointercancel", function () { cancelRecord(); });
-        mic.addEventListener("keydown", function (ev) {
-          if (ev.key === " " || ev.key === "Enter") {
-            ev.preventDefault();
-            if (!pressed) startRecord(ev);
-          }
-        });
-        mic.addEventListener("keyup", function (ev) {
-          if (ev.key === " " || ev.key === "Enter") {
-            ev.preventDefault();
-            endRecord(ev);
-          }
-        });
-        card.appendChild(mic);
+        const nextClass = "mic" + (recording ? " rec" : "") + (pressed && !recording ? " pressed" : "");
+        if (micBtn.className !== nextClass) micBtn.className = nextClass;
+        const nextDisabled = !canRecord() && !recording;
+        if (micBtn.disabled !== nextDisabled) micBtn.disabled = nextDisabled;
+        micBtn.setAttribute("aria-pressed", recording ? "true" : "false");
+        micBtn.setAttribute("aria-label", recording ? "松开结束录音" : "按住说话");
+        const nextMicText = recording
+          ? (state.elapsed_label ? "松开结束 " + state.elapsed_label : "松开结束")
+          : (busy ? "处理中" : "按住说话");
+        if (micLabelEl.textContent !== nextMicText) micLabelEl.textContent = nextMicText;
+        keyKbd.textContent = state.capturingHotkey ? "请按新键" : (state.recordHotkeyLabel || "空格");
       }
 
       const st = phaseStatus(state);
-      const statusEl = V3.dom.el("div", { className: "ph-status " + st.tone, id: "v3-ph-status", text: st.text });
-      card.appendChild(statusEl);
-      live.textContent = st.text;
+      const nextStatusClass = "ph-status" + (st.tone ? " " + st.tone : "");
+      if (statusEl.className !== nextStatusClass) statusEl.className = nextStatusClass;
+      if (statusEl.textContent !== st.text) statusEl.textContent = st.text;
+      if (live.textContent !== st.text) live.textContent = st.text;
 
+      V3.dom.empty(resultSlot);
       if (state.phase === "typed" || state.phase === "done") {
-        card.appendChild(resultBlock(state.text, {
+        resultSlot.appendChild(resultBlock(state.text, {
           badge: V3.labels.polish(state.polish),
           badgeClass: V3.labels.polishBadgeClass(state.polish),
           jobState: state.job_state
         }));
       } else if (state.phase === "polish_failed") {
-        card.appendChild(resultBlock(state.raw_text || state.text, {
+        resultSlot.appendChild(resultBlock(state.raw_text || state.text, {
           title: "识别原文（未输入）",
           badge: "润色失败",
           badgeClass: "danger",
           action: { label: "发送原文", onClick: sendOriginal }
         }));
       } else if (state.phase === "delivery_unknown" || state.job_state === "delivery_unknown") {
-        card.appendChild(resultBlock(state.text || state.raw_text, {
+        resultSlot.appendChild(resultBlock(state.text || state.raw_text, {
           badge: "投递结果未知",
           badgeClass: "warn",
           action: {
@@ -279,27 +334,13 @@
           }
         }));
       } else if (state.phase === "failed" && (state.raw_text || state.text)) {
-        card.appendChild(resultBlock(state.raw_text || state.text, {
+        resultSlot.appendChild(resultBlock(state.raw_text || state.text, {
           title: "识别原文",
           badge: "未完成",
           badgeClass: "danger"
         }));
       }
-
-      if (!state.useFileUpload) {
-        const keyRow = V3.dom.el("div", { className: "ph-key" }, [
-          document.createTextNode("或按住 "),
-          V3.dom.el("kbd", { text: state.capturingHotkey ? "请按新键" : (state.recordHotkeyLabel || "空格") }),
-          document.createTextNode(" 说话 "),
-          V3.dom.el("button", {
-            type: "button",
-            className: "linkbtn",
-            text: "改快捷键",
-            onClick: function () { call(hooks, "onStartChangeHotkey"); }
-          })
-        ]);
-        card.appendChild(keyRow);
-      }
+      resultSlot.hidden = !resultSlot.firstChild;
     }
 
     function resultBlock(text, meta) {

@@ -1,7 +1,7 @@
 # 模板：install.sh 经 _v3/units.py 渲染到 ~/.config/systemd/user；@...@ 为占位符，不要直接复制。
-# 项目内用户级 Ollama（设置页“安装 Ollama”解压到项目缓存，不用 sudo）；只绑回环 11434。
+# 项目内用户级 Ollama（设置页“安装 Ollama”解压到项目缓存，不用 sudo）；只绑回环 17947，避免与系统 11434 冲突。
 [Unit]
-Description=Ollama Voice Input - 本地 Ollama（127.0.0.1:11434，纠错/翻译 qwen3.5:4b）
+Description=Ollama Voice Input - 本地 Ollama（127.0.0.1:17947，纠错/翻译 qwen3.5:4b）
 ConditionPathExists=@OLLAMA_BIN@
 
 [Service]
@@ -9,7 +9,7 @@ ConditionPathExists=@OLLAMA_BIN@
 ExecCondition=@VENV@/bin/python3 @DIR@/_activation.py check
 RestartPreventExitStatus=78
 Type=simple
-Environment=OLLAMA_HOST=127.0.0.1:11434
+Environment=OLLAMA_HOST=127.0.0.1:17947
 Environment=OLLAMA_MODELS=@OLLAMA_MODELS@
 ExecStart=@OLLAMA_BIN@ serve
 Restart=on-failure

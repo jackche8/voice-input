@@ -1,11 +1,38 @@
 """测试用能力提供者。明确不是识别引擎，不拼接字幕，不宣称官方 sidecar 可用。"""
 from __future__ import annotations
 
+import io
+import wave
+
 from _contracts import (
+    OcrTextBlock,
     RecognizeSessionCreate,
     SessionFinalEvent,
     SttResponse,
 )
+
+
+def make_wav_bytes(
+    pcm_payload: bytes,
+    *,
+    sample_rate: int = 16000,
+    channels: int = 1,
+) -> bytes:
+    """生成合法 PCM WAV 字节，供 API 路由通过真实容器解码与静音校验。"""
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as wf:
+        wf.setnchannels(channels)
+        wf.setsampwidth(2)
+        wf.setframerate(sample_rate)
+        wf.writeframes(pcm_payload)
+    return buf.getvalue()
+
+
+def make_text_wav(text: str) -> bytes:
+    raw = text.encode("utf-8")
+    if len(raw) % 2 != 0:
+        raw += b" "
+    return make_wav_bytes(raw)
 
 
 class FixtureAsrProvider:
@@ -39,7 +66,7 @@ class FixtureAsrProvider:
 def fixture_transcribe(audio: bytes, *, language: str | None = None, context: str | None = None) -> SttResponse:
     del context
     try:
-        text = audio.decode("utf-8")
+        text = audio.decode("utf-8").strip()
         if text and text.isprintable() and "\x00" not in text:
             return SttResponse(text=text, language=language or "zh")
     except UnicodeDecodeError:
@@ -54,3 +81,26 @@ def fixture_ocr(image_bytes: bytes, **_kwargs) -> str:
         return image_bytes.decode("utf-8")
     except UnicodeDecodeError:
         return "fixture-ocr-text"
+
+
+def fixture_ocr_layout(
+    image_bytes: bytes, **_kwargs
+) -> tuple[int, int, str, list[OcrTextBlock]]:
+    if image_bytes == b"empty-image":
+        return 320, 180, "", []
+    try:
+        raw_text = image_bytes.decode("utf-8").strip()
+    except UnicodeDecodeError:
+        raw_text = "fixture-ocr-text"
+    lines = [line.strip() for line in raw_text.splitlines() if line.strip()]
+    blocks = [
+        OcrTextBlock(
+            bbox=(12, 16 + idx * 36, 200, 28),
+            ocr_text=line,
+            translated_text="",
+            bg_color="#111827" if idx % 2 else "#ffffff",
+            fg_color="#f8fafc" if idx % 2 else "#0f172a",
+        )
+        for idx, line in enumerate(lines)
+    ]
+    return 320, 180, "\n".join(lines), blocks

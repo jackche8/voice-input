@@ -1,6 +1,9 @@
-"""jobs 投递：claim → 按该 job 绑定的焦点注入 → ack；重复键走 resend，同一投递路径。
+"""jobs 投递：claim → 按该 job 绑定的焦点注入 → ack；重复键与未确认重发走同一 resend 路径。
 
-ack 只依据注入证据（见 `_inject`）：能证明打出 complete、能证明没打 none、否则 partial_or_unknown。
+- 兼容既有 `FocusBoundInjector` 契约，并提供跨平台 `PlatformFocusProbe` / `PlatformInjector`
+  适配 `_platform.protocol.PlatformAdapter`；
+- ack 只依据注入证据：能证明打出 complete、能证明没打 none、否则 partial_or_unknown；
+- `RepeatAction.confirm_resend` 供 `VoiceHudOverlay` 的 `delivery_unknown` 卡片直接调用。
 """
 from __future__ import annotations
 
@@ -9,12 +12,71 @@ import time
 import traceback
 from collections.abc import Callable
 from dataclasses import dataclass
+from typing import Any
 
 from _contracts import ErrorCode
 from _desktop.api import ApiError
 from _desktop.status import PlatformStatus
-from _focus import FocusProbe
-from _inject import FocusBoundInjector, InjectEvidence
+from _focus import FocusProbe, FocusSnapshot
+from _inject import AckResult, ClaimAckLog, FocusBoundInjector, InjectEvidence
+from _platform.protocol import FocusTarget, PlatformAdapter
+
+
+class PlatformFocusProbe:
+    """将跨平台 `PlatformAdapter.current_focus()` 适配为 `FocusProbe` 接口。"""
+
+    def __init__(self, platform: PlatformAdapter) -> None:
+        self._platform = platform
+
+    def current_id(self) -> str:
+        return str(self._platform.current_focus().focus_id or "")
+
+    def is_terminal(self) -> bool:
+        return bool(self._platform.current_focus().is_terminal)
+
+    def snapshot(self) -> FocusSnapshot:
+        target = self._platform.current_focus()
+        # FocusSnapshot 兼容 int/str；保持非空字符串原样传递，兼容 macOS bundle:pid 句柄
+        return FocusSnapshot(focus_id=target.focus_id, terminal=target.is_terminal)  # type: ignore[arg-type]
+
+
+class PlatformInjector:
+    """将跨平台 `PlatformAdapter.inject_text()` 适配为 `FocusBoundInjector` 契约。"""
+
+    def __init__(self, platform: PlatformAdapter, acks: ClaimAckLog | None = None) -> None:
+        self._platform = platform
+        self.acks = acks or ClaimAckLog()
+
+    def inject(
+        self,
+        text: str,
+        *,
+        focus_id: int | str | None,
+        claim_id: str | None = None,
+    ) -> tuple[AckResult, InjectEvidence]:
+        raw_id = "" if focus_id is None else str(focus_id).strip()
+        target = (
+            FocusTarget(focus_id=raw_id, app_id="", is_terminal=False, is_self=False)
+            if raw_id and raw_id != "0"
+            else None
+        )
+        res = self._platform.inject_text(text, target=target)
+        result: AckResult = res.ack_result
+        evidence = InjectEvidence(
+            delivered=res.ok,
+            proved_output=res.ok,
+            proved_none=(not res.ok and not res.uncertain),
+            method=res.method,
+            detail=res.detail,
+            focus_decision=(
+                "mismatch"
+                if res.method == "focus_mismatch"
+                else ("unknown" if target is None else "match")
+            ),
+        )
+        if claim_id:
+            self.acks.record(claim_id, result)
+        return result, evidence
 
 
 @dataclass(frozen=True)
@@ -43,8 +105,8 @@ class DeliveryLoop:
     def __init__(
         self,
         *,
-        jobs,
-        injector: FocusBoundInjector,
+        jobs: Any,
+        injector: FocusBoundInjector | PlatformInjector,
         last: LastDelivered,
         claim_timeout_s: float = 20.0,
         retry_sleep: Callable[[float], None] = time.sleep,
@@ -64,7 +126,11 @@ class DeliveryLoop:
         job_id, claim_id, text = job["job_id"], job["claim_id"], job["text"]
         self.last.remember(job_id, text)
         try:
-            result, evidence = self.injector.inject(text, focus_id=job.get("focus_id") or None, claim_id=claim_id)
+            result, evidence = self.injector.inject(
+                text,
+                focus_id=job.get("focus_id") or None,
+                claim_id=claim_id,
+            )
         except Exception as exc:
             traceback.print_exc()
             result = "partial_or_unknown"
@@ -79,6 +145,8 @@ class DeliveryLoop:
             try:
                 self.run_once()
             except Exception as exc:
+                if self._stop.is_set():
+                    return
                 print(f"  投递: 认领异常 {exc}, 3s 后重试", flush=True)
                 self.retry_sleep(3.0)
 
@@ -87,17 +155,17 @@ class DeliveryLoop:
 
 
 class RepeatAction:
-    """重复键：把最近一次投递的文本作为新 job 重发到按键时的焦点（不是原焦点）。
+    """重复键与未确认投递确认重发：把文本作为新 job 重发到当前焦点（不是原焦点）。
 
-    用户按重复键即明确要再输入一次，故对 delivery_unknown 原 job 直接带 confirm。
+    用户按重复键或在 `delivery_unknown` 卡片点「重新输入」即明确授权再次输入，故带 confirm=True。
     """
 
     def __init__(
         self,
         *,
-        api,
+        api: Any,
         last: LastDelivered,
-        probe: FocusProbe,
+        probe: FocusProbe | PlatformFocusProbe,
         status: PlatformStatus,
         job_ids: Callable[[], str],
     ) -> None:
@@ -112,16 +180,26 @@ class RepeatAction:
         if item is None:
             self.status.error(ErrorCode.invalid_request, "还没有识别记录")
             return
+        self.confirm_resend(item.job_id, item.text, confirm=True)
+
+    def confirm_resend(self, job_id: str, text: str, confirm: bool) -> bool:
+        """供 `VoiceHudOverlay` 的 `delivery_unknown` 卡片或重复键直接调用重发。"""
+        if not confirm:
+            return False
         focus = self.probe.current_id()
         try:
             self.api.resend(
                 job_id=self.job_ids(),
-                text=item.text,
-                original_job_id=item.job_id,
+                text=text,
+                original_job_id=job_id,
                 focus_id=str(focus) if focus else "",
                 confirm=True,
             )
+            return True
         except ApiError as exc:
-            self.status.error(ErrorCode.invalid_request if exc.status < 500 else ErrorCode.internal, f"重复输入失败：{exc.message}")
+            code = ErrorCode.invalid_request if exc.status < 500 else ErrorCode.internal
+            self.status.error(code, f"重复输入失败：{exc.message}")
+            return False
         except Exception as exc:
             self.status.error(ErrorCode.internal, f"重复输入失败：{str(exc)[:80]}")
+            return False

@@ -16,6 +16,7 @@ from tests.api.conftest import (
     local_client,
     local_headers,
 )
+from tests.api.providers import make_text_wav
 
 
 def test_lan_allowlist_rejects_public_reserved_and_docs():
@@ -87,7 +88,7 @@ def test_cli_without_origin_still_requires_trusted_host(app):
 
 
 def test_lan_and_public_token_matrix(app):
-    body, ctype = multipart([("audio", b"from-lan", "a.txt")])
+    body, ctype = multipart([("audio", make_text_wav("from-lan"), "a.wav")])
 
     def _host_header(host: str) -> str:
         if ":" in host and not host.startswith("["):

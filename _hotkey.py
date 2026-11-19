@@ -21,53 +21,150 @@ MOD_ALIASES = {
 
 @dataclass(frozen=True)
 class HotkeyBindings:
-    """一次启动内三条快捷键的值，来自配置，不在平台层写死。"""
+    """一次启动内四条快捷键的值，来自配置，不在平台层写死。"""
 
     voice: str
     screenshot: str
     repeat: str
+    ocr: str = "ctrl+alt+o"
 
 
 @dataclass(frozen=True)
 class KeyName:
-    """一个规范主键在三套抓取后端里的名字（唯一键名表，后端都从这里取，不各写一份）。
+    """一个规范主键在跨平台抓取后端里的名字（唯一键名表，后端都从这里取，不各写一份）。
 
     keysym：XKB/X11 keysym 名（python-xlib `XK.string_to_keysym` 与 GNOME accelerator 同名）；
     portal：GlobalShortcuts `preferred_trigger` 的主键写法——xdg-desktop-portal-gnome 50.0
     `portal_trigger_to_settings` 只换修饰键、主键原样拼进 GTK accelerator，所以必须是 keysym 名
-    （"`" 在 Gdk/xkbcommon 中都解析不到，故 grave 写 "grave"）；evdev：`evdev.ecodes` 属性名。
+    （"`" 在 Gdk/xkbcommon 中都解析不到，故 grave 写 "grave"）；
+    evdev：`evdev.ecodes` 属性名；
+    vk：Windows Win32 Virtual-Key 码；
+    macos_keycode：macOS Quartz/Carbon `kVK_*` 虚拟键码。
     """
 
     keysym: str
     portal: str
     evdev: str
+    vk: int = 0
+    macos_keycode: int = 0
+
+
+_MACOS_KEYCODES: dict[str, int] = {
+    "a": 0x00,
+    "s": 0x01,
+    "d": 0x02,
+    "f": 0x03,
+    "h": 0x04,
+    "g": 0x05,
+    "z": 0x06,
+    "x": 0x07,
+    "c": 0x08,
+    "v": 0x09,
+    "b": 0x0B,
+    "q": 0x0C,
+    "w": 0x0D,
+    "e": 0x0E,
+    "r": 0x0F,
+    "y": 0x10,
+    "t": 0x11,
+    "1": 0x12,
+    "2": 0x13,
+    "3": 0x14,
+    "4": 0x15,
+    "6": 0x16,
+    "5": 0x17,
+    "equal": 0x18,
+    "9": 0x19,
+    "7": 0x1A,
+    "minus": 0x1B,
+    "8": 0x1C,
+    "0": 0x1D,
+    "o": 0x1F,
+    "u": 0x20,
+    "i": 0x22,
+    "p": 0x23,
+    "enter": 0x24,
+    "l": 0x25,
+    "j": 0x26,
+    "k": 0x28,
+    "semicolon": 0x29,
+    "backslash": 0x2A,
+    "comma": 0x2B,
+    "slash": 0x2C,
+    "n": 0x2D,
+    "m": 0x2E,
+    "dot": 0x2F,
+    "tab": 0x30,
+    "space": 0x31,
+    "grave": 0x32,
+    "backspace": 0x33,
+    "escape": 0x35,
+    "f5": 0x60,
+    "f6": 0x61,
+    "f7": 0x62,
+    "f3": 0x63,
+    "f8": 0x64,
+    "f9": 0x65,
+    "f11": 0x67,
+    "f10": 0x6D,
+    "f12": 0x6F,
+    "delete": 0x75,
+    "f4": 0x76,
+    "f2": 0x78,
+    "f1": 0x7A,
+}
 
 
 def _build_key_table() -> dict[str, KeyName]:
     table: dict[str, KeyName] = {}
     for c in "abcdefghijklmnopqrstuvwxyz":
-        table[c] = KeyName(keysym=c, portal=c.upper(), evdev=f"KEY_{c.upper()}")
+        table[c] = KeyName(
+            keysym=c,
+            portal=c.upper(),
+            evdev=f"KEY_{c.upper()}",
+            vk=ord(c.upper()),
+            macos_keycode=_MACOS_KEYCODES[c],
+        )
     for d in "0123456789":
-        table[d] = KeyName(keysym=d, portal=d, evdev=f"KEY_{d}")
+        table[d] = KeyName(
+            keysym=d,
+            portal=d,
+            evdev=f"KEY_{d}",
+            vk=ord(d),
+            macos_keycode=_MACOS_KEYCODES[d],
+        )
     for i in range(1, 13):
-        table[f"f{i}"] = KeyName(keysym=f"F{i}", portal=f"F{i}", evdev=f"KEY_F{i}")
-    for name, keysym, portal, evdev in (
-        ("grave", "grave", "grave", "KEY_GRAVE"),
-        ("space", "space", "space", "KEY_SPACE"),
-        ("tab", "Tab", "Tab", "KEY_TAB"),
-        ("enter", "Return", "Return", "KEY_ENTER"),
-        ("escape", "Escape", "Escape", "KEY_ESC"),
-        ("backspace", "BackSpace", "BackSpace", "KEY_BACKSPACE"),
-        ("delete", "Delete", "Delete", "KEY_DELETE"),
-        ("minus", "minus", "minus", "KEY_MINUS"),
-        ("equal", "equal", "equal", "KEY_EQUAL"),
-        ("semicolon", "semicolon", "semicolon", "KEY_SEMICOLON"),
-        ("comma", "comma", "comma", "KEY_COMMA"),
-        ("dot", "period", "period", "KEY_DOT"),
-        ("slash", "slash", "slash", "KEY_SLASH"),
-        ("backslash", "backslash", "backslash", "KEY_BACKSLASH"),
+        key = f"f{i}"
+        table[key] = KeyName(
+            keysym=f"F{i}",
+            portal=f"F{i}",
+            evdev=f"KEY_F{i}",
+            vk=0x70 + (i - 1),
+            macos_keycode=_MACOS_KEYCODES[key],
+        )
+    for name, keysym, portal, evdev, vk in (
+        ("grave", "grave", "grave", "KEY_GRAVE", 0xC0),
+        ("space", "space", "space", "KEY_SPACE", 0x20),
+        ("tab", "Tab", "Tab", "KEY_TAB", 0x09),
+        ("enter", "Return", "Return", "KEY_ENTER", 0x0D),
+        ("escape", "Escape", "Escape", "KEY_ESC", 0x1B),
+        ("backspace", "BackSpace", "BackSpace", "KEY_BACKSPACE", 0x08),
+        ("delete", "Delete", "Delete", "KEY_DELETE", 0x2E),
+        ("minus", "minus", "minus", "KEY_MINUS", 0xBD),
+        ("equal", "equal", "equal", "KEY_EQUAL", 0xBB),
+        ("semicolon", "semicolon", "semicolon", "KEY_SEMICOLON", 0xBA),
+        ("comma", "comma", "comma", "KEY_COMMA", 0xBC),
+        ("dot", "period", "period", "KEY_DOT", 0xBE),
+        ("slash", "slash", "slash", "KEY_SLASH", 0xBF),
+        ("backslash", "backslash", "backslash", "KEY_BACKSLASH", 0xDC),
     ):
-        table[name] = KeyName(keysym=keysym, portal=portal, evdev=evdev)
+        table[name] = KeyName(
+            keysym=keysym,
+            portal=portal,
+            evdev=evdev,
+            vk=vk,
+            macos_keycode=_MACOS_KEYCODES[name],
+        )
     return table
 
 
@@ -241,3 +338,54 @@ def parse_hotkey_evdev(hotkey_str: str) -> dict:
     trigger = getattr(ecodes, name.evdev)
 
     return {"trigger": trigger, "modifiers": modifiers}
+
+
+WIN32_MODIFIERS = {
+    "alt": 0x0001,      # MOD_ALT
+    "ctrl": 0x0002,     # MOD_CONTROL
+    "shift": 0x0004,    # MOD_SHIFT
+    "super": 0x0008,    # MOD_WIN
+}
+WIN32_MOD_NOREPEAT = 0x4000
+
+MACOS_MODIFIERS = {
+    "shift": 0x00020000,   # kCGEventFlagMaskShift
+    "ctrl": 0x00040000,    # kCGEventFlagMaskControl
+    "alt": 0x00080000,     # kCGEventFlagMaskAlternate
+    "super": 0x00100000,   # kCGEventFlagMaskCommand
+}
+
+
+def parse_hotkey_win32(hotkey_str: str) -> tuple[int, int]:
+    """解析规范快捷键为 Win32 RegisterHotKey 所需的 (fsModifiers, vk)。"""
+    parts = [p.strip() for p in hotkey_str.lower().split("+") if p.strip()]
+    if not parts:
+        raise ValueError("Empty hotkey")
+    mods = 0
+    for mod in parts[:-1]:
+        flag = WIN32_MODIFIERS.get(MOD_ALIASES.get(mod, mod))
+        if flag is None:
+            raise ValueError(f"Unknown Win32 modifier: {mod}")
+        mods |= flag
+    name = KEY_TABLE.get(canonical_key(parts[-1]))
+    if name is None or not name.vk:
+        raise ValueError(f"Unknown Win32 key: {parts[-1]}")
+    return mods, name.vk
+
+
+def parse_hotkey_macos(hotkey_str: str) -> tuple[int, int]:
+    """解析规范快捷键为 macOS CGEvent 所需的 (CGEventFlags 掩码, CGKeyCode)。"""
+    parts = [p.strip() for p in hotkey_str.lower().split("+") if p.strip()]
+    if not parts:
+        raise ValueError("Empty hotkey")
+    flags = 0
+    for mod in parts[:-1]:
+        flag = MACOS_MODIFIERS.get(MOD_ALIASES.get(mod, mod))
+        if flag is None:
+            raise ValueError(f"Unknown macOS modifier: {mod}")
+        flags |= flag
+    key = canonical_key(parts[-1])
+    name = KEY_TABLE.get(key)
+    if name is None:
+        raise ValueError(f"Unknown macOS key: {parts[-1]}")
+    return flags, name.macos_keycode

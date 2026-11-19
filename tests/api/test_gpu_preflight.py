@@ -85,8 +85,52 @@ def test_smi_timeout_is_unknown():
 
 def test_multiple_gpus_without_clear_choice_is_unknown():
     out = one_gpu(16000) + "1, GPU-abcd, 24564, 24000, NVIDIA RTX A5000\n"
-    result = asr_gpu_preflight(ARGV, run=smi(out), which=WHICH)
+    result = asr_gpu_preflight(ARGV, run=smi(out), which=WHICH, environ={})
     assert result.kind == "unknown" and "2 张 GPU" in result.reason
+
+
+TWO_GPUS = (
+    "0, GPU-aaaa-1111, 16303, 1000, NVIDIA GeForce RTX 5070 Ti\n"
+    "1, GPU-bbbb-2222, 24564, 20000, NVIDIA RTX A5000\n"
+)
+
+
+def test_cuda_visible_devices_single_index_and_uuid():
+    by_index_ok = asr_gpu_preflight(ARGV, run=smi(TWO_GPUS), which=WHICH, environ={"CUDA_VISIBLE_DEVICES": "1"})
+    assert by_index_ok.ok and by_index_ok.gpu == "#1 NVIDIA RTX A5000" and by_index_ok.free_mib == 20000
+
+    by_index_short = asr_gpu_preflight(ARGV, run=smi(TWO_GPUS), which=WHICH, environ={"CUDA_VISIBLE_DEVICES": "0"})
+    assert by_index_short.kind == "insufficient" and by_index_short.gpu == "#0 NVIDIA GeForce RTX 5070 Ti"
+
+    by_uuid_exact = asr_gpu_preflight(ARGV, run=smi(TWO_GPUS), which=WHICH, environ={"CUDA_VISIBLE_DEVICES": "GPU-bbbb-2222"})
+    assert by_uuid_exact.ok and by_uuid_exact.gpu == "#1 NVIDIA RTX A5000"
+
+    by_uuid_prefix = asr_gpu_preflight(ARGV, run=smi(TWO_GPUS), which=WHICH, environ={"CUDA_VISIBLE_DEVICES": "GPU-b"})
+    assert by_uuid_prefix.ok and by_uuid_prefix.gpu == "#1 NVIDIA RTX A5000"
+
+
+@pytest.mark.parametrize("cvd", ["", "   ", ","])
+def test_cuda_visible_devices_empty_rejects_even_on_single_gpu(cvd):
+    single = asr_gpu_preflight(ARGV, run=smi(one_gpu(16000)), which=WHICH, environ={"CUDA_VISIBLE_DEVICES": cvd})
+    assert not single.ok and single.kind == "unknown"
+    assert "CUDA_VISIBLE_DEVICES 为空，未暴露任何 GPU" in single.reason
+
+    multi = asr_gpu_preflight(ARGV, run=smi(TWO_GPUS), which=WHICH, environ={"CUDA_VISIBLE_DEVICES": cvd})
+    assert not multi.ok and multi.kind == "unknown"
+    assert "CUDA_VISIBLE_DEVICES 为空，未暴露任何 GPU" in multi.reason
+
+
+@pytest.mark.parametrize(
+    ("cvd", "needle"),
+    [
+        ("0,1", "多张 GPU"),
+        ("9", "未匹配"),
+        ("GPU-nonexistent", "未匹配"),
+    ],
+)
+def test_cuda_visible_devices_multi_or_unknown_id_rejects(cvd, needle):
+    result = asr_gpu_preflight(ARGV, run=smi(TWO_GPUS), which=WHICH, environ={"CUDA_VISIBLE_DEVICES": cvd})
+    assert not result.ok and result.kind == "unknown" and needle in result.reason
 
 
 def test_for_unit_reads_real_exec_start_and_unknown_on_read_failure():

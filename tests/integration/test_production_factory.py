@@ -25,6 +25,7 @@ from _v3.production import (
 )
 from _v3.runtime import UnmetRuntimeGates as Gates
 from _v3_app import create_app
+from tests.api.providers import make_text_wav
 
 FAKE_TOKEN = "test-production-factory-token"
 ENDPOINTS = ProductionEndpoints(sidecar_url="http://sidecar.fixture", ollama_url="http://ollama.fixture")
@@ -54,7 +55,12 @@ class FakeServices:
             if path == "/api/chat":
                 payload = json.loads(request.content)
                 self.chat_payloads.append(payload)
-                text = payload["messages"][-1]["content"].split("\n")[-1].replace("错字", "正字")
+                raw_msg = payload["messages"][-1]["content"]
+                if "<asr_transcript>" in raw_msg and "</asr_transcript>" in raw_msg:
+                    inner = raw_msg.split("<asr_transcript>", 1)[1].split("</asr_transcript>", 1)[0].strip()
+                else:
+                    inner = raw_msg.split("\n")[-1]
+                text = inner.replace("错字", "正字")
                 return httpx.Response(200, json={"message": {"content": text}})
         if host == "sidecar.fixture":
             if path == "/health":
@@ -169,7 +175,7 @@ def test_real_adapters_drive_from_audio_polish_and_queue(world):
     res = client.post(
         "/api/v1/utterances/from-audio",
         data={"job_id": "job-web-1"},
-        files={"audio": ("a.wav", b"RIFF-fixture-bytes", "audio/wav")},
+        files={"audio": ("a.wav", make_text_wav("audio-fixture"), "audio/wav")},
         headers=H,
     )
     assert res.status_code == 200, res.text
@@ -179,7 +185,7 @@ def test_real_adapters_drive_from_audio_polish_and_queue(world):
     assert "专名甲" in payload["messages"][-1]["content"]
     assert ("sidecar.fixture", "/v1/transcribe") in world["services"].requests
     assert isinstance(world["runtime"].stream_provider, SidecarStreamProvider)
-    stt = client.post("/api/v1/stt", files={"audio": ("a.wav", b"RIFF-x", "audio/wav")}, headers=H)
+    stt = client.post("/api/v1/stt", files={"audio": ("a.wav", make_text_wav("audio-stt"), "audio/wav")}, headers=H)
     assert stt.json()["text"] == "今天天气错字", "公开 STT 不润色"
 
 
@@ -207,7 +213,7 @@ def test_setup_check_and_real_actions_via_fakes(world):
 def test_lan_access_uses_explicit_token(world):
     body = world["client"].get("/api/v1/lan-access").json()
     assert body["token"] == FAKE_TOKEN
-    assert body["entries"][0]["url"].startswith("https://192.168.10.20:17945/voice?token=")
+    assert body["entries"][0]["url"].startswith("https://192.168.10.20:17945/voice#token=")
 
 
 def test_pages_served_and_activation_refused_until_gates_close(world):

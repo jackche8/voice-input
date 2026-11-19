@@ -64,13 +64,11 @@
     disconnected: "连接已断开"
   };
 
-  const SETUP_MENUS = [
-    { id: "models", label: "模型" },
-    { id: "voice", label: "语音输入" },
+  const SETUP_TABS = [
+    { id: "models", label: "模型与服务" },
+    { id: "voice", label: "语音与润色" },
     { id: "shot", label: "截图翻译" },
     { id: "keys", label: "快捷键" },
-    { id: "lan", label: "手机录入" },
-    { id: "hist", label: "最近记录" },
     { id: "api", label: "开放接口" },
     { id: "sys", label: "系统检测" }
   ];
@@ -88,6 +86,21 @@
     asr: "Qwen3-ASR-1.7B",
     ollama: "qwen3.5:4b"
   };
+
+  const HOTKEY_LABELS = {
+    hotkey_voice: "语音输入",
+    hotkey_screenshot: "截图翻译",
+    hotkey_ocr: "纯 OCR 识别",
+    hotkey_repeat: "重复上次输入"
+  };
+
+  const HOME_NAVS = [
+    { id: "translate", label: "翻译框 · 主页" },
+    { id: "ocr", label: "图片 OCR 识别" },
+    { id: "history", label: "语音与翻译历史" },
+    { id: "lan", label: "手机扫码语音" },
+    { id: "setup", label: "模型与热键设置" }
+  ];
 
   function labelOf(map, value, fallback) {
     if (value == null || value === "") return fallback || "";
@@ -139,6 +152,26 @@
     return "";
   }
 
+  function hotkeyLabel(name) {
+    return labelOf(HOTKEY_LABELS, name, name ? String(name) : "");
+  }
+
+  function formatHotkey(value) {
+    if (!value) return "";
+    const parts = String(value).toLowerCase().split("+").map(function (s) { return s.trim(); }).filter(Boolean);
+    if (!parts.length) return "";
+    const modMap = { ctrl: "Ctrl", alt: "Alt", shift: "Shift", super: "Super" };
+    const mods = parts.slice(0, -1).map(function (m) {
+      return modMap[m] || (m.charAt(0).toUpperCase() + m.slice(1));
+    });
+    let key = parts[parts.length - 1];
+    if (key === "grave") key = "`";
+    else if (key.length === 1) key = key.toUpperCase();
+    else if (/^f([1-9]|1[0-2])$/.test(key)) key = key.toUpperCase();
+    else key = key.charAt(0).toUpperCase() + key.slice(1);
+    return mods.concat([key]).join("+");
+  }
+
   V3.labels = {
     ERROR_CODE: ERROR_CODE,
     JOB_STATE: JOB_STATE,
@@ -146,9 +179,11 @@
     HISTORY_POLISH: HISTORY_POLISH,
     PRODUCT_EVENT: PRODUCT_EVENT,
     SESSION_CLOSED_REASON: SESSION_CLOSED_REASON,
-    SETUP_MENUS: SETUP_MENUS,
+    SETUP_TABS: SETUP_TABS,
     TARGET_LANG_OPTIONS: TARGET_LANG_OPTIONS,
     FIXED_MODELS: FIXED_MODELS,
+    HOTKEY_LABELS: HOTKEY_LABELS,
+    HOME_NAVS: HOME_NAVS,
     labelOf: labelOf,
     errorCode: errorCode,
     formatError: formatError,
@@ -157,6 +192,8 @@
     jobState: jobState,
     productEvent: productEvent,
     targetLang: targetLang,
-    polishBadgeClass: polishBadgeClass
+    polishBadgeClass: polishBadgeClass,
+    hotkeyLabel: hotkeyLabel,
+    formatHotkey: formatHotkey
   };
 })(window.V3 = window.V3 || {});

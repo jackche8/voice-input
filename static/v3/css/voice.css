@@ -1,4 +1,4 @@
-/* 手机录音页：浅色单列，非流式。 */
+/* 手机录音页：深色单列（对齐 Studio C 主题），非流式。 */
 body.v3-voice { min-height: 100vh; }
 
 .ph {
@@ -30,7 +30,7 @@ body.v3-voice { min-height: 100vh; }
   height: 148px;
   border-radius: 50%;
   border: 0;
-  background: var(--c-accent);
+  background: var(--c-accent-solid);
   color: var(--c-on-accent);
   display: inline-flex;
   flex-direction: column;
@@ -41,9 +41,12 @@ body.v3-voice { min-height: 100vh; }
   font-size: var(--fs-lg);
   cursor: pointer;
   box-shadow: 0 0 0 0 transparent;
+  touch-action: none;
+  -webkit-user-select: none;
+  user-select: none;
 }
 .mic .ic { width: 40px; height: 40px; }
-.mic.rec { background: var(--c-danger); box-shadow: 0 0 0 12px var(--c-danger-soft); }
+.mic.rec { background: var(--c-danger-solid); box-shadow: 0 0 0 12px var(--c-danger-soft); }
 .mic:disabled { background: var(--c-border); color: var(--c-muted); cursor: not-allowed; }
 .mic:focus-visible { outline: none; box-shadow: var(--focus-ring); }
 .mic.rec:focus-visible { box-shadow: 0 0 0 12px var(--c-danger-soft), var(--focus-ring); }
@@ -103,7 +106,7 @@ body.v3-voice { min-height: 100vh; }
   gap: var(--sp-2);
   padding: var(--sp-3) var(--sp-5);
   border-radius: var(--radius-md);
-  background: var(--c-accent);
+  background: var(--c-accent-solid);
   color: var(--c-on-accent);
   font-size: var(--fs-lg);
   cursor: pointer;

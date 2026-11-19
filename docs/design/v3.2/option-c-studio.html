@@ -1,0 +1,511 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>已选定 · 方案 C（侧栏工作站 + 红色十字线复用框选 + 原位背景遮挡翻译）— UI 验收标准模板</title>
+<style>
+:root {
+  --font-sans: "Noto Sans CJK SC", "PingFang SC", "Microsoft YaHei", system-ui, -apple-system, sans-serif;
+  --font-mono: "JetBrains Mono", "Noto Sans Mono CJK SC", ui-monospace, monospace;
+  --fs-xs: 12px; --fs-sm: 13px; --fs-md: 14px; --fs-lg: 16px; --fs-xl: 20px;
+  --r-sm: 6px; --r-md: 10px; --r-lg: 14px; --r-pill: 999px;
+  --crosshair-red: #ff2d2d;
+}
+
+[data-theme="dark"] {
+  --c-bg: #0d1117;
+  --c-rail: #131820;
+  --c-surface: #161b22;
+  --c-surface-2: #1f2630;
+  --c-text: #e6edf3;
+  --c-muted: #8b949e;
+  --c-border: #30363d;
+  --c-accent: #58a6ff;
+  --c-accent-hover: #79c0ff;
+  --c-accent-soft: rgba(56, 139, 253, 0.16);
+  --c-ok: #3fb950; --c-ok-soft: rgba(63, 185, 80, 0.16);
+}
+
+[data-theme="light"] {
+  --c-bg: #f4f6fa;
+  --c-rail: #eef1f6;
+  --c-surface: #ffffff;
+  --c-surface-2: #f1f4f9;
+  --c-text: #1b1f2a;
+  --c-muted: #5d6578;
+  --c-border: #d8dee9;
+  --c-accent: #2563eb;
+  --c-accent-hover: #1d4ed8;
+  --c-accent-soft: #dbeafe;
+  --c-ok: #16a34a; --c-ok-soft: #dcfce7;
+}
+
+* { box-sizing: border-box; }
+body { margin: 0; font-family: var(--font-sans); background: #1c2128; color: var(--c-text); font-size: var(--fs-md); line-height: 1.55; }
+[hidden] { display: none !important; }
+
+.preview-bar {
+  position: sticky; top: 0; z-index: 100;
+  background: #090c10; color: #f0f6fc;
+  padding: 10px 20px; border-bottom: 1px solid #30363d;
+  display: flex; flex-wrap: wrap; gap: 12px; align-items: center; justify-content: space-between;
+}
+.preview-tabs { display: flex; gap: 6px; flex-wrap: wrap; }
+.preview-tabs button {
+  font: inherit; font-size: var(--fs-xs); padding: 5px 12px;
+  border-radius: var(--r-pill); border: 1px solid #30363d;
+  background: #161b22; color: #c9d1d9; cursor: pointer;
+}
+.preview-tabs button.on { background: #58a6ff; color: #090c10; border-color: #58a6ff; font-weight: 700; }
+
+.stage-wrap { max-width: 1280px; margin: 18px auto; padding: 0 20px 44px; }
+.stage-desc {
+  background: var(--c-surface); border: 1px solid var(--c-border); border-radius: var(--r-md);
+  padding: 12px 16px; margin-bottom: 16px; font-size: var(--fs-sm); color: var(--c-muted);
+  display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap;
+}
+.stage-desc strong { color: var(--c-text); }
+
+.btn {
+  display: inline-flex; align-items: center; gap: 6px;
+  font: inherit; font-size: var(--fs-sm); padding: 6px 12px;
+  border-radius: var(--r-sm); border: 1px solid var(--c-border);
+  background: var(--c-surface-2); color: var(--c-text); cursor: pointer;
+}
+.btn:hover { border-color: var(--c-accent); color: var(--c-accent); }
+.btn.primary { background: var(--c-accent); border-color: var(--c-accent); color: #fff; font-weight: 600; }
+.badge {
+  display: inline-flex; align-items: center; gap: 5px; font-size: var(--fs-xs);
+  padding: 2px 8px; border-radius: var(--r-pill); background: var(--c-surface-2); color: var(--c-muted);
+}
+.badge.ok { background: var(--c-ok-soft); color: var(--c-ok); }
+.mono { font-family: var(--font-mono); }
+
+/* ==================== 1. 侧栏效率工作站主页 (/) ==================== */
+.studio-window {
+  display: grid; grid-template-columns: 216px minmax(0, 1fr); min-height: 620px;
+  background: var(--c-bg); border: 1px solid var(--c-border); border-radius: var(--r-lg);
+  overflow: hidden; box-shadow: 0 16px 40px rgba(0,0,0,0.35);
+}
+@media (max-width: 820px) { .studio-window { grid-template-columns: 1fr; } }
+
+.rail {
+  background: var(--c-rail); border-right: 1px solid var(--c-border);
+  padding: 16px 10px; display: flex; flex-direction: column; gap: 4px;
+}
+.rail-head { padding: 0 10px 14px; font-weight: 700; font-size: 15px; display: flex; justify-content: space-between; align-items: center; }
+.rail button.nav-item {
+  display: flex; align-items: center; justify-content: space-between;
+  font: inherit; font-size: var(--fs-sm); padding: 8px 12px; border: 0; border-radius: var(--r-sm);
+  background: transparent; color: var(--c-muted); cursor: pointer; text-align: left;
+}
+.rail button.nav-item.on { background: var(--c-accent-soft); color: var(--c-accent); font-weight: 600; }
+.rail-foot {
+  margin-top: auto; padding: 12px 10px; border-top: 1px solid var(--c-border);
+  font-size: var(--fs-xs); color: var(--c-muted); display: flex; flex-direction: column; gap: 6px;
+}
+
+.studio-main { padding: 20px 26px; display: flex; flex-direction: column; gap: 16px; }
+.studio-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; }
+.studio-head h2 { margin: 0; font-size: var(--fs-xl); }
+
+.studio-split {
+  flex: 1; display: grid; grid-template-columns: 1fr 1fr; gap: 14px; min-height: 380px;
+}
+@media (max-width: 820px) { .studio-split { grid-template-columns: 1fr; } }
+.studio-box {
+  background: var(--c-surface); border: 1px solid var(--c-border); border-radius: var(--r-md);
+  display: flex; flex-direction: column; overflow: hidden;
+}
+.box-head {
+  padding: 9px 14px; border-bottom: 1px solid var(--c-border); background: var(--c-surface-2);
+  display: flex; justify-content: space-between; align-items: center; font-size: var(--fs-xs); color: var(--c-muted);
+}
+.box-head select {
+  font: inherit; font-size: var(--fs-xs); background: var(--c-surface); color: var(--c-text);
+  border: 1px solid var(--c-border); border-radius: 4px; padding: 3px 8px;
+}
+.box-editor {
+  flex: 1; border: 0; resize: none; padding: 14px 16px;
+  background: transparent; color: var(--c-text); font: inherit; font-size: 15px; line-height: 1.7; outline: none;
+}
+.box-foot {
+  padding: 8px 14px; border-top: 1px solid var(--c-border);
+  display: flex; justify-content: space-between; align-items: center; font-size: var(--fs-xs); color: var(--c-muted);
+}
+
+/* ==================== 2. 复用型红色十字线定位框选模块 ==================== */
+.crosshair-stage {
+  position: relative; height: 520px; border-radius: var(--r-lg);
+  background: #161c26; border: 1px solid #30363d; overflow: hidden;
+  cursor: none; user-select: none;
+}
+.frozen-desktop {
+  padding: 36px; pointer-events: none;
+}
+.mock-doc-card {
+  max-width: 780px; background: #ffffff; color: #0f172a; border-radius: 10px;
+  padding: 24px 28px; box-shadow: 0 12px 32px rgba(0,0,0,0.3);
+}
+.mock-doc-card h3 { margin: 0 0 10px; font-size: 20px; }
+.mock-doc-card p { margin: 0 0 12px; color: #334155; line-height: 1.65; }
+.mock-dark-cmd {
+  background: #0f172a; color: #38bdf8; padding: 10px 14px; border-radius: 8px;
+  font-family: var(--font-mono); font-size: 13px; display: flex; justify-content: space-between;
+}
+.dim-mask {
+  position: absolute; inset: 0; background: rgba(0, 0, 0, 0.35); pointer-events: none;
+}
+/* 贯穿全屏的红色十字定位线 */
+.ch-line-h {
+  position: absolute; left: 0; right: 0; height: 1px;
+  background: var(--crosshair-red); box-shadow: 0 0 2px rgba(255, 45, 45, 0.8);
+  pointer-events: none; z-index: 20;
+}
+.ch-line-v {
+  position: absolute; top: 0; bottom: 0; width: 1px;
+  background: var(--crosshair-red); box-shadow: 0 0 2px rgba(255, 45, 45, 0.8);
+  pointer-events: none; z-index: 20;
+}
+.ch-coord-tag {
+  position: absolute; z-index: 25; pointer-events: none;
+  background: rgba(13, 17, 23, 0.92); color: #ff6b6b;
+  border: 1px solid var(--crosshair-red); border-radius: 4px;
+  padding: 2px 8px; font-family: var(--font-mono); font-size: 11px; white-space: nowrap;
+}
+.ch-sel-rect {
+  position: absolute; z-index: 22; pointer-events: none;
+  border: 1.5px solid var(--crosshair-red);
+  background: rgba(255, 45, 45, 0.08);
+  box-shadow: 0 0 0 9999px rgba(0, 0, 0, 0.42);
+}
+.ch-top-hint {
+  position: absolute; top: 14px; left: 50%; transform: translateX(-50%); z-index: 30;
+  background: rgba(13, 17, 23, 0.9); color: #f0f6fc; border: 1px solid #30363d;
+  padding: 6px 16px; border-radius: var(--r-pill); font-size: 12px; pointer-events: none;
+}
+
+/* ==================== 3. 识别位置原地翻译 + 背景遮挡原始内容 ==================== */
+.c-screen {
+  position: relative; min-height: 520px; border-radius: var(--r-lg);
+  background: #161c26; border: 1px solid #30363d; padding: 36px; overflow: hidden;
+}
+.inplace-region-wrap {
+  position: relative; max-width: 780px; background: #ffffff; color: #0f172a;
+  border-radius: 10px; padding: 24px 28px;
+  outline: 2px solid #58a6ff; box-shadow: 0 18px 48px rgba(0,0,0,0.5);
+}
+.src-block { position: relative; margin-bottom: 14px; }
+/* 采样原图背景色 100% 不透明遮挡原文字，原位渲染译文 */
+.mask-patch-light {
+  position: absolute; inset: -2px -4px; background: #ffffff; color: #0f172a;
+  display: flex; align-items: center; padding: 2px 6px; border-radius: 4px;
+  box-shadow: inset 0 0 0 1px rgba(37, 99, 235, 0.22);
+}
+.mask-patch-dark {
+  position: absolute; inset: -2px -4px; background: #0f172a; color: #e6edf3;
+  display: flex; align-items: center; padding: 2px 6px; border-radius: 4px;
+  box-shadow: inset 0 0 0 1px rgba(88, 166, 255, 0.35);
+}
+.studio-float-bar {
+  margin-top: 14px; display: inline-flex; align-items: center; gap: 8px;
+  background: #161b22; color: #e6edf3; border: 1px solid #30363d;
+  padding: 6px 12px; border-radius: var(--r-md); box-shadow: 0 10px 28px rgba(0,0,0,0.45);
+  font-size: var(--fs-xs);
+}
+
+/* ==================== 4. 状态胶囊 + 底部居中双行大字幕条 ==================== */
+.center-caption-bar {
+  position: absolute; left: 50%; transform: translateX(-50%); bottom: 28px;
+  min-width: 480px; max-width: 760px;
+  background: rgba(13, 17, 23, 0.94); color: #f0f6fc;
+  border: 1px solid rgba(88, 166, 255, 0.4); border-radius: 14px;
+  padding: 12px 22px; text-align: center; font-size: 19px; line-height: 1.5;
+  box-shadow: 0 14px 40px rgba(0,0,0,0.55);
+}
+.mini-corner-dot {
+  position: absolute; left: 20px; bottom: 28px;
+  background: rgba(13, 17, 23, 0.9); color: #8b949e;
+  border: 1px solid #30363d; border-radius: var(--r-pill);
+  padding: 6px 12px; font-size: 12px; display: inline-flex; gap: 6px; align-items: center;
+}
+</style>
+</head>
+<body>
+
+<div class="preview-bar">
+  <div>
+    <strong style="font-size:13px;color:#58a6ff;">✓ 已选定 UI 标准：方案 C（效率工作站 + 红色十字线复用框选 + 原位背景遮挡）</strong>
+    <span style="font-size:12px;color:#8b949e;margin-left:10px;">Linux · Windows · macOS 统一视觉规范</span>
+  </div>
+  <div class="preview-tabs" id="c-tabs">
+    <button class="on" data-surf="home">1. 翻译框主页 (/)</button>
+    <button data-surf="crosshair">2. 红色十字线框选模块 (复用)</button>
+    <button data-surf="shot">3. 识别位置原地遮挡翻译</button>
+    <button data-surf="hud">4. 语音胶囊 + 底部大字幕</button>
+    <button onclick="toggleTheme()">🌗 切换明/暗主题</button>
+  </div>
+</div>
+
+<div class="stage-wrap">
+  <!-- 1. 侧栏工作站主页 -->
+  <section class="c-surf" id="c-surf-home">
+    <div class="stage-desc">
+      <div><strong>1. 主页默认即为翻译框 (`/`)</strong>：手动复制粘贴文本或 <code>Ctrl+V</code> 粘贴图片即刻执行本地翻译 / OCR 提取；左侧边栏统一承载图片 OCR、历史、手机扫码与跨平台设置。</div>
+    </div>
+
+    <div class="studio-window">
+      <aside class="rail">
+        <div class="rail-head">
+          <span>🎙️ Voice Studio</span>
+          <span class="badge ok">三端通用</span>
+        </div>
+        <button class="nav-item on" onclick="setCRail('trans', this)"><span>🌐 翻译框 (主页)</span></button>
+        <button class="nav-item" onclick="setCRail('ocr', this)"><span>🔍 图片 OCR 识别</span></button>
+        <button class="nav-item" onclick="setCRail('hist', this)"><span>🕘 语音与翻译历史</span></button>
+        <button class="nav-item" onclick="setCRail('phone', this)"><span>📱 手机扫码语音</span></button>
+        <button class="nav-item" onclick="setCRail('setup', this)"><span>⚙️ 模型与热键设置</span></button>
+
+        <div class="rail-foot">
+          <div>🟢 Qwen3-ASR 1.7B 就绪</div>
+          <div>🟢 qwen3.5:4b (:17947)</div>
+          <div>🟢 全局热键与框选就绪</div>
+        </div>
+      </aside>
+
+      <main class="studio-main">
+        <div class="studio-head">
+          <div>
+            <h2 id="c-page-title">本地翻译与 OCR 工作台</h2>
+            <div style="font-size:12px;color:var(--c-muted);">手动粘贴文本即译 · Ctrl+V 粘贴截图自动提取 OCR 文字 · 100% 本地离线运行</div>
+          </div>
+          <div style="display:flex;gap:8px;">
+            <button class="btn" onclick="document.getElementById('c-src').value='';document.getElementById('c-dst').value='';">清空</button>
+            <button class="btn primary" onclick="runCTranslate()">立即翻译 (Ctrl+Enter)</button>
+          </div>
+        </div>
+
+        <div class="studio-split">
+          <div class="studio-box">
+            <div class="box-head">
+              <span>原文输入 / 粘贴截图 OCR</span>
+              <select><option>自动检测语言</option><option>English</option><option>简体中文</option><option>日本語</option></select>
+            </div>
+            <textarea class="box-editor" id="c-src" placeholder="在此粘贴或输入需要翻译的文字，或直接按 Ctrl+V 粘贴截图识别文字…">Modularizing the application into UI, Business, and Logic layers guarantees clean cross-platform support across Linux, Windows, and macOS.</textarea>
+            <div class="box-foot">
+              <span>支持拖入图片或 Ctrl+V 粘贴剪贴板图片</span>
+              <button class="btn" style="padding:2px 8px;font-size:12px;" onclick="this.textContent='已复制 ✓'">复制原文</button>
+            </div>
+          </div>
+
+          <div class="studio-box">
+            <div class="box-head">
+              <span>本地输出</span>
+              <select id="c-target" onchange="runCTranslate()">
+                <option value="zh">译为：简体中文</option>
+                <option value="en">译为：English</option>
+                <option value="raw">仅输出 OCR 原文（不翻译）</option>
+              </select>
+            </div>
+            <textarea class="box-editor" id="c-dst" readonly>将应用模块化拆分为 UI 层、业务编排层与底层逻辑层，可确保在 Linux、Windows 与 macOS 三端实现干净统一的跨平台支持。</textarea>
+            <div class="box-foot">
+              <span class="mono">qwen3.5:4b · 340ms</span>
+              <button class="btn primary" style="padding:3px 10px;font-size:12px;" onclick="this.textContent='已复制 ✓'">复制结果</button>
+            </div>
+          </div>
+        </div>
+      </main>
+    </div>
+  </section>
+
+  <!-- 2. 红色十字线复用框选模块（交互实时体验） -->
+  <section class="c-surf" id="c-surf-crosshair" hidden>
+    <div class="stage-desc">
+      <div><strong>2. 独立复用框选模块（全屏红色十字线定位）</strong>：鼠标移入下方屏幕即可实时体验<strong>贯穿全屏的红色十字准星定位 + 坐标/尺寸读数</strong>，按下拖拽即可框选；<strong>「截屏翻译」与「纯 OCR 识别」100% 复用同一框选原子组件</strong>。</div>
+    </div>
+
+    <div class="crosshair-stage" id="ch-stage">
+      <div class="ch-top-hint">移动鼠标用<strong>红色十字线</strong>精准对齐文字边缘 · 按住左键拖拽框选 · 右键 / Esc 取消（供截屏翻译 & OCR 共用）</div>
+      <div class="frozen-desktop">
+        <div class="mock-doc-card">
+          <h3>Cross-Platform Region Capture & In-Place Translation</h3>
+          <p>Move your cursor anywhere over this frozen screen to see the red crosshair guide lines. Drag a rectangle over any paragraph or terminal command to trigger either in-place translation or pure OCR extraction.</p>
+          <div class="mock-dark-cmd">
+            <span>Verify service status across platforms:</span>
+            <span>$ python -m ovi status --check-gpu</span>
+          </div>
+        </div>
+      </div>
+      <div class="dim-mask" id="ch-dim"></div>
+      <div class="ch-sel-rect" id="ch-rect" hidden></div>
+      <div class="ch-line-h" id="ch-h" style="top:220px;"></div>
+      <div class="ch-line-v" id="ch-v" style="left:420px;"></div>
+      <div class="ch-coord-tag" id="ch-tag" style="left:432px;top:228px;">X: 420, Y: 220</div>
+    </div>
+  </section>
+
+  <!-- 3. 识别位置原地翻译 + 背景遮挡原始内容 -->
+  <section class="c-surf" id="c-surf-shot" hidden>
+    <div class="stage-desc">
+      <div><strong>3. 截屏翻译（识别位置原地翻译 + 背景遮挡原始内容）</strong>：按 OCR 定位的每个文字块坐标，采样局部背景色（浅色底/深色底自适应）<strong>100% 不透明遮盖原英文</strong>，原位渲染译文，代码块与排版完整保留。</div>
+      <div style="display:flex;gap:6px;">
+        <button class="btn primary" onclick="togglePatches(true)">原位背景遮挡译文</button>
+        <button class="btn" onmousedown="togglePatches(false)" onmouseup="togglePatches(true)">按住对比底层原图</button>
+      </div>
+    </div>
+
+    <div class="c-screen">
+      <div class="inplace-region-wrap">
+        <div class="src-block">
+          <h3 style="margin:0;font-size:20px;">Cross-Platform Region Capture & In-Place Translation</h3>
+          <div class="mask-patch-light" data-patch="1" style="font-size:19px;font-weight:700;">
+            跨平台区域框选与识别原位截屏翻译
+          </div>
+        </div>
+        <div class="src-block">
+          <p style="margin:0;color:#334155;line-height:1.65;">Move your cursor anywhere over this frozen screen to see the red crosshair guide lines. Drag a rectangle over any paragraph or terminal command to trigger either in-place translation or pure OCR extraction.</p>
+          <div class="mask-patch-light" data-patch="1" style="font-size:14.5px;line-height:1.6;">
+            在冻结屏幕上移动光标即可看到红色十字定位辅助线；拖拽框选任意段落或终端命令，即可触发原位遮挡翻译或纯 OCR 文字提取。
+          </div>
+        </div>
+        <div class="mock-dark-cmd">
+          <div class="src-block" style="margin:0;flex:1;">
+            <span style="color:#94a3b8;">Verify service status across platforms:</span>
+            <div class="mask-patch-dark" data-patch="1" style="font-size:13px;">
+              跨平台检查本地服务与显卡就绪状态：
+            </div>
+          </div>
+          <span>$ python -m ovi status --check-gpu</span>
+        </div>
+      </div>
+
+      <div class="studio-float-bar">
+        <span style="color:#58a6ff;font-weight:600;">✓ 原位遮挡翻译完成</span>
+        <span>|</span>
+        <button class="btn" style="padding:3px 9px;font-size:12px;" onclick="this.textContent='译文已复制 ✓'">复制全部译文</button>
+        <button class="btn" style="padding:3px 9px;font-size:12px;" onclick="this.textContent='OCR原文已复制 ✓'">复制 OCR 原文</button>
+        <button class="btn" style="padding:3px 9px;font-size:12px;">Esc 关闭</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- 4. 状态胶囊 + 底部居中双行大字幕条 -->
+  <section class="c-surf" id="c-surf-hud" hidden>
+    <div class="stage-desc">
+      <div><strong>4. 语音输入反馈（左下角微状态胶囊 + 录音时屏幕底部中央大字幕条）</strong>：真透明无白边，说话时实时浮现流式字幕，松开纠错输入后自动淡出。</div>
+    </div>
+    <div class="c-screen" style="min-height:320px;">
+      <div class="mini-corner-dot">
+        <span style="width:8px;height:8px;border-radius:50%;background:#f85149;display:inline-block;"></span>
+        <span>录音中 0:04</span>
+      </div>
+      <div class="center-caption-bar">
+        UI 样式选择 C，框选模块复用红色十字线定位，<span style="color:#79c0ff;border-bottom:1px dashed #79c0ff;">项目需要支持 Linux、Windows、Mac</span>
+      </div>
+    </div>
+  </section>
+</div>
+
+<script>
+document.querySelectorAll('#c-tabs button[data-surf]').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('#c-tabs button[data-surf]').forEach(b => b.classList.remove('on'));
+    btn.classList.add('on');
+    const s = btn.dataset.surf;
+    document.querySelectorAll('.c-surf').forEach(sec => sec.hidden = (sec.id !== 'c-surf-' + s));
+  });
+});
+
+function toggleTheme() {
+  const html = document.documentElement;
+  html.setAttribute('data-theme', html.getAttribute('data-theme') === 'dark' ? 'light' : 'dark');
+}
+
+function setCRail(tab, btn) {
+  document.querySelectorAll('.rail .nav-item').forEach(b => b.classList.remove('on'));
+  btn.classList.add('on');
+  const titles = {
+    trans: '本地翻译与 OCR 工作台',
+    ocr: '图片 OCR 纯文字提取',
+    hist: '最近语音输入与翻译历史',
+    phone: '手机局域网扫码语音录入',
+    setup: '本地模型与全局快捷键设置'
+  };
+  document.getElementById('c-page-title').textContent = titles[tab] || '工作台';
+}
+
+function runCTranslate() {
+  const target = document.getElementById('c-target').value;
+  const src = document.getElementById('c-src').value.trim();
+  const dst = document.getElementById('c-dst');
+  if (!src) { dst.value = ''; return; }
+  if (target === 'raw') { dst.value = src; return; }
+  if (target === 'en') { dst.value = "[Local qwen3.5:4b] " + src; return; }
+  dst.value = "将应用模块化拆分为 UI 层、业务编排层与底层逻辑层，可确保在 Linux、Windows 与 macOS 三端实现干净统一的跨平台支持。";
+}
+
+function togglePatches(show) {
+  document.querySelectorAll('[data-patch="1"]').forEach(el => {
+    el.style.opacity = show ? '1' : '0';
+  });
+}
+
+// 交互式红色十字线框选器演示
+(function initCrosshairDemo() {
+  const stage = document.getElementById('ch-stage');
+  const hLine = document.getElementById('ch-h');
+  const vLine = document.getElementById('ch-v');
+  const tag = document.getElementById('ch-tag');
+  const rectEl = document.getElementById('ch-rect');
+  const dimEl = document.getElementById('ch-dim');
+  let dragStart = null;
+
+  stage.addEventListener('mousemove', (e) => {
+    const r = stage.getBoundingClientRect();
+    const x = Math.round(e.clientX - r.left);
+    const y = Math.round(e.clientY - r.top);
+    hLine.style.top = y + 'px';
+    vLine.style.left = x + 'px';
+    const tx = Math.min(x + 12, r.width - 150);
+    const ty = Math.min(y + 12, r.height - 30);
+    tag.style.left = tx + 'px';
+    tag.style.top = ty + 'px';
+
+    if (dragStart) {
+      const rx = Math.min(dragStart.x, x);
+      const ry = Math.min(dragStart.y, y);
+      const rw = Math.abs(x - dragStart.x);
+      const rh = Math.abs(y - dragStart.y);
+      rectEl.hidden = false;
+      dimEl.hidden = true;
+      rectEl.style.left = rx + 'px';
+      rectEl.style.top = ry + 'px';
+      rectEl.style.width = rw + 'px';
+      rectEl.style.height = rh + 'px';
+      tag.textContent = `${rw} × ${rh} px  (${rx}, ${ry})`;
+    } else {
+      tag.textContent = `X: ${x}, Y: ${y}`;
+    }
+  });
+
+  stage.addEventListener('mousedown', (e) => {
+    if (e.button === 2) {
+      dragStart = null;
+      rectEl.hidden = true;
+      dimEl.hidden = false;
+      return;
+    }
+    const r = stage.getBoundingClientRect();
+    dragStart = { x: Math.round(e.clientX - r.left), y: Math.round(e.clientY - r.top) };
+  });
+
+  window.addEventListener('mouseup', () => {
+    dragStart = null;
+  });
+
+  stage.addEventListener('contextmenu', (e) => e.preventDefault());
+})();
+</script>
+</body>
+</html>

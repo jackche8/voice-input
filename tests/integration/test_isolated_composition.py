@@ -8,6 +8,7 @@ from _inject import FocusBoundInjector, RecordingBackend
 from _jobs_client import JobsClient
 from _v3.isolated import FORBIDDEN_PORTS, compose_isolated_candidate, compose_production_runtime, production_unmet_gates
 from _v3.runtime import UnmetRuntimeGates
+from tests.api.providers import make_text_wav
 from tests.integration.fixtures import FixtureStreamProvider, fixture_transcribe
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -133,7 +134,7 @@ def test_from_audio_unknown_resend_needs_original_and_does_not_autoretry(composi
     created = client.post(
         "/api/v1/utterances/from-audio",
         data={"job_id": "job-audio", "language": "zh", "focus_id": "focus-R"},
-        files={"audio": ("a.txt", b"once-text", "text/plain")},
+        files={"audio": ("a.wav", make_text_wav("once-text"), "audio/wav")},
         headers=headers,
     )
     assert created.status_code == 200, created.text
@@ -284,19 +285,13 @@ def test_http_fake_sidecar_and_static_optional(tmp_path: Path, composition):
         sidecar_http.close()
 
 
-def test_webkit_missing_new_with_context_fails_closed():
-    from _overlay import project_cert_path
-    from _webkit_host import WebKitHostError, WebKitStatusHost
-    from tests.platform.fake_webkit import FakeGdk, FakeGio, FakeGtk, FakeWebKit2
+def test_legacy_webkit_removed_and_desktop_api_requires_tls_cert(tmp_path):
+    assert not (PROJECT_ROOT / "_webkit_host.py").exists()
+    assert not (PROJECT_ROOT / "_overlay.py").exists()
+    from _desktop.api import DesktopApi
 
-    class NoContextWebKit(FakeWebKit2):
-        class WebView:
-            def __init__(self, *a, **k):
-                raise AssertionError("不得退回未配置 context 的 WebView()")
-
-    host = WebKitStatusHost(modules=(FakeGio, FakeGtk, NoContextWebKit, FakeGdk), cert=project_cert_path(), injected=True)
     try:
-        host.create_status_window()
-        raise AssertionError("missing new_with_context must fail")
-    except WebKitHostError as exc:
-        assert "new_with_context" in str(exc)
+        DesktopApi("https://127.0.0.1:17945", cert=tmp_path / "missing.pem")
+        raise AssertionError("missing TLS cert must fail closed")
+    except ValueError as exc:
+        assert "证书" in str(exc)

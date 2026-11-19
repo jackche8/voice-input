@@ -64,6 +64,11 @@
     return mods.indexOf("ctrl") < 0 && mods.indexOf("alt") < 0 && mods.indexOf("super") < 0;
   }
 
+  function shiftOnlyWarning(mods, value) {
+    if (!mods || mods.length !== 1 || mods[0] !== "shift") return null;
+    return "仅使用 Shift 修饰（" + value + "）会占用大写输入或上档符号，建议搭配 Ctrl、Alt 或 Super。";
+  }
+
   function fromKeyboardEvent(ev) {
     if (!ev) return { error: "没有按键事件", consumed: false };
     if (ev.key === "Escape" || ev.code === "Escape") {
@@ -92,6 +97,7 @@
     var value = mods.concat([main]).join("+");
     return {
       value: value,
+      warning: shiftOnlyWarning(mods, value),
       hint: layoutHint(ev, main),
       consumed: true
     };

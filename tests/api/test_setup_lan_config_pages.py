@@ -186,8 +186,9 @@ def test_lan_access_local_issues_entries_qr_and_token(tmp_path):
     assert TEST_TOKEN not in body["token_masked"]
     assert [e["ip"] for e in body["entries"]] == FAKE_LAN_IPS
     first = body["entries"][0]
-    assert first["url"] == f"https://192.168.10.20:17945/voice?token={TEST_TOKEN}"
+    assert first["url"] == f"https://192.168.10.20:17945/voice#token={TEST_TOKEN}"
     assert TEST_TOKEN not in first["url_masked"]
+    assert "#token=" in first["url_masked"]
     assert "<svg" in first["qr_svg"]
 
 
@@ -251,13 +252,15 @@ def test_config_api_never_returns_legacy_secrets(tmp_path):
 def test_pages_come_only_from_static_v3(tmp_path):
     _rt, app = _app(tmp_path)
     client = local_client(app)
-    for url, name in (("/setup", "setup.html"), ("/voice", "voice.html"),
-                      ("/overlay-status", "overlay-status.html"), ("/overlay-translate", "overlay-translate.html")):
+    for url, name in (("/", "index.html"), ("/setup", "index.html"), ("/voice", "voice.html")):
         res = client.get(url)
         assert res.status_code == 200, url
         assert res.content == (STATIC_V3 / name).read_bytes()
         assert res.headers["referrer-policy"] == "no-referrer"
         assert b"Whisper" not in res.content and "百度".encode() not in res.content
+    assert client.get("/").content == client.get("/setup").content
+    for removed in ("/overlay-status", "/overlay-translate"):
+        assert client.get(removed).status_code == 404, removed
     assert client.get("/js/business/http.js").status_code == 200
     assert client.get("/css/theme.css").status_code == 200
     snap = client.get("/openapi.snapshot.json")
@@ -271,8 +274,8 @@ def test_phone_page_reachable_from_lan_but_setup_is_local(tmp_path):
     assert remote.get("/voice", headers=lan_host).status_code == 200
     assert remote.get("/js/voice.js", headers=lan_host).status_code == 200
     assert remote.get("/openapi.snapshot.json", headers=lan_host).status_code == 200
+    assert remote.get("/", headers=lan_host).status_code == 403
     assert remote.get("/setup", headers=lan_host).status_code == 403
-    assert remote.get("/overlay-status", headers=lan_host).status_code == 403
     assert remote.get("/openapi.json", headers=lan_host).status_code == 403
     public = TestClient(app, client=("8.8.8.8", 5000), base_url="https://8.8.8.8:17945")
     assert public.get("/voice", headers={"Host": "8.8.8.8:17945"}).status_code == 403

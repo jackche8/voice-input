@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from _v3.production import STATIC_V3
+from _v3_app import create_app
 from tests.api.conftest import (
     LAN_HOST,
     TEST_TOKEN,
@@ -8,6 +10,7 @@ from tests.api.conftest import (
     local_client,
     local_headers,
 )
+from tests.api.providers import make_text_wav
 
 
 def test_local_status_ok_and_does_not_echo_token(app):
@@ -70,7 +73,7 @@ def test_lan_stt_requires_valid_token(app):
     ok = client.post(
         "/api/v1/stt",
         data={"language": "zh"},
-        files={"audio": ("a.txt", b"hello", "application/octet-stream")},
+        files={"audio": ("a.wav", make_text_wav("hello"), "audio/wav")},
         headers=lan_headers(),
     )
     assert ok.status_code == 200
@@ -117,3 +120,37 @@ def test_no_cors_star_header(app):
     acao = res.headers.get("access-control-allow-origin")
     assert acao not in {"*", "https://*"}
     assert acao is None
+
+
+def test_sec_fetch_site_cross_site_blocks_api_and_post_allows_top_level_pages(runtime):
+    page_app = create_app(runtime, static_v3=STATIC_V3)
+    local = local_client(page_app)
+    cross = {"Sec-Fetch-Site": "cross-site"}
+
+    status_res = local.get("/api/v1/status", headers=cross)
+    assert status_res.status_code == 403
+    assert "Sec-Fetch-Site" in status_res.json()["message"]
+
+    cfg_res = local.post("/api/v1/config", json={"polish_enabled": False}, headers=cross)
+    assert cfg_res.status_code == 403
+    assert "Sec-Fetch-Site" in cfg_res.json()["message"]
+
+    openapi_res = local.get("/openapi.json", headers=cross)
+    assert openapi_res.status_code == 403
+    assert "Sec-Fetch-Site" in openapi_res.json()["message"]
+
+    post_root = local.post("/", headers=cross)
+    assert post_root.status_code == 403
+    assert "Sec-Fetch-Site" in post_root.json()["message"]
+
+    get_root = local.get("/", headers=cross)
+    assert get_root.status_code == 200
+
+    get_voice = local.get("/voice", headers=cross)
+    assert get_voice.status_code == 200
+
+    lan = lan_client(page_app)
+    lan_voice = lan.get("/voice", headers={"Host": f"{LAN_HOST}:17945", "Sec-Fetch-Site": "cross-site"})
+    assert lan_voice.status_code == 200
+    lan_api = lan.get("/api/v1/history", headers={**lan_headers(), "Sec-Fetch-Site": "cross-site"})
+    assert lan_api.status_code == 403

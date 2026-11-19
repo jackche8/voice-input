@@ -14,7 +14,7 @@ from typing import Any
 
 import h11
 
-FORBIDDEN_PORTS = frozenset({17945, 17946, 11434})
+from _v3.isolated import FORBIDDEN_PORTS
 
 
 class LoopbackASGIServer:

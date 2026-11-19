@@ -2,8 +2,8 @@
 from __future__ import annotations
 
 import asyncio
-import queue
 
+import anyio
 from fastapi import APIRouter, Header, Request
 from fastapi.responses import StreamingResponse
 
@@ -25,9 +25,10 @@ from _v3.sessions import RecognizeSessionHub
 
 def build_recognize_router(hub: RecognizeSessionHub, max_chunk_bytes: int) -> APIRouter:
     router = APIRouter(tags=["recognize"])
+
     @router.post("/api/v1/recognize/sessions", response_model=RecognizeSessionCreated)
-    def create_session(body: RecognizeSessionCreate) -> RecognizeSessionCreated:
-        return hub.create(body)
+    async def create_session(body: RecognizeSessionCreate) -> RecognizeSessionCreated:
+        return await asyncio.to_thread(hub.create, body)
 
     @router.post(
         "/api/v1/recognize/sessions/{session_id}/chunks",
@@ -50,7 +51,7 @@ def build_recognize_router(hub: RecognizeSessionHub, max_chunk_bytes: int) -> AP
         if ctype and ctype not in CHUNK_CONTENT_TYPES:
             raise LogicError(ErrorCode.invalid_request, "chunk 必须是 application/octet-stream")
         pcm = await read_body_limited(request, max_chunk_bytes)
-        return hub.accept_chunk(session_id, index, pcm)
+        return await asyncio.to_thread(hub.accept_chunk, session_id, index, pcm)
 
     @router.get(
         "/api/v1/recognize/sessions/{session_id}/events",
@@ -58,13 +59,14 @@ def build_recognize_router(hub: RecognizeSessionHub, max_chunk_bytes: int) -> AP
         response_class=StreamingResponse,
     )
     async def session_events(session_id: str, request: Request) -> StreamingResponse:
-        subscriber = hub.subscribe(session_id)
+        loop = asyncio.get_running_loop()
+        subscriber = hub.subscribe_async(session_id, loop)
 
         async def generate():
             try:
                 while True:
                     if await request.is_disconnected():
-                        hub.mark_disconnected(session_id)
+                        await asyncio.to_thread(hub.mark_disconnected, session_id)
                         break
                     if subscriber.overflow:
                         overflow = SessionErrorEvent(
@@ -74,12 +76,9 @@ def build_recognize_router(hub: RecognizeSessionHub, max_chunk_bytes: int) -> AP
                         )
                         SessionSSEEventEnvelope.model_validate(overflow.model_dump())
                         yield format_sse(overflow)
-                        hub.mark_disconnected(session_id)
+                        await asyncio.to_thread(hub.mark_disconnected, session_id)
                         return
-                    try:
-                        event = await asyncio.to_thread(subscriber.get, True, 0.2)
-                    except queue.Empty:
-                        continue
+                    event = await subscriber.get_async()
                     SessionSSEEventEnvelope.model_validate(
                         event.model_dump() if hasattr(event, "model_dump") else event
                     )
@@ -87,7 +86,8 @@ def build_recognize_router(hub: RecognizeSessionHub, max_chunk_bytes: int) -> AP
                     if getattr(event, "event", None) == "closed":
                         return
             except asyncio.CancelledError:
-                hub.mark_disconnected(session_id)
+                with anyio.CancelScope(shield=True):
+                    await asyncio.shield(asyncio.to_thread(hub.mark_disconnected, session_id))
                 raise
             finally:
                 hub.unsubscribe(session_id, subscriber)
@@ -98,14 +98,14 @@ def build_recognize_router(hub: RecognizeSessionHub, max_chunk_bytes: int) -> AP
         "/api/v1/recognize/sessions/{session_id}/finish",
         response_model=SessionClosedEvent,
     )
-    def finish(session_id: str) -> SessionClosedEvent:
-        return hub.finish(session_id)
+    async def finish(session_id: str) -> SessionClosedEvent:
+        return await asyncio.to_thread(hub.finish, session_id)
 
     @router.post(
         "/api/v1/recognize/sessions/{session_id}/cancel",
         response_model=SessionClosedEvent,
     )
-    def cancel(session_id: str) -> SessionClosedEvent:
-        return hub.cancel(session_id)
+    async def cancel(session_id: str) -> SessionClosedEvent:
+        return await asyncio.to_thread(hub.cancel, session_id)
 
     return router

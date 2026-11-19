@@ -117,7 +117,7 @@ def save_config(config: AppConfig, path: Path | None = None) -> None:
 
 
 LEGACY_OLLAMA_MODEL_KEY = "legacy_ollama_model"
-_HOTKEY_FIELDS = ("hotkey_voice", "hotkey_screenshot", "hotkey_repeat")
+_HOTKEY_FIELDS = ("hotkey_voice", "hotkey_screenshot", "hotkey_ocr", "hotkey_repeat")
 
 
 def config_view(config: AppConfig) -> AppConfigView:
@@ -128,6 +128,7 @@ def config_view(config: AppConfig) -> AppConfigView:
         translate_target_lang=config.translate_target_lang,
         hotkey_voice=config.hotkey_voice,
         hotkey_screenshot=config.hotkey_screenshot,
+        hotkey_ocr=config.hotkey_ocr,
         hotkey_repeat=config.hotkey_repeat,
         ollama_model=config.ollama_model,
     )

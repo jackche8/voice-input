@@ -1,11 +1,12 @@
 [Desktop Entry]
 Name=Ollama Voice Input
 Name[zh_CN]=语音输入助手
-Comment=全局语音输入 + 截图翻译，完全本地运行
-Exec=bash -c 'cd "$(dirname "$(readlink -f "%k")")" && ./start.sh'
+Comment=全局语音输入 + 原位截屏翻译 + 纯 OCR，完全本地运行
+Comment[zh_CN]=全局语音输入 + 原位截屏翻译 + 纯 OCR，完全本地运行
+Exec=bash -c 'if systemctl --user is-active --quiet ollama-voice-server.service; then xdg-open https://127.0.0.1:17945/; else cd "$(dirname "$(readlink -f "%k")")" && ./start.sh; fi'
 Terminal=false
 Type=Application
 Icon=audio-input-microphone
 Categories=Utility;Audio;Accessibility;
 StartupNotify=false
-Keywords=voice;input;translate;screenshot;ollama;qwen;asr;
+Keywords=voice;input;translate;screenshot;ocr;ollama;qwen;asr;

@@ -79,13 +79,21 @@ def test_polish_failure_records_raw_and_does_not_queue(harness: Harness):
     harness.config.save(AppConfig(ollama_model="mock-4b", polish_enabled=True))
 
     def boom(request: PolishRequest, *, model: str) -> PolishResponse:
-        raise LogicError(ErrorCode.polish_failed, "模型超时")
+        raise LogicError(ErrorCode.polish_failed, "模型超时", details={"upstream": "ollama"})
 
     harness.polish_impl = boom
     _final(harness, "s1", "原文")
     with pytest.raises(LogicError) as ei:
         harness.service.submit_session_final(_req("job-pf", "s1"))
     assert ei.value.code == ErrorCode.polish_failed
+    assert ei.value.details is not None
+    assert ei.value.details["raw_text"] == "原文"
+    assert ei.value.details["job_id"] == "job-pf"
+    assert ei.value.details["upstream"] == "ollama"
+    err_events = [ev for ev in harness.events_log if getattr(ev, "event", None) == "error"]
+    assert err_events
+    assert err_events[-1].details["raw_text"] == "原文"
+    assert err_events[-1].details["job_id"] == "job-pf"
     rec = harness.history.list_records().records[0]
     assert rec.raw_text == "原文"
     assert rec.final_text == "原文"
@@ -94,6 +102,11 @@ def test_polish_failure_records_raw_and_does_not_queue(harness: Harness):
     assert stored is not None
     assert stored.state == JobState.failed
     assert stored.state != JobState.queued
+    # 同 job_id 重试也保留 raw_text，便于客户端重试“改发原文”
+    with pytest.raises(LogicError) as retry_err:
+        harness.service.submit_session_final(_req("job-pf", "s1"))
+    assert retry_err.value.code == ErrorCode.polish_failed
+    assert retry_err.value.details["raw_text"] == "原文"
 
 
 def test_history_write_failure_does_not_enqueue(harness: Harness, tmp_path):
@@ -505,3 +518,80 @@ def test_missing_polish_capability_matches_failure_path(harness: Harness):
     assert stored is not None
     assert stored.state == JobState.failed
     assert stored.state != JobState.queued
+
+
+def test_resend_skips_polish_and_records_skipped(harness: Harness):
+    harness.config.save(AppConfig(ollama_model="mock-4b", polish_enabled=True))
+
+    def boom(request: PolishRequest, *, model: str) -> PolishResponse:
+        raise LogicError(ErrorCode.polish_failed, "4B 服务不可用")
+
+    harness.polish_impl = boom
+    _final(harness, "s1", "这是错字原文")
+    with pytest.raises(LogicError) as ei:
+        harness.service.submit_session_final(_req("job-pf-orig", "s1"))
+    assert ei.value.code == ErrorCode.polish_failed
+    assert ei.value.details["raw_text"] == "这是错字原文"
+    assert harness.polish_calls == 1
+    polishing_before = harness.event_types().count("polishing")
+
+    resent = harness.service.submit_resend(
+        UtteranceResendRequest(
+            job_id="job-pf-raw",
+            text=ei.value.details["raw_text"],
+            original_job_id="job-pf-orig",
+        )
+    )
+    assert isinstance(resent, UtteranceResendQueued)
+    assert resent.text == "这是错字原文"
+    assert harness.polish_calls == 1, "submit_resend 不得再次触发润色"
+    assert harness.event_types().count("polishing") == polishing_before
+    rec = harness.history.record_for_job("job-pf-raw")
+    assert rec is not None
+    assert rec.raw_text == "这是错字原文"
+    assert rec.final_text == "这是错字原文"
+    assert rec.polish == HistoryPolish.skipped
+    stored = harness.jobs_store.get("job-pf-raw")
+    assert stored is not None and stored.state == JobState.queued and stored.text == "这是错字原文"
+
+
+def test_resend_empty_focus_overrides_stale_original_focus(harness: Harness):
+    _final(harness, "s1", "旧句")
+    harness.service.submit_session_final(_req("job-old-focus", "s1", focus_id="stale-win-1"))
+    harness.jobs_store.update("job-old-focus", state=JobState.done)
+
+    # 显式传入空串 focus_id（通过请求字段）不得强行沿用已失效旧窗口句柄
+    r_req = harness.service.submit_resend(
+        UtteranceResendRequest(
+            job_id="job-resend-empty-req",
+            text="旧句",
+            original_job_id="job-old-focus",
+            focus_id="",
+        )
+    )
+    assert isinstance(r_req, UtteranceResendQueued)
+    assert harness.jobs_store.get("job-resend-empty-req").focus_id == ""
+
+    # 显式传入空串 focus_id（通过调用方关键字参数）同样按最新空焦点投递
+    r_kw = harness.service.submit_resend(
+        UtteranceResendRequest(
+            job_id="job-resend-empty-kw",
+            text="旧句",
+            original_job_id="job-old-focus",
+        ),
+        focus_id="",
+    )
+    assert isinstance(r_kw, UtteranceResendQueued)
+    assert harness.jobs_store.get("job-resend-empty-kw").focus_id == ""
+
+    # 显式传入最新窗口焦点
+    r_new = harness.service.submit_resend(
+        UtteranceResendRequest(
+            job_id="job-resend-new-win",
+            text="旧句",
+            original_job_id="job-old-focus",
+            focus_id="fresh-win-2",
+        )
+    )
+    assert isinstance(r_new, UtteranceResendQueued)
+    assert harness.jobs_store.get("job-resend-new-win").focus_id == "fresh-win-2"

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""分层闸门：logic / business / api / platform / sidecar / integration / ui。
+"""分层闸门：logic / business / api / platform / sidecar / integration / ui / ui_desktop。
 默认 --layer logic，不联网安装，不写入项目 .venv。
---layer all 含 logic,business,api,platform,sidecar,integration 与既有 node tests/ui/run.js。
+--layer all 含 logic,business,api,platform,sidecar,integration,ui,ui_desktop。
 sidecar 默认只跑 mock；官方短链需 SIDECAR_OFFICIAL=1 且显式启动宿主。
 """
 from __future__ import annotations
@@ -58,9 +58,16 @@ LAYERS = {
         "pytest_tmp": ROOT / ".pp" / "tmp" / "integration" / "pytest",
         "export_openapi": False,
     },
+    "ui_desktop": {
+        "tests": ROOT / "tests" / "ui_desktop",
+        "gate": ROOT / ".pp" / "gate" / "ui_desktop",
+        "pytest_tmp": ROOT / ".pp" / "tmp" / "ui_desktop" / "pytest",
+        "export_openapi": False,
+        "extra_env": {"QT_QPA_PLATFORM": "offscreen"},
+    },
 }
 
-ALL_LAYERS = ("logic", "business", "api", "platform", "sidecar", "integration", "ui")
+ALL_LAYERS = ("logic", "business", "api", "platform", "sidecar", "integration", "ui", "ui_desktop")
 
 
 def now() -> str:
@@ -80,9 +87,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--layer",
-        choices=("logic", "business", "api", "platform", "sidecar", "integration", "ui", "all"),
+        choices=("logic", "business", "api", "platform", "sidecar", "integration", "ui", "ui_desktop", "all"),
         default="logic",
-        help="logic (default) / business / api / platform / sidecar / integration / ui; all includes all of these plus the existing node tests/ui entry. Official GPU sidecar stays opt-in.",
+        help="logic (default) / business / api / platform / sidecar / integration / ui / ui_desktop; all includes all of these plus the existing node tests/ui entry. Official GPU sidecar stays opt-in.",
     )
     parser.add_argument(
         "--write-openapi-snapshot",
@@ -171,6 +178,7 @@ REQUIRED_API_PATHS = (
     "/api/v1/polish",
     "/api/v1/translate",
     "/api/v1/ocr-translate",
+    "/api/v1/ocr-inplace",
     "/api/v1/history",
     "/api/v1/events",
     "/api/v1/events/platform",
@@ -251,6 +259,8 @@ def export_api_openapi(python: Path, gate_dir: Path, *, write_snapshot: bool = F
         "SetupTask",
         "LanAccessResponse",
         "AppConfigView",
+        "OcrInplaceResponse",
+        "OcrTextBlock",
     ):
         if required not in schemas:
             raise SystemExit(f"API OpenAPI missing schema {required}")
@@ -273,7 +283,14 @@ def export_api_openapi(python: Path, gate_dir: Path, *, write_snapshot: bool = F
 
 
 
-def run_tests(python: Path, *, test_dir: Path, gate_dir: Path, pytest_tmp: Path) -> dict:
+def run_tests(
+    python: Path,
+    *,
+    test_dir: Path,
+    gate_dir: Path,
+    pytest_tmp: Path,
+    extra_env: dict[str, str] | None = None,
+) -> dict:
     pytest_tmp.mkdir(parents=True, exist_ok=True)
     gate_dir.mkdir(parents=True, exist_ok=True)
     junit = gate_dir / "pytest-junit.xml"
@@ -282,6 +299,8 @@ def run_tests(python: Path, *, test_dir: Path, gate_dir: Path, pytest_tmp: Path)
     env["PYTHONPATH"] = str(ROOT)
     env["TMPDIR"] = str(pytest_tmp)
     env["PYTEST_ADDOPTS"] = ""
+    if extra_env:
+        env.update(extra_env)
     cmd = [
         str(python),
         "-m",
@@ -359,7 +378,7 @@ def write_summary(
         f"bootstrap_install: {bootstrap}",
         "notes:",
         "- Default gate does not install packages; use --bootstrap only to prepare the isolated venv.",
-        "- --layer logic|business|api|platform|sidecar|integration|ui|all; all includes python layers plus tests/ui/run.js. Official GPU sidecar stays opt-in skip.",
+        "- --layer logic|business|api|platform|sidecar|integration|ui|ui_desktop|all; all includes python layers plus tests/ui/run.js. Official GPU sidecar stays opt-in skip.",
         "- logic OpenAPI skeleton keeps empty paths; api layer exports real FastAPI paths to .pp/gate/api/openapi.json.",
         "- Live 4b / long-audio ASR must skip or not be marked green. Mocks are not real models.",
         "- Isolated test env: .pp/tmp/l1/venv-test ; project .venv was not modified.",
@@ -380,6 +399,7 @@ def _run_layer(python: Path, layer: str, *, bootstrap: bool, write_snapshot: boo
         test_dir=cfg["tests"],
         gate_dir=cfg["gate"],
         pytest_tmp=cfg["pytest_tmp"],
+        extra_env=cfg.get("extra_env"),
     )
     write_summary(
         counts,

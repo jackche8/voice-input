@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from _contracts import AckResult, JobState, SIDECAR_CHUNK_HEADER
 from tests.api.conftest import lan_client, lan_headers, local_client, local_headers
+from tests.api.providers import make_text_wav, make_wav_bytes
 
 
 def _pcm(samples: int = 16) -> bytes:
@@ -71,15 +72,30 @@ def test_from_audio_requires_client_job_id_and_keeps_focus(app):
     missing = client.post(
         "/api/v1/utterances/from-audio",
         data={"language": "zh", "focus_id": "focus-B"},
-        files={"audio": ("a.txt", b"phone-text", "text/plain")},
+        files={"audio": ("a.wav", make_text_wav("phone-text"), "audio/wav")},
         headers=local_headers(),
     )
     assert missing.status_code == 400
     assert "job_id" in missing.json()["message"]
+    # 损坏容器与静音在解码阶段显式拒绝
+    corrupt = client.post(
+        "/api/v1/utterances/from-audio",
+        data={"job_id": "job-bad-audio"},
+        files={"audio": ("bad.webm", b"corrupt-audio", "audio/webm")},
+        headers=local_headers(),
+    )
+    assert corrupt.status_code == 400
+    silent = client.post(
+        "/api/v1/utterances/from-audio",
+        data={"job_id": "job-silent-audio"},
+        files={"audio": ("silent.wav", make_wav_bytes(b"\x00\x00" * 160), "audio/wav")},
+        headers=local_headers(),
+    )
+    assert silent.status_code == 400
     created = client.post(
         "/api/v1/utterances/from-audio",
         data={"job_id": "job-phone", "language": "zh", "focus_id": "focus-B"},
-        files={"audio": ("a.txt", b"phone-text", "text/plain")},
+        files={"audio": ("a.wav", make_text_wav("phone-text"), "audio/wav")},
         headers=local_headers(),
     )
     assert created.status_code == 200, created.text
@@ -90,7 +106,7 @@ def test_from_audio_requires_client_job_id_and_keeps_focus(app):
     conflict = client.post(
         "/api/v1/utterances/from-audio",
         data={"job_id": "job-phone", "language": "zh", "focus_id": "focus-C"},
-        files={"audio": ("a.txt", b"other-text", "text/plain")},
+        files={"audio": ("a.wav", make_text_wav("other-text"), "audio/wav")},
         headers=local_headers(),
     )
     assert conflict.status_code == 409
@@ -98,7 +114,7 @@ def test_from_audio_requires_client_job_id_and_keeps_focus(app):
     again = client.post(
         "/api/v1/utterances/from-audio",
         data={"job_id": "job-phone", "language": "zh", "focus_id": "focus-B"},
-        files={"audio": ("a.txt", b"phone-text", "text/plain")},
+        files={"audio": ("a.wav", make_text_wav("phone-text"), "audio/wav")},
         headers=local_headers(),
     )
     assert again.status_code == 200
@@ -110,7 +126,7 @@ def test_resend_confirmation_and_late_ack(app):
     first = client.post(
         "/api/v1/utterances/from-audio",
         data={"job_id": "job-old", "focus_id": "focus-R"},
-        files={"audio": ("a.txt", b"once", "text/plain")},
+        files={"audio": ("a.wav", make_text_wav("once"), "audio/wav")},
         headers=local_headers(),
     )
     assert first.status_code == 200
@@ -164,7 +180,7 @@ def test_lan_can_query_job_but_cannot_claim(app):
     created = client.post(
         "/api/v1/utterances/from-audio",
         data={"job_id": "job-lanq", "focus_id": "f"},
-        files={"audio": ("a.txt", b"text", "text/plain")},
+        files={"audio": ("a.wav", make_text_wav("text"), "audio/wav")},
         headers=local_headers(),
     )
     assert created.status_code == 200

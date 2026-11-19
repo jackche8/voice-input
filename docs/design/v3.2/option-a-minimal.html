@@ -1,0 +1,560 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>方案 A · 极简一体双栏 + 整块选区遮挡 — Ollama Voice Input UI 模板</title>
+<style>
+:root {
+  --font-sans: "Noto Sans CJK SC", "PingFang SC", "Microsoft YaHei", system-ui, -apple-system, sans-serif;
+  --font-mono: "JetBrains Mono", "Noto Sans Mono CJK SC", ui-monospace, monospace;
+  --fs-xs: 12px; --fs-sm: 13px; --fs-md: 14px; --fs-lg: 16px; --fs-xl: 20px;
+  --sp-1: 4px; --sp-2: 8px; --sp-3: 12px; --sp-4: 16px; --sp-5: 24px; --sp-6: 32px;
+  --r-sm: 6px; --r-md: 10px; --r-lg: 14px; --r-pill: 999px;
+
+  --c-bg: #f6f7f9;
+  --c-surface: #ffffff;
+  --c-surface-2: #f1f3f6;
+  --c-text: #1c2024;
+  --c-muted: #606770;
+  --c-border: #dce1e7;
+  --c-accent: #0f766e;
+  --c-accent-hover: #115e59;
+  --c-accent-soft: #e6f4f2;
+  --c-ok: #1a7f37; --c-ok-soft: #dafbe1;
+  --c-warn: #9a6700; --c-warn-soft: #fff8c5;
+  --c-danger: #cf222e; --c-danger-soft: #ffebe9;
+
+  --hud-solid: #161b22;
+  --hud-bg: rgba(22, 27, 34, 0.94);
+  --hud-text: #f0f3f6;
+  --hud-muted: #9198a1;
+  --hud-border: rgba(255, 255, 255, 0.14);
+  --shadow-card: 0 2px 8px rgba(15, 23, 42, 0.05);
+  --shadow-hud: 0 12px 32px rgba(0, 0, 0, 0.38);
+}
+
+* { box-sizing: border-box; }
+body { margin: 0; font-family: var(--font-sans); background: #e6e9ef; color: var(--c-text); font-size: var(--fs-md); line-height: 1.55; }
+[hidden] { display: none !important; }
+
+/* 顶部模板预览切换条（仅预览用） */
+.preview-bar {
+  position: sticky; top: 0; z-index: 100;
+  background: #181c20; color: #e6edf3;
+  padding: 10px 20px; border-bottom: 1px solid #30363d;
+  display: flex; flex-wrap: wrap; gap: 12px; align-items: center; justify-content: space-between;
+}
+.preview-bar .scheme-links { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+.preview-bar a {
+  color: #c9d1d9; text-decoration: none; font-size: var(--fs-xs);
+  padding: 4px 10px; border-radius: var(--r-pill); border: 1px solid #3b434b;
+}
+.preview-bar a.active { background: #0f766e; border-color: #0f766e; color: #fff; font-weight: 600; }
+.preview-tabs { display: flex; gap: 6px; flex-wrap: wrap; }
+.preview-tabs button {
+  font: inherit; font-size: var(--fs-xs); padding: 5px 12px;
+  border-radius: var(--r-pill); border: 1px solid #3b434b;
+  background: #21262d; color: #c9d1d9; cursor: pointer;
+}
+.preview-tabs button.on { background: #f0f6fc; color: #181c20; border-color: #f0f6fc; font-weight: 600; }
+
+.stage-wrap { max-width: 1240px; margin: 20px auto; padding: 0 20px 40px; }
+.stage-desc {
+  background: #fff; border: 1px solid var(--c-border); border-radius: var(--r-md);
+  padding: 12px 16px; margin-bottom: 16px; font-size: var(--fs-sm); color: var(--c-muted);
+  display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap;
+}
+.stage-desc strong { color: var(--c-text); }
+.state-pills { display: flex; gap: 6px; flex-wrap: wrap; }
+.state-pills button {
+  font: inherit; font-size: var(--fs-xs); padding: 4px 10px;
+  border-radius: var(--r-pill); border: 1px solid var(--c-border);
+  background: var(--c-surface); cursor: pointer; color: var(--c-muted);
+}
+.state-pills button.on { background: var(--c-accent); color: #fff; border-color: var(--c-accent); }
+
+/* 通用组件 */
+.btn {
+  display: inline-flex; align-items: center; gap: 6px;
+  font: inherit; font-size: var(--fs-sm); padding: 6px 14px;
+  border-radius: var(--r-sm); border: 1px solid var(--c-border);
+  background: var(--c-surface); color: var(--c-text); cursor: pointer;
+}
+.btn:hover { border-color: var(--c-accent); color: var(--c-accent); }
+.btn.primary { background: var(--c-accent); border-color: var(--c-accent); color: #fff; font-weight: 500; }
+.btn.primary:hover { background: var(--c-accent-hover); color: #fff; }
+.badge {
+  display: inline-flex; align-items: center; gap: 5px;
+  font-size: var(--fs-xs); padding: 2px 9px; border-radius: var(--r-pill);
+  background: var(--c-surface-2); color: var(--c-muted);
+}
+.badge.ok { background: var(--c-ok-soft); color: var(--c-ok); }
+.badge.warn { background: var(--c-warn-soft); color: var(--c-warn); }
+.dot { width: 7px; height: 7px; border-radius: 50%; background: currentColor; display: inline-block; }
+.mono { font-family: var(--font-mono); }
+
+/* ==================== 1. 主页：极简翻译与 OCR 工作台 ==================== */
+.browser-frame {
+  background: var(--c-bg); border: 1px solid var(--c-border);
+  border-radius: var(--r-lg); box-shadow: var(--shadow-card); overflow: hidden;
+}
+.browser-url {
+  background: #ebedf0; padding: 8px 14px; border-bottom: 1px solid var(--c-border);
+  display: flex; align-items: center; gap: 8px; font-size: var(--fs-xs); color: var(--c-muted);
+}
+.browser-url .dots i { display: inline-block; width: 10px; height: 10px; border-radius: 50%; background: #c5cad1; margin-right: 5px; }
+.browser-url .addr { background: #fff; padding: 3px 12px; border-radius: var(--r-pill); border: 1px solid var(--c-border); font-family: var(--font-mono); color: var(--c-text); }
+
+.app-top {
+  background: var(--c-surface); border-bottom: 1px solid var(--c-border);
+  padding: 12px 24px; display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap;
+}
+.brand { display: flex; align-items: center; gap: 10px; font-weight: 700; font-size: var(--fs-lg); }
+.top-switch {
+  display: inline-flex; background: var(--c-surface-2); padding: 3px; border-radius: var(--r-md);
+}
+.top-switch button {
+  font: inherit; font-size: var(--fs-sm); border: 0; background: transparent;
+  padding: 5px 14px; border-radius: 7px; cursor: pointer; color: var(--c-muted);
+}
+.top-switch button.on { background: var(--c-surface); color: var(--c-text); font-weight: 600; box-shadow: 0 1px 2px rgba(0,0,0,0.06); }
+.status-strip { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+
+.workbench { padding: 24px; max-width: 1060px; margin: 0 auto; }
+.lang-bar {
+  background: var(--c-surface); border: 1px solid var(--c-border); border-bottom: 0;
+  border-radius: var(--r-md) var(--r-md) 0 0; padding: 10px 16px;
+  display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap;
+}
+.lang-group { display: flex; align-items: center; gap: 8px; }
+select.clean-sel {
+  font: inherit; font-size: var(--fs-sm); font-weight: 600;
+  padding: 5px 10px; border-radius: var(--r-sm); border: 1px solid var(--c-border); background: var(--c-surface);
+}
+.dual-grid {
+  display: grid; grid-template-columns: 1fr 1fr;
+  background: var(--c-surface); border: 1px solid var(--c-border);
+  border-radius: 0 0 var(--r-md) var(--r-md); overflow: hidden; min-height: 310px;
+}
+@media (max-width: 780px) { .dual-grid { grid-template-columns: 1fr; } }
+.pane-in { border-right: 1px solid var(--c-border); display: flex; flex-direction: column; }
+.pane-out { background: #fafbfc; display: flex; flex-direction: column; }
+.pane-area {
+  flex: 1; width: 100%; border: 0; resize: none; padding: 16px;
+  font: inherit; font-size: var(--fs-lg); line-height: 1.65; background: transparent; color: var(--c-text); outline: none;
+}
+.img-drop-chip {
+  margin: 0 16px 10px; padding: 8px 12px; border-radius: var(--r-sm);
+  background: var(--c-accent-soft); color: var(--c-accent); font-size: var(--fs-xs);
+  display: flex; align-items: center; justify-content: space-between;
+}
+.pane-foot {
+  padding: 10px 16px; border-top: 1px solid var(--c-border);
+  display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: var(--fs-xs); color: var(--c-muted);
+}
+
+.quick-shortcuts {
+  margin-top: 14px; display: flex; gap: 16px; flex-wrap: wrap; font-size: var(--fs-xs); color: var(--c-muted);
+}
+.quick-shortcuts kbd {
+  font-family: var(--font-mono); background: var(--c-surface); border: 1px solid var(--c-border);
+  border-radius: 4px; padding: 1px 6px; color: var(--c-text);
+}
+
+/* 设置子面板 */
+.settings-simple {
+  background: var(--c-surface); border: 1px solid var(--c-border); border-radius: var(--r-md); divide-y: 1px solid var(--c-border);
+}
+.s-row {
+  padding: 14px 18px; border-bottom: 1px solid var(--c-border);
+  display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap;
+}
+.s-row:last-child { border-bottom: 0; }
+.s-title { font-weight: 600; font-size: var(--fs-md); }
+.s-sub { font-size: var(--fs-xs); color: var(--c-muted); margin-top: 2px; }
+input.hk { font-family: var(--font-mono); font-size: var(--fs-sm); width: 148px; text-align: center; padding: 5px 8px; border: 1px solid var(--c-border); border-radius: var(--r-sm); }
+
+/* ==================== 2. 截屏原位整块实心遮挡浮窗 ==================== */
+.desktop-mock {
+  position: relative; height: 500px; border-radius: var(--r-lg); overflow: hidden;
+  background: linear-gradient(135deg, #dbe4f0 0%, #c9d6e8 100%);
+  border: 1px solid var(--c-border); padding: 28px;
+}
+.foreign-doc {
+  background: #ffffff; border-radius: var(--r-md); max-width: 760px; padding: 24px 28px;
+  box-shadow: 0 8px 24px rgba(0,0,0,0.08); color: #24292f; position: relative;
+}
+.foreign-doc h3 { margin: 0 0 10px; font-size: 19px; }
+.foreign-doc p { margin: 0 0 12px; color: #4b5563; line-height: 1.65; }
+.foreign-doc pre { background: #f3f4f6; padding: 10px 12px; border-radius: 6px; font-family: var(--font-mono); font-size: 12px; }
+
+/* 方案 A 核心：选区矩形整块不透明实心卡片完全遮住底部英文 */
+.region-mask-card {
+  position: absolute; top: 58px; left: 48px; width: 640px; min-height: 146px;
+  background: var(--hud-solid); color: var(--hud-text);
+  border: 1.5px solid rgba(45, 212, 191, 0.55);
+  border-radius: var(--r-md); box-shadow: var(--shadow-hud);
+  padding: 14px 16px 10px; display: flex; flex-direction: column; justify-content: space-between;
+}
+.region-mask-body { font-size: 15px; line-height: 1.7; white-space: pre-wrap; }
+.region-mask-foot {
+  margin-top: 12px; padding-top: 8px; border-top: 1px solid var(--hud-border);
+  display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: var(--fs-xs); color: var(--hud-muted);
+}
+.hud-seg { display: inline-flex; background: rgba(255,255,255,0.08); border-radius: var(--r-sm); padding: 2px; }
+.hud-seg button {
+  font: inherit; font-size: var(--fs-xs); color: var(--hud-muted); background: transparent;
+  border: 0; padding: 3px 9px; border-radius: 4px; cursor: pointer;
+}
+.hud-seg button.on { background: rgba(255,255,255,0.2); color: #fff; font-weight: 600; }
+.hud-act {
+  font: inherit; font-size: var(--fs-xs); color: var(--hud-text);
+  background: rgba(255,255,255,0.08); border: 1px solid var(--hud-border);
+  border-radius: var(--r-sm); padding: 3px 10px; cursor: pointer;
+}
+.hud-act:hover { background: rgba(255,255,255,0.16); }
+
+/* ==================== 3. 左下角单胶囊真透明状态栏 ==================== */
+.hud-pill {
+  position: absolute; left: 24px; bottom: 24px; max-width: 520px;
+  background: var(--hud-bg); color: var(--hud-text);
+  padding: 9px 16px; border-radius: var(--r-pill);
+  box-shadow: var(--shadow-hud); border: 1px solid var(--hud-border);
+  display: inline-flex; align-items: center; gap: 10px; font-size: var(--fs-md);
+}
+.hud-pill .pulse { width: 9px; height: 9px; border-radius: 50%; background: #f87171; flex: none; }
+.hud-pill .pulse.ok { background: #4ade80; }
+.hud-pill .pulse.busy { background: #fbbf24; }
+.hud-pill .sub-unstable { color: #93c5fd; text-decoration: underline dotted; }
+
+/* ==================== 4. 手机扫码录入页 ==================== */
+.phone-mock {
+  width: 360px; margin: 0 auto; background: var(--c-surface);
+  border: 1px solid var(--c-border); border-radius: 26px; padding: 20px 18px;
+  box-shadow: var(--shadow-card);
+}
+.mic-hold-btn {
+  width: 100%; height: 120px; border-radius: var(--r-lg); border: 2px solid var(--c-accent);
+  background: var(--c-accent-soft); color: var(--c-accent);
+  font: inherit; font-size: var(--fs-lg); font-weight: 700; cursor: pointer;
+  touch-action: none; user-select: none; margin: 16px 0 10px;
+}
+.mic-hold-btn:active { background: var(--c-accent); color: #fff; }
+</style>
+</head>
+<body>
+
+<div class="preview-bar">
+  <div class="scheme-links">
+    <strong style="font-size:13px;margin-right:6px;">UI 候选模板：</strong>
+    <a href="option-a-minimal.html" class="active">方案 A · 极简双栏 + 整块遮挡（最简）</a>
+    <a href="option-b-inplace.html">方案 B · 逐段原位背景遮挡 + 多模翻译台（推荐）</a>
+    <a href="option-c-studio.html">方案 C · 侧栏工作站 + 对照遮罩</a>
+  </div>
+  <div class="preview-tabs" id="surface-tabs">
+    <button class="on" data-target="home">1. 主页翻译框 (/)</button>
+    <button data-target="shot">2. 截屏原位翻译 & OCR</button>
+    <button data-target="hud">3. 左下角语音状态栏</button>
+    <button data-target="phone">4. 手机语音页 (/voice)</button>
+  </div>
+</div>
+
+<div class="stage-wrap">
+  <!-- 表面 1：主页 -->
+  <section class="surf" id="surf-home">
+    <div class="stage-desc">
+      <div><strong>方案 A 特点（最简方案）</strong>：打开主页即为左右双栏翻译框（支持粘贴文字翻译，或直接 Ctrl+V 粘贴图片提取 OCR）；截屏翻译采用<strong>整块选区不透明深色卡片</strong>直接盖住选区矩形，实现最简单。</div>
+      <div class="state-pills">
+        <button class="on" onclick="setHomeMode('text', this)">文本输入翻译</button>
+        <button onclick="setHomeMode('img', this)">粘贴图片 OCR 态</button>
+        <button onclick="switchTopTab('settings')">切换到设置视图</button>
+      </div>
+    </div>
+
+    <div class="browser-frame">
+      <div class="browser-url">
+        <span class="dots"><i></i><i></i><i></i></span>
+        <span class="addr">https://127.0.0.1:17945/</span>
+        <span>本地离线运行 · 不连接任何云端服务</span>
+      </div>
+
+      <header class="app-top">
+        <div class="brand">
+          <span>🎙️ Ollama Voice Input</span>
+          <div class="top-switch">
+            <button class="on" id="tab-btn-trans" onclick="switchTopTab('trans')">翻译与 OCR</button>
+            <button id="tab-btn-settings" onclick="switchTopTab('settings')">设置与记录</button>
+          </div>
+        </div>
+        <div class="status-strip">
+          <span class="badge ok"><i class="dot"></i>ASR 1.7B 就绪</span>
+          <span class="badge ok"><i class="dot"></i>qwen3.5:4b 就绪</span>
+          <span class="badge ok"><i class="dot"></i>守护进程运行中</span>
+        </div>
+      </header>
+
+      <!-- 主页：翻译框 -->
+      <div class="workbench" id="pane-trans">
+        <div class="lang-bar">
+          <div class="lang-group">
+            <span style="font-size:13px;color:var(--c-muted);">源语言：自动识别（文本 / 剪贴板图片 OCR）</span>
+            <span>→</span>
+            <select class="clean-sel" id="a-target-lang">
+              <option value="zh">译为：简体中文</option>
+              <option value="en">译为：English</option>
+              <option value="ja">译为：日本語</option>
+              <option value="raw">仅提取 OCR 原文（不翻译）</option>
+            </select>
+          </div>
+          <div class="lang-group">
+            <button class="btn" onclick="setHomeMode('img')">📷 选择/粘贴图片 OCR</button>
+            <button class="btn" onclick="document.getElementById('a-input').value='';document.getElementById('a-output').value='';">清空</button>
+            <button class="btn primary" onclick="demoTranslateA()">立即翻译 (Ctrl+Enter)</button>
+          </div>
+        </div>
+
+        <div class="dual-grid">
+          <div class="pane-in">
+            <div class="img-drop-chip" id="a-img-chip" hidden>
+              <span>🖼️ 已粘贴截图 <code>selection_01.png</code> · Tesseract 已提取文字</span>
+              <button class="btn" style="padding:2px 8px;font-size:12px;" onclick="setHomeMode('text')">移除图片</button>
+            </div>
+            <textarea class="pane-area" id="a-input" placeholder="直接粘贴或输入要翻译的文字；也可按 Ctrl+V 直接粘贴截图自动 OCR 识别…">Local speech recognition and in-place screenshot translation run 100% offline on your GPU without uploading any data.</textarea>
+            <div class="pane-foot">
+              <span>支持 Ctrl+V 粘贴文本或截图</span>
+              <span class="mono">118 字符</span>
+            </div>
+          </div>
+          <div class="pane-out">
+            <textarea class="pane-area" id="a-output" readonly>本地语音识别与原位截屏翻译 100% 在您的本机 GPU 上离线运行，不会上传任何数据。</textarea>
+            <div class="pane-foot">
+              <span>由本地 <code>qwen3.5:4b</code> 生成 · 耗时 0.42s</span>
+              <button class="btn" id="a-copy-btn" onclick="copyFeedback(this)">复制结果</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="quick-shortcuts">
+          <span>全局热键：<kbd>Ctrl+Alt+Z</kbd> 按住语音输入</span>
+          <span><kbd>Ctrl+Alt+X</kbd> 截屏原位翻译</span>
+          <span><kbd>Ctrl+Alt+O</kbd> 截屏纯 OCR 取字</span>
+          <span><kbd>Ctrl+Alt+R</kbd> 重复上一次输入</span>
+        </div>
+      </div>
+
+      <!-- 设置与记录简化面板 -->
+      <div class="workbench" id="pane-settings" hidden>
+        <div class="settings-simple">
+          <div class="s-row">
+            <div>
+              <div class="s-title">本地模型与显存协同</div>
+              <div class="s-sub">Qwen3-ASR-1.7B (显存上限 45% · 7.3GB) + Ollama qwen3.5:4b (独立端口 127.0.0.1:17947 · 3.6GB)</div>
+            </div>
+            <span class="badge ok">双模型共存正常</span>
+          </div>
+          <div class="s-row">
+            <div>
+              <div class="s-title">全局快捷键（Wayland Portal 独占同步）</div>
+              <div class="s-sub">修改后自动触发 Portal 重新绑定校验，冲突实时提示</div>
+            </div>
+            <div style="display:flex;gap:8px;flex-wrap:wrap;">
+              <input class="hk" value="ctrl+alt+z" aria-label="语音输入" />
+              <input class="hk" value="ctrl+alt+x" aria-label="截屏翻译" />
+              <input class="hk" value="ctrl+alt+o" aria-label="纯OCR识别" />
+              <input class="hk" value="ctrl+alt+r" aria-label="重复输入" />
+              <button class="btn primary">保存</button>
+            </div>
+          </div>
+          <div class="s-row">
+            <div>
+              <div class="s-title">语音纠错开关与专有词库</div>
+              <div class="s-sub">只修错别字与标点，严禁自由扩写回答；当前词库：Ollama、FastAPI、Qwen、MCP、第一性原理</div>
+            </div>
+            <button class="btn">编辑词库</button>
+          </div>
+          <div class="s-row">
+            <div>
+              <div class="s-title">手机局域网扫码语音输入</div>
+              <div class="s-sub">自动匹配当前网卡 IP (<code>10.0.0.110</code>) 签发短期证书，URL Fragment 传令牌不落日志</div>
+            </div>
+            <button class="btn">显示二维码</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 表面 2：截屏原位整块遮挡浮窗 -->
+  <section class="surf" id="surf-shot" hidden>
+    <div class="stage-desc">
+      <div><strong>方案 A 截屏浮窗（整块选区遮挡）</strong>：框选区域后，在选区坐标原位生成<strong>一整张不透明实心深色卡片</strong>完全盖住底下英文；底部可一键切换「译文 / OCR 原文」并复制。</div>
+      <div class="state-pills">
+        <button class="on" onclick="setShotModeA('trans', this)">原位译文（整块遮挡）</button>
+        <button onclick="setShotModeA('ocr', this)">仅看 OCR 原文</button>
+        <button onclick="setShotModeA('loading', this)">识别翻译中</button>
+      </div>
+    </div>
+
+    <div class="desktop-mock">
+      <div class="foreign-doc">
+        <h3>Architecture Overview — Release v3.2</h3>
+        <p>When a user selects a region on Wayland, the compositor captures the frozen frame via xdg-desktop-portal and renders the translated text directly over the selected coordinates.</p>
+        <pre>$ systemctl --user status ollama-voice-daemon.service</pre>
+        <p>All OCR and LLM inference stays strictly on localhost without external API calls.</p>
+      </div>
+
+      <div class="region-mask-card" id="a-mask-card">
+        <div class="region-mask-body" id="a-mask-text">架构概览 —— v3.2 版本说明
+当用户在 Wayland 下框选屏幕区域时，合成器通过 xdg-desktop-portal 捕获冻结画面，并在所选坐标原位直接渲染翻译文本。</div>
+        <div class="region-mask-foot">
+          <div class="hud-seg">
+            <button class="on" id="a-seg-tr" onclick="setShotModeA('trans')">译文</button>
+            <button id="a-seg-ocr" onclick="setShotModeA('ocr')">OCR 原文</button>
+          </div>
+          <div style="display:flex;gap:8px;align-items:center;">
+            <button class="hud-act" onclick="copyFeedback(this)">复制</button>
+            <span>Esc / 点击外部关闭</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 表面 3：左下角语音状态栏 -->
+  <section class="surf" id="surf-hud" hidden>
+    <div class="stage-desc">
+      <div><strong>左下角单胶囊真透明状态栏</strong>：开启 GTK + WebKit RGBA 透明视觉，消除白色底框；永远只渲染<strong>最新一条状态胶囊</strong>，绝不堆叠裁切。</div>
+      <div class="state-pills">
+        <button class="on" onclick="setHudA('rec', this)">录音流式字幕</button>
+        <button onclick="setHudA('polish', this)">4B 纠错中</button>
+        <button onclick="setHudA('done', this)">已输入完成</button>
+        <button onclick="setHudA('err', this)">纠错失败可补发原文</button>
+      </div>
+    </div>
+    <div class="desktop-mock" style="height:300px;">
+      <div class="hud-pill" id="a-hud-pill">
+        <span class="pulse" id="a-hud-dot"></span>
+        <strong id="a-hud-label" style="white-space:nowrap;">录音 0:04</strong>
+        <span style="opacity:0.3">|</span>
+        <span id="a-hud-body">把这个项目的首页改成翻译框，<span class="sub-unstable">支持手动复制粘贴…</span></span>
+      </div>
+    </div>
+  </section>
+
+  <!-- 表面 4：手机端 -->
+  <section class="surf" id="surf-phone" hidden>
+    <div class="stage-desc">
+      <div><strong>手机扫码语音页 (`/voice`)</strong>：锁死触控手势不重绘按钮，服务端使用 PyAV 解码 WebM/MP4 容器转 16kHz PCM 后识别并输入电脑光标处。</div>
+    </div>
+    <div class="phone-mock">
+      <div style="display:flex;justify-content:space-between;align-items:center;">
+        <strong>🎙️ 手机语音输入</strong>
+        <span class="badge ok">已连接电脑</span>
+      </div>
+      <button class="mic-hold-btn">按住说话 · 松开输入电脑</button>
+      <div style="font-size:12px;color:var(--c-muted);text-align:center;">松开后经电脑 Qwen3-ASR 识别 + qwen3.5:4b 纠错自动输入当前焦点</div>
+      <div style="margin-top:16px;padding:12px;background:var(--c-bg);border-radius:var(--r-md);font-size:13px;">
+        <div style="font-size:12px;color:var(--c-muted);margin-bottom:4px;">最近一条 · 已输入</div>
+        <div>今天先把 UI 模板定下来，然后再做逻辑层和业务组装。</div>
+      </div>
+    </div>
+  </section>
+</div>
+
+<script>
+document.querySelectorAll('#surface-tabs button').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('#surface-tabs button').forEach(b => b.classList.remove('on'));
+    btn.classList.add('on');
+    const t = btn.dataset.target;
+    document.querySelectorAll('.surf').forEach(s => s.hidden = (s.id !== 'surf-' + t));
+  });
+});
+
+function switchTopTab(which) {
+  document.getElementById('pane-trans').hidden = (which !== 'trans');
+  document.getElementById('pane-settings').hidden = (which !== 'settings');
+  document.getElementById('tab-btn-trans').classList.toggle('on', which === 'trans');
+  document.getElementById('tab-btn-settings').classList.toggle('on', which === 'settings');
+}
+
+function setHomeMode(mode, btn) {
+  switchTopTab('trans');
+  if (btn) {
+    btn.parentElement.querySelectorAll('button').forEach(b => b.classList.remove('on'));
+    btn.classList.add('on');
+  }
+  const chip = document.getElementById('a-img-chip');
+  const inp = document.getElementById('a-input');
+  const out = document.getElementById('a-output');
+  if (mode === 'img') {
+    chip.hidden = false;
+    inp.value = "ErrorCode.polish_failed: Ollama HTTP 503 — model qwen3.5:4b not found";
+    out.value = "错误码 polish_failed：Ollama 返回 HTTP 503 —— 未找到模型 qwen3.5:4b";
+  } else {
+    chip.hidden = true;
+    inp.value = "Local speech recognition and in-place screenshot translation run 100% offline on your GPU without uploading any data.";
+    out.value = "本地语音识别与原位截屏翻译 100% 在您的本机 GPU 上离线运行，不会上传任何数据。";
+  }
+}
+
+function demoTranslateA() {
+  const mode = document.getElementById('a-target-lang').value;
+  const inp = document.getElementById('a-input').value.trim();
+  const out = document.getElementById('a-output');
+  if (!inp) { out.value = ''; return; }
+  if (mode === 'raw') { out.value = inp; return; }
+  if (mode === 'en') { out.value = "[Local qwen3.5:4b EN] " + inp; return; }
+  out.value = "本地语音识别与原位截屏翻译 100% 在您的本机 GPU 上离线运行，不会上传任何数据。";
+}
+
+function copyFeedback(btn) {
+  const orig = btn.textContent;
+  btn.textContent = "已复制 ✓";
+  setTimeout(() => { btn.textContent = orig; }, 1200);
+}
+
+function setShotModeA(mode, btn) {
+  if (btn) {
+    btn.parentElement.querySelectorAll('button').forEach(b => b.classList.remove('on'));
+    btn.classList.add('on');
+  }
+  const txt = document.getElementById('a-mask-text');
+  document.getElementById('a-seg-tr').classList.toggle('on', mode === 'trans');
+  document.getElementById('a-seg-ocr').classList.toggle('on', mode === 'ocr');
+  if (mode === 'loading') {
+    txt.textContent = "⏳ 正在识别文字并由本地 qwen3.5:4b 翻译…";
+  } else if (mode === 'ocr') {
+    txt.textContent = "Architecture Overview — Release v3.2\nWhen a user selects a region on Wayland, the compositor captures the frozen frame via xdg-desktop-portal and renders the translated text directly over the selected coordinates.";
+  } else {
+    txt.textContent = "架构概览 —— v3.2 版本说明\n当用户在 Wayland 下框选屏幕区域时，合成器通过 xdg-desktop-portal 捕获冻结画面，并在所选坐标原位直接渲染翻译文本。";
+  }
+}
+
+function setHudA(state, btn) {
+  btn.parentElement.querySelectorAll('button').forEach(b => b.classList.remove('on'));
+  btn.classList.add('on');
+  const dot = document.getElementById('a-hud-dot');
+  const lbl = document.getElementById('a-hud-label');
+  const body = document.getElementById('a-hud-body');
+  dot.className = 'pulse';
+  if (state === 'rec') {
+    lbl.textContent = '录音 0:04';
+    body.innerHTML = '把这个项目的首页改成翻译框，<span class="sub-unstable">支持手动复制粘贴…</span>';
+  } else if (state === 'polish') {
+    dot.classList.add('busy');
+    lbl.textContent = '纠错中';
+    body.textContent = '正在由 qwen3.5:4b 修正错字与标点…';
+  } else if (state === 'done') {
+    dot.classList.add('ok');
+    lbl.textContent = '已输入';
+    body.textContent = '把这个项目的首页改成翻译框，支持手动复制粘贴。';
+  } else {
+    lbl.textContent = '纠错失败';
+    body.innerHTML = '模型未响应 · 按 <kbd style="border:1px solid #666;padding:0 5px;border-radius:4px;">Ctrl+Alt+R</kbd> 直接输入识别原文';
+  }
+}
+</script>
+</body>
+</html>

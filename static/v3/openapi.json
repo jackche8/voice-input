@@ -1005,6 +1005,69 @@
         "security": []
       }
     },
+    "/api/v1/ocr-inplace": {
+      "post": {
+        "tags": [
+          "capabilities"
+        ],
+        "summary": "Ocr Inplace",
+        "description": "只接受单个图片文件；限制按整个请求体累计字节。",
+        "operationId": "ocr_inplace_api_v1_ocr_inplace_post",
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_ocr_inplace_api_v1_ocr_inplace_post"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OcrInplaceResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "鉴权失败：非本机、对端不是允许的局域网、token 无效、Host/Origin 不可信。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "请求体超过该路径的累计字节上限（缺 Content-Length 时同样生效）。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": []
+      }
+    },
     "/api/v1/history": {
       "get": {
         "tags": [
@@ -1584,6 +1647,18 @@
             ],
             "title": "Hotkey Screenshot"
           },
+          "hotkey_ocr": {
+            "anyOf": [
+              {
+                "type": "string",
+                "minLength": 1
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Hotkey Ocr"
+          },
           "hotkey_repeat": {
             "anyOf": [
               {
@@ -1626,6 +1701,11 @@
           "hotkey_screenshot": {
             "type": "string",
             "title": "Hotkey Screenshot"
+          },
+          "hotkey_ocr": {
+            "type": "string",
+            "title": "Hotkey Ocr",
+            "default": "ctrl+alt+o"
           },
           "hotkey_repeat": {
             "type": "string",
@@ -1792,6 +1872,42 @@
         },
         "type": "object",
         "title": "Body_from_audio_api_v1_utterances_from_audio_post"
+      },
+      "Body_ocr_inplace_api_v1_ocr_inplace_post": {
+        "properties": {
+          "target_lang": {
+            "type": "string",
+            "title": "Target Lang"
+          },
+          "lang": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Lang"
+          },
+          "image": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "binary"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Image"
+          }
+        },
+        "type": "object",
+        "required": [
+          "target_lang"
+        ],
+        "title": "Body_ocr_inplace_api_v1_ocr_inplace_post"
       },
       "Body_ocr_translate_api_v1_ocr_translate_post": {
         "properties": {
@@ -2361,6 +2477,110 @@
         ],
         "title": "LanAccessResponse",
         "description": "GET /api/v1/lan-access：仅本机。token 只供用户点击复制，不得写入日志或示例。"
+      },
+      "OcrInplaceResponse": {
+        "properties": {
+          "ok": {
+            "type": "boolean",
+            "const": true,
+            "title": "Ok",
+            "default": true
+          },
+          "text": {
+            "type": "string",
+            "title": "Text"
+          },
+          "ocr_text": {
+            "type": "string",
+            "title": "Ocr Text"
+          },
+          "target_lang": {
+            "type": "string",
+            "title": "Target Lang"
+          },
+          "image_width": {
+            "type": "integer",
+            "minimum": 1.0,
+            "title": "Image Width"
+          },
+          "image_height": {
+            "type": "integer",
+            "minimum": 1.0,
+            "title": "Image Height"
+          },
+          "blocks": {
+            "items": {
+              "$ref": "#/components/schemas/OcrTextBlock"
+            },
+            "type": "array",
+            "title": "Blocks"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "text",
+          "ocr_text",
+          "target_lang",
+          "image_width",
+          "image_height"
+        ],
+        "title": "OcrInplaceResponse",
+        "description": "POST /api/v1/ocr-inplace 响应：同时携带整段文本与分块原位排版坐标。"
+      },
+      "OcrTextBlock": {
+        "properties": {
+          "bbox": {
+            "prefixItems": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "integer"
+              },
+              {
+                "type": "integer"
+              },
+              {
+                "type": "integer"
+              }
+            ],
+            "type": "array",
+            "maxItems": 4,
+            "minItems": 4,
+            "title": "Bbox",
+            "description": "(x, y, width, height) 像素坐标，相对于所提交图片左上角"
+          },
+          "ocr_text": {
+            "type": "string",
+            "title": "Ocr Text"
+          },
+          "translated_text": {
+            "type": "string",
+            "title": "Translated Text",
+            "default": ""
+          },
+          "bg_color": {
+            "type": "string",
+            "title": "Bg Color",
+            "description": "采样自文字框外围边缘的不透明背景色 #RRGGBB",
+            "default": "#ffffff"
+          },
+          "fg_color": {
+            "type": "string",
+            "title": "Fg Color",
+            "description": "高对比度前景文字色 #RRGGBB",
+            "default": "#0f172a"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "bbox",
+          "ocr_text"
+        ],
+        "title": "OcrTextBlock",
+        "description": "识别到的单个文字区域及其局部采样背景/前景色，供原位遮挡译文浮窗直接渲染。"
       },
       "OcrTranslateResponse": {
         "properties": {
@@ -3293,6 +3513,11 @@
           "hotkey_screenshot": {
             "default": "ctrl+alt+x",
             "title": "Hotkey Screenshot",
+            "type": "string"
+          },
+          "hotkey_ocr": {
+            "default": "ctrl+alt+o",
+            "title": "Hotkey Ocr",
             "type": "string"
           },
           "hotkey_repeat": {

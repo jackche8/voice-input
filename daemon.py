@@ -1,186 +1,210 @@
-"""桌面守护进程入口（薄）：只做装配与 GTK 主循环。
+"""跨平台桌面守护进程入口（薄装配层 · PySide6-Essentials，零 GTK / WebKit 依赖）。
 
-所有平台语义在 `_linux/*`（热键抓取/观察、portal、选区截图、粘贴与剪贴板回收、修饰键清理、
-watchdog、托盘、WebKit 窗口），业务流程在 `_desktop/*`（录音会话上传、jobs 认领投递确认、
-重复键、截图译文），产品状态只经 v1 API 事件流显示。本文件不含业务规则。
+所有平台能力来自 `_platform`（Linux / Windows / macOS），原生视图来自 `_ui_desktop`
+（红十字框选器、原位背景遮挡翻译浮窗、状态胶囊与双行大字幕、系统托盘），业务流程来自
+`_desktop`（录音排队上传、投递循环、截屏翻译与纯 OCR 复用、SSE 断线退避重连）。本文件不含业务规则。
 """
 from __future__ import annotations
 
-import os
+from _activation import exit_if_blocked
 
-# 必须在 import gi 之前：Wayland 且有 XWayland 时 GTK 走 x11（XGrabKey/XTest/状态栏定位都依赖它）。
-_SESSION_TYPE = os.environ.get("XDG_SESSION_TYPE", "x11")
-if _SESSION_TYPE == "wayland" and os.environ.get("DISPLAY"):
-    os.environ["GDK_BACKEND"] = "x11"
+import atexit
+import signal
+import sys
+import threading
+from collections.abc import Callable
+from pathlib import Path
 
-from _activation import exit_if_blocked  # noqa: E402  标准库-only，先于 gi/设备
+from PySide6.QtCore import QTimer
+from PySide6.QtWidgets import QApplication
 
-import atexit  # noqa: E402
-import shutil  # noqa: E402
-import signal  # noqa: E402
-import threading  # noqa: E402
-from pathlib import Path  # noqa: E402
+from _config import ConfigStore
+from _desktop.actions import DesktopActions
+from _desktop.api import DesktopApi
+from _desktop.capture_flow import CaptureFlow
+from _desktop.delivery import (
+    DeliveryLoop,
+    LastDelivered,
+    PlatformFocusProbe,
+    PlatformInjector,
+    RepeatAction,
+)
+from _desktop.event_stream import ProductEventLoop, dispatch_product_event
+from _desktop.singleton import acquire_singleton_lock
+from _desktop.status import PlatformStatus
+from _desktop.ui_bridge import (
+    QtUiBridge,
+    configure_qt_platform_env,
+    open_live_selector,
+    open_translate_overlay,
+    open_url_async,
+    query_virtual_screen_rect,
+)
+from _desktop.voice import VoiceFlow, build_keywords_context_provider, new_job_id
+from _hotkey import HotkeyBindings, format_hotkey
+from _platform import create_platform_adapter
+from _platform._common import SoundDeviceSource
+from _ui_desktop import (
+    InplaceTranslateOverlay,
+    RedCrosshairSelector,
+    StudioTrayIcon,
+    VoiceHudOverlay,
+)
 
-import gi  # noqa: E402
-
-gi.require_version("Gtk", "3.0")
-from gi.repository import GLib, Gtk  # noqa: E402
-
-from _config import ConfigStore  # noqa: E402
-from _desktop.actions import DesktopActions  # noqa: E402
-from _desktop.api import DesktopApi  # noqa: E402
-from _desktop.delivery import DeliveryLoop, LastDelivered, RepeatAction  # noqa: E402
-from _desktop.screenshot import ScreenshotFlow  # noqa: E402
-from _desktop.status import PlatformStatus  # noqa: E402
-from _desktop.voice import VoiceFlow, new_job_id  # noqa: E402
-from _focus import X11FocusProbe  # noqa: E402
-from _hotkey import HotkeyBindings, format_hotkey  # noqa: E402
-from _inject import FocusBoundInjector  # noqa: E402
-from _linux.clipboard import SystemClipboard  # noqa: E402
-from _linux.conflicts import scan_hotkey_conflicts  # noqa: E402
-from _linux.glib_scheduler import GLibScheduler  # noqa: E402
-from _linux.hotkey_actions import HotkeyContext  # noqa: E402
-from _linux.hotkey_manager import HotkeyManager  # noqa: E402
-from _linux.ibus import IBusCommitter  # noqa: E402
-from _linux.inject_guard import InjectGuard  # noqa: E402
-from _linux.mic import SoundDeviceSource, play_beep  # noqa: E402
-from _linux.modifiers import ModifierJanitor  # noqa: E402
-from _linux.overlay_windows import StatusWindow, TranslateWindow  # noqa: E402
-from _linux.paste_backend import LinuxPasteBackend  # noqa: E402
-from _linux.portal_dbus import ensure_dbus_glib_loop, portal_interface_version  # noqa: E402
-from _linux.screenshot import ScreenCapture, detect_screenshot_tool  # noqa: E402
-from _linux.sd_notify import sd_notify  # noqa: E402
-from _linux.singleton import acquire_singleton_lock  # noqa: E402
-from _linux.startup_check import startup_issues  # noqa: E402
-from _linux.tray import create_tray_icon  # noqa: E402
-from _linux.uinput_device import open_uinput  # noqa: E402
-from _linux.watchdog import IdleSafetyWatchdog  # noqa: E402
-
-VERSION = "3.0.0"
+VERSION = "3.2.0"
 PROJECT_ROOT = Path(__file__).resolve().parent
 API_ORIGIN = "https://127.0.0.1:17945"
 CERT = PROJECT_ROOT / "certs" / "cert.pem"
 CONFIG = PROJECT_ROOT / ".config.json"  # 与 _v3.production.ProductionPaths.config 同一文件，只读
 WATCHDOG_MS = 2000
+VOICE_MAX_SECONDS = 120.0
 
 
 def load_bindings() -> HotkeyBindings:
     cfg = ConfigStore(CONFIG).load()
-    return HotkeyBindings(voice=cfg.hotkey_voice, screenshot=cfg.hotkey_screenshot, repeat=cfg.hotkey_repeat)
+    return HotkeyBindings(
+        voice=cfg.hotkey_voice,
+        screenshot=cfg.hotkey_screenshot,
+        ocr=cfg.hotkey_ocr,
+        repeat=cfg.hotkey_repeat,
+    )
 
 
 def main() -> None:
-    exit_if_blocked()  # 门闩未关且非验收运行：78 退出，不抓键、不开设备（单元 RestartPreventExitStatus=78）
-    lock_fd = acquire_singleton_lock()  # fd 必须保持引用防止 GC 关闭（finally 里关闭）
+    exit_if_blocked()
+    lock = acquire_singleton_lock()
     bindings = load_bindings()
+    platform = create_platform_adapter()
+    atexit.register(platform.close)
 
-    try:
-        uinput = open_uinput()
-    except Exception as exc:
-        uinput = None
-        print(f"  uinput: 不可用，使用 pynput 回退 ({exc})")
-        if _SESSION_TYPE == "wayland":
-            print("  ⚠ 警告: Wayland 下 uinput 不可用将导致粘贴功能失效！")
-            print("    请确保: sudo chmod 660 /dev/uinput && sudo chgrp input /dev/uinput")
-    janitor = ModifierJanitor(session_type=_SESSION_TYPE, uinput=uinput, xdotool=shutil.which("xdotool"))
-    # 启动即清残留：上一代进程崩溃时 XTest 层按下的修饰键会跨进程残留。
-    janitor.clear_xtest()
+    notify_systemd: Callable[[str], object] = lambda _state: False
+    if platform.os_name == "linux":
+        from _linux.sd_notify import sd_notify
 
-    ensure_dbus_glib_loop()
-    tool = detect_screenshot_tool()
-    issues = startup_issues(
-        bindings,
-        portal_version=portal_interface_version,
-        screenshot_tool=tool,
-        conflicts=scan_hotkey_conflicts,
-    )
+        notify_systemd = sd_notify
 
-    print(f"Ollama Voice Input v{VERSION} 守护进程已启动")
-    print(f"  会话类型: {_SESSION_TYPE}")
-    print(f"  GDK 后端: {os.environ.get('GDK_BACKEND', 'auto')}")
-    print(f"  语音输入: {format_hotkey(bindings.voice)}  按住说话，松开自动输入")
-    print(f"  截图翻译: {format_hotkey(bindings.screenshot)}   框选截图，OCR+本地翻译")
-    print(f"  重复输入: {format_hotkey(bindings.repeat)}  重复上一次输入")
-    print(f"  截图后端: {tool or '不可用'}")
-    print(f"  API 地址: {API_ORIGIN}")
-    if uinput is not None:
-        print("  uinput: 已初始化（内核级按键模式）")
-    if shutil.which("xdotool"):
-        print("  xdotool: 已找到（修饰键安全粘贴模式）")
-    else:
-        print("  xdotool: 未安装，粘贴时可能影响快捷键（sudo apt install xdotool）")
-    for issue in issues:
-        print(f"  ⚠ {issue}")
-
-    ibus = IBusCommitter.connect()
-    print(f"  IBus: {'直接提交可用' if ibus.available else '剪贴板模式'}（{ibus.reason}）")
+    configure_qt_platform_env()
+    app = QApplication(sys.argv[:1])
+    app.setApplicationName("Ollama Voice Input")
+    app.setQuitOnLastWindowClosed(False)
+    bridge = QtUiBridge()
 
     api = DesktopApi(API_ORIGIN, cert=CERT)
     status = PlatformStatus(api.post_platform_event)
-    probe = X11FocusProbe(session_type=_SESSION_TYPE)
-    guard = InjectGuard()
-    backend = LinuxPasteBackend(
-        session_type=_SESSION_TYPE, guard=guard, janitor=janitor, clipboard=SystemClipboard(), ibus=ibus
-    )
+    probe = PlatformFocusProbe(platform)
+    injector = PlatformInjector(platform)
     last = LastDelivered()
-    capture = ScreenCapture(tool=tool)
+    hud = VoiceHudOverlay()
 
-    def open_translate(png: bytes, rect, events):
-        return TranslateWindow(origin=API_ORIGIN, cert=CERT, png=png, rect=rect, events=events)
-
+    capture_flow = CaptureFlow(
+        capture_region=lambda rect, vrect: platform.capture_region(rect, virtual_rect=vrect),
+        open_selector=lambda rect, mode_label, on_sel, on_cancel: open_live_selector(
+            app, RedCrosshairSelector, rect, mode_label, on_sel, on_cancel
+        ),
+        open_inplace_overlay=lambda png, rect, **kw: open_translate_overlay(InplaceTranslateOverlay, png, rect, **kw),
+        copy_clipboard=lambda text: platform.write_clipboard_text(text) is None,
+        notify_toast=lambda msg, kind: hud.show_toast(msg, kind=kind),
+        api=api,
+        status=status,
+        invoke_ui=bridge.post,
+        get_virtual_rect=lambda: query_virtual_screen_rect(app),
+    )
     voice = VoiceFlow(
         api=api,
         status=status,
         probe=probe,
         source_factory=SoundDeviceSource,
-        beep=play_beep,  # play_beep 自己移到后台线程，不阻塞 GTK 主循环
+        beep=platform.play_beep,
+        context_provider=build_keywords_context_provider(api),
     )
-    actions = DesktopActions(
-        voice=voice,
-        screenshot=ScreenshotFlow(
-            capture=capture, open_overlay=open_translate, status=status, scheduler=GLibScheduler()
+    repeat_action = RepeatAction(api=api, last=last, probe=probe, status=status, job_ids=new_job_id)
+    actions = DesktopActions(voice=voice, capture=capture_flow, repeat=repeat_action)
+    tray = StudioTrayIcon(
+        on_open_home=lambda: open_url_async(f"{API_ORIGIN}/"),
+        on_screenshot_translate=actions.screenshot,
+        on_pure_ocr=actions.ocr,
+        on_open_setup=lambda: open_url_async(f"{API_ORIGIN}/setup"),
+        on_toggle_hud=hud.set_enabled,
+        on_quit=app.quit,
+        hud_enabled=hud.enabled,
+    )
+    tray.show()
+
+    def _on_confirm_resend(job_id: str, text: str, confirmed: bool) -> None:
+        threading.Thread(
+            target=lambda: repeat_action.confirm_resend(job_id, text, confirmed), name="confirm-resend", daemon=True
+        ).start()
+
+    event_loop = ProductEventLoop(
+        iter_events=api.iter_product_events,
+        on_event=lambda ev: bridge.post(
+            lambda _ev=ev: dispatch_product_event(_ev, hud=hud, tray=tray, on_confirm_resend=_on_confirm_resend)
         ),
-        repeat=RepeatAction(api=api, last=last, probe=probe, status=status, job_ids=new_job_id),
     )
+    event_loop.start()
 
-    status_window = StatusWindow(origin=API_ORIGIN, cert=CERT)
-    tray = create_tray_icon(settings_url=f"{API_ORIGIN}/setup", toggle_status=status_window.set_visible)
-
-    manager = HotkeyManager(
-        HotkeyContext(actions=actions, bindings=bindings, janitor=janitor, guard=guard, session_type=_SESSION_TYPE)
+    hotkey_rig = platform.create_hotkey_rig(
+        bindings,
+        on_voice_start=actions.voice_start,
+        on_voice_stop=actions.voice_stop,
+        on_screenshot=actions.screenshot,
+        on_ocr=actions.ocr,
+        on_repeat=actions.repeat,
+        overlay_active=actions.overlay_active,
+        close_overlay=actions.close_overlay,
     )
-    manager.start()
+    hotkey_rig.start()
 
-    delivery = DeliveryLoop(jobs=api.jobs, injector=FocusBoundInjector(probe, backend), last=last)
+    delivery = DeliveryLoop(jobs=api.jobs, injector=injector, last=last)
     threading.Thread(target=delivery.run_forever, name="jobs-delivery", daemon=True).start()
 
-    # 退出信号统一走干净退出（SIGTERM=systemctl stop，SIGINT=Ctrl-C，SIGHUP=终端关闭）。
-    for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
-        signal.signal(sig, lambda s, f: GLib.idle_add(Gtk.main_quit))
-    atexit.register(janitor.panic_release_all)
-    watchdog = IdleSafetyWatchdog(
-        manager=manager, janitor=janitor, guard=guard, overlay_active=actions.overlay_active, notify=sd_notify
+    print(f"Ollama Voice Input v{VERSION} 跨平台守护进程已启动 ({platform.os_name}/{platform.session_type})", flush=True)
+    print(f"  热键后端:  {hotkey_rig.backend_name} | 工作台: {API_ORIGIN}/", flush=True)
+    print(
+        f"  快捷键:    语音 {format_hotkey(bindings.voice)} · 原位翻译 {format_hotkey(bindings.screenshot)}"
+        f" · 纯 OCR {format_hotkey(bindings.ocr)} · 重复 {format_hotkey(bindings.repeat)}",
+        flush=True,
     )
-    GLib.timeout_add(WATCHDOG_MS, watchdog.tick)
-    sd_notify("READY=1")
+
+    for sig_name in ("SIGTERM", "SIGINT", "SIGHUP"):
+        sig = getattr(signal, sig_name, None)
+        if sig is not None:
+            signal.signal(sig, lambda _s, _f: bridge.post(app.quit))
+
+    signal_pump = QTimer()
+    signal_pump.setInterval(500)
+    signal_pump.timeout.connect(lambda: None)
+    signal_pump.start()
+
+    def _on_watchdog_tick() -> None:
+        notify_systemd("WATCHDOG=1")
+        if voice.stop_if_exceeded(VOICE_MAX_SECONDS):
+            hotkey_rig.reset_voice()
+
+    watchdog_timer = QTimer()
+    watchdog_timer.setInterval(WATCHDOG_MS)
+    watchdog_timer.timeout.connect(_on_watchdog_tick)
+    watchdog_timer.start()
+    notify_systemd("READY=1")
 
     try:
-        Gtk.main()
+        app.exec()
     except KeyboardInterrupt:
         pass
     finally:
-        janitor.panic_release_all()  # 先释放残留修饰键 + 指针 grab，再拆设备
+        watchdog_timer.stop()
+        signal_pump.stop()
+        event_loop.request_stop()
         delivery.stop()
-        manager.cleanup()
-        capture.cleanup()
+        api.close()
+        event_loop.stop(timeout=0.5)
+        hotkey_rig.stop()
+        capture_flow.close_overlay(reset_status=False)
+        hud.close()
+        tray.close()
         status.close()
-        del tray
-        os.close(lock_fd)
-        if uinput is not None:
-            try:
-                uinput.close()
-            except Exception:
-                pass
+        platform.close()
+        lock.release()
 
 
 if __name__ == "__main__":

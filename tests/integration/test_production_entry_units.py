@@ -42,6 +42,8 @@ def test_server_unit_https_factory_and_dynamic_cuda(tmp_path):
     server = _rendered(tmp_path, cuda="/x/nvidia/cublas/lib")["ollama-voice-server.service"]
     assert "--factory app:create_production_app" in server
     assert "--ssl-certfile" in server and "--ssl-keyfile" in server and "--port 17945" in server
+    assert "-m _platform.certs --cert-dir" in server
+    assert "ensure_tls_certificates" not in server
     assert "Environment=LD_LIBRARY_PATH=/x/nvidia/cublas/lib" in server
     assert ACCEPTANCE_ENV not in server  # 正式单元不带验收开关
     plain = _rendered(tmp_path)["ollama-voice-server.service"]
@@ -53,18 +55,20 @@ def test_daemon_unit_keeps_notify_watchdog_and_no_sg(tmp_path):
     exec_line = next(l for l in daemon.splitlines() if l.startswith("ExecStart="))
     argv = exec_line.split("=", 1)[1].split()
     assert argv == [str(tmp_path / "proj" / ".venv" / "bin" / "python3"), str((tmp_path / "proj").resolve() / "daemon.py")]
-    for line in ("Type=notify", "NotifyAccess=main", "WatchdogSec=20", "Environment=GDK_BACKEND=x11"):
+    for line in ("Type=notify", "NotifyAccess=main", "WatchdogSec=20", "WantedBy=graphical-session.target"):
         assert line in daemon
+    assert "GDK_BACKEND" not in daemon
 
 
 def test_asr_and_ollama_units_loopback_and_guarded(tmp_path):
     units = _rendered(tmp_path)
     asr = units["ollama-voice-asr.service"]
-    assert "-m runtimes.asr serve --host 127.0.0.1 --port 17946 --load" in asr
+    assert "-m runtimes.asr serve --host 127.0.0.1 --port 17946" in asr
+    assert "--gpu-memory-utilization 0.45" in asr and "--max-model-len 4096" in asr
     assert "ConditionPathExists=" in asr and "Qwen3-ASR-1.7B/config.json" in asr
     assert "HF_HUB_OFFLINE=1" in asr
     ollama = units["ollama-voice-ollama.service"]
-    assert "OLLAMA_HOST=127.0.0.1:11434" in ollama and "ollama-bin-0.40.16/bin/ollama serve" in ollama
+    assert "OLLAMA_HOST=127.0.0.1:17947" in ollama and "ollama-bin-0.40.16/bin/ollama serve" in ollama
 
 
 def test_write_units_to_temp_dir_only(tmp_path):
@@ -74,9 +78,22 @@ def test_write_units_to_temp_dir_only(tmp_path):
     assert all(p.parent == out for p in written)
 
 
-@pytest.mark.parametrize("script", ["start.sh", "install.sh", "restart.sh", "uninstall.sh", "gen_cert.sh"])
+@pytest.mark.parametrize("script", ["start.sh", "install.sh", "restart.sh", "uninstall.sh", "gen_cert.sh", "scripts/start_macos.sh"])
 def test_scripts_parse(script):
     subprocess.run(["bash", "-n", str(ROOT / script)], check=True, timeout=30)
+
+
+def test_cross_platform_cert_cli_and_ps1_hardening():
+    for rel in ("gen_cert.sh", "scripts/start_macos.sh", "scripts/start.ps1"):
+        text = (ROOT / rel).read_text(encoding="utf-8")
+        assert "-m _platform.certs --cert-dir" in text, rel
+        assert "-c " not in text or "ensure_tls_certificates" not in text, rel
+
+    ps1 = (ROOT / "scripts/start.ps1").read_text(encoding="utf-8")
+    assert "function Quote-WinArg" in ps1
+    assert "Quote-WinArg (Join-Path $ProjectDir \"daemon.py\")" in ps1
+    # finally 恢复旧 OVI_ACCEPTANCE_RUN 必须位于全部 Start-Process 之后，避免非 -Acceptance 模式向子进程泄漏
+    assert ps1.rfind("finally {") > ps1.rfind("Start-Process -FilePath $DaemonBin")
 
 
 def test_start_script_snapshot():
@@ -115,7 +132,9 @@ def test_desktop_file_keywords():
 def test_old_static_pages_removed_only_v3_served():
     for name in ("setup.html", "voice.html", "history.html", "api.html", "voice_setup.html"):
         assert not (ROOT / "static" / name).exists(), name
-    assert (ROOT / "static" / "v3" / "setup.html").is_file()
+    assert (ROOT / "static" / "v3" / "index.html").is_file()
+    assert (ROOT / "static" / "v3" / "voice.html").is_file()
+    assert not (ROOT / "static" / "v3" / "setup.html").exists()
 
 
 def _defs(path: Path) -> list[str]:
@@ -137,10 +156,29 @@ def test_daemon_entry_is_thin():
     src = path.read_text(encoding="utf-8")
     assert _defs(path) == ["load_bindings", "main"]
     assert len(src.splitlines()) < 220
-    for marker in LEGACY_MARKERS + ("/api/web_input", "TranslationOverlay", "StatusBar("):
+    # 顶层严禁直接导入 _linux.*（跨平台入口只按 os_name 延迟导入 Linux 专属通知）
+    tree = ast.parse(src, filename="daemon.py")
+    for node in tree.body:
+        if isinstance(node, ast.Import):
+            assert all(not a.name.startswith("_linux") for a in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            assert not (node.module or "").startswith("_linux")
+    for marker in LEGACY_MARKERS + ("/api/web_input", "TranslationOverlay", "StatusBar(", "import gi", "WebKit2"):
         assert marker not in src
-    for needed in ("_desktop.", "_linux.", "sd_notify(\"READY=1\")", "IdleSafetyWatchdog", "DeliveryLoop", "StatusWindow"):
+    for needed in (
+        "_desktop.",
+        "_platform",
+        "_ui_desktop",
+        'notify_systemd("READY=1")',
+        "CaptureFlow",
+        "DeliveryLoop",
+        "VoiceHudOverlay",
+        "StudioTrayIcon",
+        "hotkey_rig.reset_voice()",
+        "event_loop.request_stop()",
+    ):
         assert needed in src
+    assert src.index("event_loop.request_stop()") < src.index("api.close()") < src.index("event_loop.stop(")
 
 
 def test_build_production_app_gated_then_acceptance(tmp_path):

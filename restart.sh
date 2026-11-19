@@ -74,6 +74,7 @@ fi
 echo ""
 echo -e "${GREEN}========================================${NC}"
 echo -e "${GREEN}  重启完成！${NC}"
-echo -e "${GREEN}  配置页面: https://127.0.0.1:17945/setup${NC}"
+echo -e "${GREEN}  翻译主页: https://127.0.0.1:17945/${NC}"
+echo -e "${GREEN}  设置页面: https://127.0.0.1:17945/setup${NC}"
 echo -e "${GREEN}  日志查看: journalctl --user -u $SERVER_SERVICE -u $DAEMON_SERVICE -f${NC}"
 echo -e "${GREEN}========================================${NC}"

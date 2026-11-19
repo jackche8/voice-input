@@ -1,17 +1,24 @@
-"""把桌面流程挂到快捷键动作接口（`_linux.hotkey_actions.HotkeyActions`）。"""
+"""把桌面业务流程挂到四键快捷键动作接口（语音 / 截屏原位翻译 / 纯 OCR / 重复输入）。"""
 from __future__ import annotations
 
 import threading
+from typing import Any
 
 from _desktop.delivery import RepeatAction
-from _desktop.screenshot import ScreenshotFlow
 from _desktop.voice import VoiceFlow
 
 
 class DesktopActions:
-    def __init__(self, *, voice: VoiceFlow, screenshot: ScreenshotFlow, repeat: RepeatAction, spawn=None) -> None:
+    def __init__(
+        self,
+        *,
+        voice: VoiceFlow,
+        capture: Any,
+        repeat: RepeatAction,
+        spawn=None,
+    ) -> None:
         self.voice = voice
-        self.shot = screenshot
+        self.capture = capture
         self.repeat_action = repeat
         self._spawn = spawn or (lambda fn: threading.Thread(target=fn, daemon=True).start())
 
@@ -22,13 +29,16 @@ class DesktopActions:
         self.voice.stop()
 
     def screenshot(self) -> None:
-        self.shot.trigger()
+        self.capture.trigger_translate()
+
+    def ocr(self) -> None:
+        self.capture.trigger_ocr()
 
     def repeat(self) -> None:
         self._spawn(self.repeat_action.run)
 
     def overlay_active(self) -> bool:
-        return self.shot.overlay_active()
+        return self.capture.overlay_active()
 
     def close_overlay(self) -> bool:
-        return self.shot.close_overlay()
+        return self.capture.close_overlay()

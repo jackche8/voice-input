@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import pytest
 
+from _desktop.delivery import PlatformFocusProbe, PlatformInjector
 from _focus import StaticFocusProbe, decide_focus
-from _inject import ClaimAckLog, FocusBoundInjector, RecordingBackend, ack_from_evidence, InjectEvidence
-from _overlay import InjectFocusGuard, is_allowed_ui_url, STATUS_WINDOW_POLICY
+from _inject import ClaimAckLog, FocusBoundInjector, InjectEvidence, RecordingBackend, ack_from_evidence
+from _platform.protocol import FocusTarget, PasteResult
 
 
 def test_focus_match_mismatch_unknown():
@@ -40,18 +41,40 @@ def test_unknown_output_is_not_failed():
         log.record("c", "complete")
 
 
-def test_translation_copy_does_not_change_bound_focus():
-    guard = InjectFocusGuard()
-    guard.bind(42)
-    guard.copy_translation("译文")
-    assert guard.inject_focus_id() == 42
-    assert guard.copied_text == "译文"
+def test_platform_focus_probe_and_injector_support_cross_platform_handles():
+    class FakePlatform:
+        def __init__(self, focus: FocusTarget, result: PasteResult) -> None:
+            self.focus = focus
+            self.result = result
+            self.calls: list[tuple[str, FocusTarget | None]] = []
 
+        def current_focus(self) -> FocusTarget:
+            return self.focus
 
-def test_ui_url_and_status_policy():
-    assert is_allowed_ui_url("https://127.0.0.1:17945/voice")
-    assert not is_allowed_ui_url("file:///tmp/x.html")
-    assert not is_allowed_ui_url("https://example.com/")
-    assert not is_allowed_ui_url("http://127.0.0.1:17945/")
-    assert STATUS_WINDOW_POLICY.accept_focus is False
-    assert STATUS_WINDOW_POLICY.keep_above is True
+        def inject_text(self, text: str, *, target: FocusTarget | None = None, terminal=None) -> PasteResult:
+            del terminal
+            self.calls.append((text, target))
+            return self.result
+
+    plat = FakePlatform(
+        FocusTarget(focus_id="com.apple.TextEdit:42", app_id="com.apple.TextEdit", is_terminal=False, is_self=False),
+        PasteResult(ok=True, method="cgevent_cmd_v", detail="ok"),
+    )
+    probe = PlatformFocusProbe(plat)
+    assert probe.current_id() == "com.apple.TextEdit:42"
+    assert probe.is_terminal() is False
+    snap = probe.snapshot()
+    assert snap.focus_id == "com.apple.TextEdit:42" and snap.terminal is False
+
+    injector = PlatformInjector(plat)
+    res, ev = injector.inject("你好", focus_id="com.apple.TextEdit:42", claim_id="c-mac-1")
+    assert res == "complete" and ev.proved_output is True and ev.method == "cgevent_cmd_v"
+    assert plat.calls[-1][1] is not None and plat.calls[-1][1].focus_id == "com.apple.TextEdit:42"
+
+    plat.result = PasteResult(ok=False, method="focus_mismatch", detail="mismatch", uncertain=False)
+    res2, ev2 = injector.inject("跳过", focus_id="other:99", claim_id="c-mac-2")
+    assert res2 == "none" and ev2.proved_none is True and ev2.focus_decision == "mismatch"
+
+    plat.result = PasteResult(ok=False, method="sendinput", detail="midway", uncertain=True)
+    res3, ev3 = injector.inject("未知", focus_id=None, claim_id="c-mac-3")
+    assert res3 == "partial_or_unknown" and ev3.proved_output is False and ev3.proved_none is False

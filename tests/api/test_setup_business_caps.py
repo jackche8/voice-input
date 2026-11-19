@@ -203,7 +203,7 @@ def test_enough_memory_then_start():
     stages = []
     act, spy = action(run)
     assert act(lambda p: stages.append(p.stage)) == "started" and spy.calls == 1
-    assert stages[0] == "显存预检" and "需要 13043 MiB" in stages[1]
+    assert stages[0] == "显存预检" and "需要 7337 MiB" in stages[1]
 
 
 @pytest.mark.parametrize(

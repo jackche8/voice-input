@@ -1,12 +1,16 @@
-"""官方引擎适配。仅在 load() 时 import qwen_asr / vLLM，import 本模块不占 GPU。"""
+"""官方引擎双后端（Linux vLLM + 跨平台 Transformers）适配。
+
+仅在 load() 时按需导入 qwen_asr / torch / vLLM，import 本模块不占 GPU。
+"""
 from __future__ import annotations
 
+import importlib.util
 import threading
 import time
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol
+from typing import Any, Protocol
 
 from _contracts import (
     ASR_STREAMING_BLOCKERS,
@@ -16,7 +20,9 @@ from _contracts import (
     SessionPartialEvent,
     SttResponse,
 )
+from runtimes.asr.asr_text import parse_asr_text
 from runtimes.asr.protocol import (
+    DEFAULT_BACKEND,
     DEFAULT_CHUNK_SIZE_SEC,
     DEFAULT_GPU_MEMORY_UTILIZATION,
     DEFAULT_MAX_MODEL_LEN,
@@ -24,24 +30,37 @@ from runtimes.asr.protocol import (
     DEFAULT_SAMPLE_RATE,
     DEFAULT_UNFIXED_CHUNK_NUM,
     DEFAULT_UNFIXED_TOKEN_NUM,
+    DEFAULT_VLLM_MAX_NUM_SEQS,
     OFFICIAL_PARTIAL_POLICY,
+    SUPPORTED_BACKENDS,
     normalize_language,
 )
-from runtimes.asr.asr_text import parse_asr_text
-from runtimes.asr.stream_step import BoundedOfficialStream, StepReport, decode_whole, numpy_pcm_ops
+from runtimes.asr.stream_step import (
+    BoundedOfficialStream,
+    StepReport,
+    decode_whole,
+    numpy_pcm_ops,
+)
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_MODEL_PATH = PROJECT_ROOT / ".cache/v3-feasibility/models/Qwen3-ASR-1.7B"
-# 与官方 transcribe 的 MIN_ASR_INPUT_SECONDS 相同：更短的整段在尾部补零。
 MIN_INPUT_S = 0.5
 
 
 class AsrEngine(Protocol):
     loaded: bool
 
-    def transcribe(self, pcm: bytes, *, language: str | None = None, context: str | None = None) -> SttResponse: ...
+    def transcribe(
+        self, pcm: bytes, *, language: str | None = None, context: str | None = None
+    ) -> SttResponse: ...
 
-    def start_stream(self, session_id: str, *, language: str | None = None, context: str | None = None) -> None: ...
+    def start_stream(
+        self,
+        session_id: str,
+        *,
+        language: str | None = None,
+        context: str | None = None,
+    ) -> None: ...
 
     def push_pcm(self, session_id: str, pcm: bytes) -> SessionPartialEvent | None: ...
 
@@ -64,6 +83,103 @@ def pcm_s16le_to_float32(pcm: bytes):
     return np.frombuffer(pcm, dtype="<i2").astype(np.float32) / 32768.0
 
 
+def _default_vllm_available() -> bool:
+    if importlib.util.find_spec("vllm") is None:
+        return False
+    try:
+        import vllm  # noqa: F401
+    except Exception:
+        return False
+    return True
+
+
+def _default_cuda_available() -> bool:
+    try:
+        import torch
+
+        return bool(torch.cuda.is_available())
+    except Exception:
+        return False
+
+
+def resolve_backend(
+    requested: str = DEFAULT_BACKEND,
+    *,
+    vllm_available_fn: Callable[[], bool] = _default_vllm_available,
+    cuda_available_fn: Callable[[], bool] = _default_cuda_available,
+) -> str:
+    """解析推理后端：auto 在 vLLM 可导入且有 CUDA 时用 vllm，否则回退跨平台 transformers。"""
+    key = (requested or DEFAULT_BACKEND).strip().lower()
+    if key not in SUPPORTED_BACKENDS:
+        raise LogicError(
+            ErrorCode.invalid_request,
+            f"不支持的 ASR 后端: {requested!r}（仅允许 {', '.join(SUPPORTED_BACKENDS)}）",
+        )
+    if key == "vllm":
+        return "vllm"
+    if key == "transformers":
+        return "transformers"
+    if cuda_available_fn() and vllm_available_fn():
+        return "vllm"
+    return "transformers"
+
+
+def resolve_transformers_device(
+    explicit_device: str | None = None,
+    *,
+    torch_module: Any = None,
+) -> tuple[str, Any]:
+    """为 Transformers 后端选择设备（cuda / mps / cpu）与匹配的浮点精度。"""
+    torch = torch_module
+    if torch is None:
+        import torch as _torch
+
+        torch = _torch
+
+    if explicit_device and explicit_device.strip():
+        dev = explicit_device.strip().lower()
+    elif bool(torch.cuda.is_available()):
+        dev = "cuda"
+    elif bool(getattr(torch.backends, "mps", None) and torch.backends.mps.is_available()):
+        dev = "mps"
+    else:
+        dev = "cpu"
+
+    if dev.startswith("cuda"):
+        bf16_ok = bool(
+            callable(getattr(torch.cuda, "is_bf16_supported", None))
+            and torch.cuda.is_bf16_supported()
+        )
+        dtype = torch.bfloat16 if bf16_ok else torch.float16
+    elif dev == "mps":
+        dtype = torch.float16
+    else:
+        dtype = torch.float32
+    return dev, dtype
+
+
+def unify_asr_tokenizer(asr_obj: Any) -> None:
+    """统一 vLLM 内部 tokenizer 与 processor.tokenizer，消除 fix_mistral_regex 错位。"""
+    if getattr(asr_obj, "backend", None) != "vllm":
+        return
+    model_obj = getattr(asr_obj, "model", None)
+    get_tok = getattr(model_obj, "get_tokenizer", None)
+    if not callable(get_tok):
+        return
+    vllm_tok = get_tok()
+    if vllm_tok is None or not hasattr(asr_obj, "processor"):
+        return
+    old_tok = getattr(asr_obj.processor, "tokenizer", None)
+    if old_tok is not None:
+        for attr in ("audio_token", "audio_bos_token", "audio_eos_token", "chat_template"):
+            if not hasattr(vllm_tok, attr) and hasattr(old_tok, attr):
+                try:
+                    setattr(vllm_tok, attr, getattr(old_tok, attr))
+                except Exception:
+                    pass
+    asr_obj.processor.tokenizer = vllm_tok
+
+
 @dataclass
 class _Stream:
     session_id: str
@@ -74,26 +190,41 @@ class _Stream:
 
 
 class OfficialEngine:
-    """单模型、单官方 stream。不实现第二运行时，不跨窗拼接。
-
-    每个 chunk 的解码由 BoundedOfficialStream 执行：官方同一算法，只给每步加语速上界并拒绝失控步。
-    """
+    """单模型官方引擎，同时支持 vLLM（Linux CUDA）与 Transformers（CUDA / MPS / CPU）。"""
 
     def __init__(
         self,
         *,
         model_path: Path = DEFAULT_MODEL_PATH,
+        backend: str = DEFAULT_BACKEND,
+        device: str | None = None,
         gpu_memory_utilization: float = DEFAULT_GPU_MEMORY_UTILIZATION,
         max_model_len: int = DEFAULT_MAX_MODEL_LEN,
+        max_num_seqs: int = DEFAULT_VLLM_MAX_NUM_SEQS,
         chunk_size_sec: float = DEFAULT_CHUNK_SIZE_SEC,
         unfixed_chunk_num: int = DEFAULT_UNFIXED_CHUNK_NUM,
         unfixed_token_num: int = DEFAULT_UNFIXED_TOKEN_NUM,
         max_session_samples: int = DEFAULT_MAX_SESSION_SAMPLES,
         sample_rate: int = DEFAULT_SAMPLE_RATE,
     ) -> None:
+        if backend not in SUPPORTED_BACKENDS:
+            raise LogicError(
+                ErrorCode.invalid_request,
+                f"不支持的 ASR 后端: {backend!r}（仅允许 {', '.join(SUPPORTED_BACKENDS)}）",
+            )
         self.model_path = Path(model_path)
+        self.backend = backend
+        self.device = device
+        self.resolved_backend: str | None = None
+        self.resolved_device: str | None = None
+        if isinstance(max_num_seqs, bool) or int(max_num_seqs) <= 0:
+            raise LogicError(
+                ErrorCode.invalid_request,
+                f"max_num_seqs 必须为正整数，收到: {max_num_seqs!r}",
+            )
         self.gpu_memory_utilization = gpu_memory_utilization
         self.max_model_len = max_model_len
+        self.max_num_seqs = int(max_num_seqs)
         self.chunk_size_sec = chunk_size_sec
         self.unfixed_chunk_num = unfixed_chunk_num
         self.unfixed_token_num = unfixed_token_num
@@ -104,10 +235,9 @@ class OfficialEngine:
         self.warmup_s: float | None = None
         self.partial_policy = OFFICIAL_PARTIAL_POLICY
         self.blockers = ASR_STREAMING_BLOCKERS
-        self._asr = None
+        self._asr: Any = None
         self._guard = threading.RLock()
         self._streams: dict[str, _Stream] = {}
-        # 最近一次 finish 的逐步记录（单会话引擎，只留一份），供证据脚本读取。
         self.last_finished_reports: list[StepReport] = []
         self.last_transcribe_reports: list[StepReport] = []
 
@@ -119,71 +249,180 @@ class OfficialEngine:
                 ErrorCode.asr_unavailable,
                 f"官方模型目录不存在: {self.model_path}",
             )
+        chosen_backend = resolve_backend(self.backend)
         started = time.perf_counter()
         from qwen_asr import Qwen3ASRModel
 
-        self._asr = Qwen3ASRModel.LLM(
-            model=str(self.model_path),
-            gpu_memory_utilization=self.gpu_memory_utilization,
-            max_model_len=self.max_model_len,
-            disable_log_stats=True,
-        )
+        if chosen_backend == "vllm":
+            # 根因约束：Qwen3ASRProcessingInfo 声明 audio 上限为 None，若不约束 max_num_seqs /
+            # max_num_batched_tokens / limit_mm_per_prompt，vLLM 0.14 会按默认 8192 token 预算
+            # 同时 profile 21 段最大音频，在 0.45 显存配额下直接 KV Cache 负值 OOM。
+            # 本 sidecar 单流串行，每请求仅 1 段音频，收口后仅 profile 2 段且显存余量充足。
+            self._asr = Qwen3ASRModel.LLM(
+                model=str(self.model_path),
+                gpu_memory_utilization=self.gpu_memory_utilization,
+                max_model_len=self.max_model_len,
+                max_num_seqs=self.max_num_seqs,
+                max_num_batched_tokens=self.max_model_len,
+                limit_mm_per_prompt={"audio": 1},
+                disable_log_stats=True,
+            )
+            unify_asr_tokenizer(self._asr)
+            self.resolved_backend = "vllm"
+            self.resolved_device = "cuda"
+        else:
+            import torch
+
+            dev, dtype = resolve_transformers_device(self.device, torch_module=torch)
+            self._asr = Qwen3ASRModel.from_pretrained(
+                str(self.model_path),
+                dtype=dtype,
+            )
+            self._asr.model.to(dev)
+            if callable(getattr(self._asr.model, "eval", None)):
+                self._asr.model.eval()
+            self._asr.device = torch.device(dev)
+            self._asr.dtype = dtype
+            self.resolved_backend = "transformers"
+            self.resolved_device = dev
+
         self.loaded = True
         self.load_s = time.perf_counter() - started
         if warmup:
             warm_started = time.perf_counter()
-            silence = b"\x00\x00" * int(self.sample_rate * 0.2)
+            silence = b"\x00\x00" * int(self.sample_rate * MIN_INPUT_S)
             self.transcribe(silence, language="zh")
             self.warmup_s = time.perf_counter() - warm_started
 
-    def _require(self):
+    def _require(self) -> Any:
         if self._asr is None or not self.loaded:
             raise LogicError(ErrorCode.asr_unavailable, "官方引擎尚未 load，拒绝假装可用")
         return self._asr
 
-    def transcribe(self, pcm: bytes, *, language: str | None = None, context: str | None = None) -> SttResponse:
-        """整段转写（手机非流式）。
+    def _init_streaming_state_for_backend(
+        self,
+        asr_obj: Any,
+        *,
+        context: str,
+        language: str | None,
+        normalize_language_name: Callable[[str], str],
+    ) -> Any:
+        backend_kind = str(getattr(asr_obj, "backend", "vllm") or "vllm")
+        if backend_kind != "transformers":
+            try:
+                return asr_obj.init_streaming_state(
+                    context=context,
+                    language=language,
+                    unfixed_chunk_num=self.unfixed_chunk_num,
+                    unfixed_token_num=self.unfixed_token_num,
+                    chunk_size_sec=self.chunk_size_sec,
+                )
+            except ValueError as exc:
+                raise LogicError(
+                    ErrorCode.invalid_request, f"识别会话参数不合法: {exc}"
+                ) from exc
 
-        不再调用官方一次性 transcribe：它沿用 4096 token 上限，长中英混说会复读失控后被官方去复读
-        折叠成只剩开头（实测 118s 剩 106 字）。改为把整段不配速地喂进与流式相同的有界内核，
-        一次返回完整文本；内核拒绝失控定稿时整段显式失败，不返回截断文本。
-        """
+        # Transformers 后端：复用同一 ASRStreamingState 数据结构与 _build_text_prompt
+        import numpy as np
+        from qwen_asr.inference.qwen3_asr import ASRStreamingState
+        from qwen_asr.inference.utils import validate_language
+
+        if self.chunk_size_sec <= 0:
+            raise LogicError(ErrorCode.invalid_request, "chunk_size_sec 必须大于 0")
+        force_language: str | None = None
+        if language is not None and str(language).strip():
+            try:
+                canonical = normalize_language_name(str(language))
+                validate_language(canonical)
+            except ValueError as exc:
+                raise LogicError(
+                    ErrorCode.invalid_request, f"不支持的识别语言 {language!r}: {exc}"
+                ) from exc
+            force_language = canonical
+
+        chunk_samples = max(1, int(round(float(self.chunk_size_sec) * self.sample_rate)))
+        prompt_raw = asr_obj._build_text_prompt(
+            context=context, force_language=force_language
+        )
+        return ASRStreamingState(
+            unfixed_chunk_num=int(self.unfixed_chunk_num),
+            unfixed_token_num=int(self.unfixed_token_num),
+            chunk_size_sec=float(self.chunk_size_sec),
+            chunk_size_samples=chunk_samples,
+            chunk_id=0,
+            buffer=np.zeros((0,), dtype=np.float32),
+            audio_accum=np.zeros((0,), dtype=np.float32),
+            prompt_raw=prompt_raw,
+            context=context,
+            force_language=force_language,
+            language="",
+            text="",
+            _raw_decoded="",
+        )
+
+    def _new_decoder(
+        self, *, language: str | None, context: str | None
+    ) -> BoundedOfficialStream:
+        from qwen_asr.inference.utils import normalize_language_name
+
+        asr_obj = self._require()
+        norm_lang = normalize_language(language)
+        state = self._init_streaming_state_for_backend(
+            asr_obj,
+            context=context or "",
+            language=norm_lang,
+            normalize_language_name=normalize_language_name,
+        )
+        backend_kind = str(getattr(asr_obj, "backend", "vllm") or "vllm")
+        params_factory = (
+            None if backend_kind == "transformers" else self._step_sampling_params
+        )
+        return BoundedOfficialStream(
+            asr_obj,
+            state,
+            sampling_params_factory=params_factory,
+            parse_output=lambda raw, lang: parse_asr_text(
+                raw, lang, normalize_language_name=normalize_language_name
+            ),
+            pcm=numpy_pcm_ops(),
+        )
+
+    def transcribe(
+        self, pcm: bytes, *, language: str | None = None, context: str | None = None
+    ) -> SttResponse:
         self._require()
         samples = len(pcm) // 2
         if samples > self.max_session_samples:
             raise LogicError(
                 ErrorCode.invalid_request,
                 "整段音频超过 sidecar 单次识别上限",
-                details={"max_session_samples": self.max_session_samples, "samples": samples},
+                details={
+                    "max_session_samples": self.max_session_samples,
+                    "samples": samples,
+                },
             )
         decoder = self._new_decoder(language=language, context=context)
         try:
-            decode_whole(decoder, pcm_s16le_to_float32(pcm), min_samples=int(self.sample_rate * MIN_INPUT_S))
+            decode_whole(
+                decoder,
+                pcm_s16le_to_float32(pcm),
+                min_samples=int(self.sample_rate * MIN_INPUT_S),
+            )
         finally:
             self.last_transcribe_reports = list(decoder.reports)
         state = decoder.state
-        return SttResponse(text=getattr(state, "text", "") or "", language=getattr(state, "language", None) or None)
-
-    def _new_decoder(self, *, language: str | None, context: str | None) -> BoundedOfficialStream:
-        """流式会话与整段转写共用的唯一内核构造：官方 init_streaming_state + 有界步。"""
-        from qwen_asr.inference.utils import normalize_language_name
-
-        state = self._require().init_streaming_state(
-            context=context or "",
-            language=normalize_language(language),
-            unfixed_chunk_num=self.unfixed_chunk_num,
-            unfixed_token_num=self.unfixed_token_num,
-            chunk_size_sec=self.chunk_size_sec,
-        )
-        return BoundedOfficialStream(
-            self._asr,
-            state,
-            sampling_params_factory=self._step_sampling_params,
-            parse_output=lambda raw, lang: parse_asr_text(raw, lang, normalize_language_name=normalize_language_name),
-            pcm=numpy_pcm_ops(),
+        return SttResponse(
+            text=getattr(state, "text", "") or "",
+            language=getattr(state, "language", None) or None,
         )
 
-    def start_stream(self, session_id: str, *, language: str | None = None, context: str | None = None) -> None:
+    def start_stream(
+        self,
+        session_id: str,
+        *,
+        language: str | None = None,
+        context: str | None = None,
+    ) -> None:
         self._require()
         with self._guard:
             if session_id in self._streams:
@@ -193,7 +432,6 @@ class OfficialEngine:
 
     @staticmethod
     def _step_sampling_params(max_tokens: int):
-        # 与官方 Qwen3ASRModel.LLM 的 SamplingParams 相同（贪心），只把上限换成本步语速上界。
         from vllm import SamplingParams
 
         return SamplingParams(temperature=0.0, max_tokens=int(max_tokens))
@@ -209,14 +447,17 @@ class OfficialEngine:
         self._require()
         with self._guard:
             stream = self._streams.get(session_id)
-            if stream is None:
+            if stream is None or stream.decoder is None:
                 raise LogicError(ErrorCode.not_found, f"会话不存在: {session_id}")
             incoming = len(pcm) // 2
             if stream.samples + incoming > self.max_session_samples:
                 raise LogicError(
                     ErrorCode.invalid_request,
                     "会话音频超过 sidecar 缓存上限，拒绝继续接收；长音频达标仍阻塞，不自动拼接",
-                    details={"max_session_samples": self.max_session_samples, "samples": stream.samples + incoming},
+                    details={
+                        "max_session_samples": self.max_session_samples,
+                        "samples": stream.samples + incoming,
+                    },
                 )
             stream.samples += incoming
             wav = pcm_s16le_to_float32(pcm)
@@ -241,10 +482,9 @@ class OfficialEngine:
         self._require()
         with self._guard:
             stream = self._streams.pop(session_id, None)
-            if stream is None:
+            if stream is None or stream.decoder is None:
                 raise LogicError(ErrorCode.not_found, f"会话不存在: {session_id}")
             decoder = stream.decoder
-            # 释放官方状态与累计音频引用（成功或失败都释放）
             stream.decoder = None
             try:
                 decoder.finish()
@@ -273,7 +513,18 @@ class OfficialEngine:
             self._streams.clear()
 
     def unload(self) -> None:
-        """尽量释放会话。vLLM 进程级卸载不保证显存回到加载前，调用方应退出进程。"""
         self.drop_all_streams()
         self._asr = None
         self.loaded = False
+
+
+__all__ = [
+    "AsrEngine",
+    "DEFAULT_MODEL_PATH",
+    "MIN_INPUT_S",
+    "OfficialEngine",
+    "pcm_s16le_to_float32",
+    "resolve_backend",
+    "resolve_transformers_device",
+    "unify_asr_tokenizer",
+]

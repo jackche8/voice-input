@@ -180,3 +180,70 @@ def test_default_engine_stream_and_transcribe_use_0_4_5_5_and_state_budget():
     assert out.text == "".join(pieces)
     assert fake.init_params == [(0.4, 5, 5), (0.4, 5, 5)]
     assert all(r.max_tokens < 4096 for r in eng.last_transcribe_reports)
+
+
+def test_official_engine_transformers_backend_stream_and_transcribe_and_auto_language():
+    class FakeTfProcessor:
+        def __init__(self):
+            self.tokenizer = CharTokenizer()
+
+        def __call__(self, *, text, audio, return_tensors="pt", padding=True):
+            ids = self.tokenizer.encode(text[0])
+            return {"input_ids": np.asarray([ids], dtype=np.int64), "audio": audio[0]}
+
+        def batch_decode(self, seqs, skip_special_tokens=True, clean_up_tokenization_spaces=False):
+            return [
+                self.tokenizer.decode([int(x) for x in row if int(x) not in (151643, 151645)])
+                for row in seqs
+            ]
+
+    class FakeTfModel:
+        def __init__(self, speech_fn):
+            self._speech = speech_fn
+
+        def generate(self, **kwargs):
+            prompt_ids = [int(x) for x in kwargs["input_ids"][0].tolist()]
+            prompt = "".join(chr(i) for i in prompt_ids)
+            prefix = prompt.split("P:", 1)[1]
+            truth = self._speech(int(kwargs["audio"].shape[0]))
+            cont = [ord(c) for c in truth[len(prefix) :]] + [151645]
+            return type("Out", (), {"sequences": np.asarray([prompt_ids + cont], dtype=np.int64)})()
+
+    class FakeTfOfficialAsr:
+        backend = "transformers"
+        device = None
+        dtype = None
+
+        def __init__(self, speech_fn):
+            self.processor = FakeTfProcessor()
+            self.model = FakeTfModel(speech_fn)
+            self.prompts = []
+
+        def _build_text_prompt(self, context: str, force_language: str | None) -> str:
+            self.prompts.append((context, force_language))
+            return "P:"
+
+    pieces = [f"段落{i}。" for i in range(6)]
+    step = int(round(0.4 * SR))
+    eng = OfficialEngine(backend="transformers")
+    fake_tf = FakeTfOfficialAsr(lambda n: f"language Chinese<asr_text>{''.join(pieces[: -(-n // step)])}")
+    eng._asr = fake_tf
+    eng.loaded = True
+
+    # language="auto" 归一为 None（自动识别），并在流式与整段均跑通 Transformers 分支
+    eng.start_stream("tf-1", language="auto", context="热词")
+    for _ in pieces:
+        eng.push_pcm("tf-1", _pcm(0.4))
+    final = eng.finish_stream("tf-1")
+    assert final.text == "".join(pieces)
+    assert final.language == "Chinese"
+    assert fake_tf.prompts[0] == ("热词", None)
+
+    batch = eng.transcribe(_pcm(0.2), language="auto")  # 短音频 0.2s 按 MIN_INPUT_S=0.5s(8000) 补零，ceil(8000/6400)=2 段
+    assert eng.last_transcribe_reports[-1].audio_s == 0.5
+    assert batch.text == pieces[0] + pieces[1]
+    assert batch.language == "Chinese"
+
+    with pytest.raises(LogicError) as bad_lang:
+        eng.transcribe(_pcm(0.5), language="klingon")
+    assert bad_lang.value.code == ErrorCode.invalid_request

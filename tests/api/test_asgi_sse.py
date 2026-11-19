@@ -2,11 +2,21 @@
 from __future__ import annotations
 
 import asyncio
+import logging
+import threading
+import time
 from pathlib import Path
 
 import pytest
 
-from _contracts import ProductBusyEvent, RecognizeSessionCreate, SessionClosedReason
+import _v3_app
+from _contracts import (
+    ErrorCode,
+    LogicError,
+    ProductBusyEvent,
+    RecognizeSessionCreate,
+    SessionClosedReason,
+)
 from _v3.sessions import RecognizeSessionHub
 from _v3_app import build_sandbox_runtime, create_app
 from tests.api.asgi_client import call_asgi, collect_sse
@@ -200,3 +210,172 @@ def test_finished_session_retained_until_clock_advances(sse_app):
     clock.advance(1.0)
     assert sid in hub.sweep()["evicted"]
     assert not hub.has_session(sid)
+
+
+class SlowCancelAsrProvider(FixtureAsrProvider):
+    def __init__(self, delay_s: float = 0.2) -> None:
+        super().__init__(final_text="fixture-final")
+        self.delay_s = delay_s
+        self.cancel_calls: list[str] = []
+
+    def cancel(self, session_id: str) -> None:
+        time.sleep(self.delay_s)
+        self.cancel_calls.append(session_id)
+        super().cancel(session_id)
+
+
+def test_session_sse_disconnect_does_not_block_event_loop_with_slow_cancel(tmp_path: Path):
+    provider = SlowCancelAsrProvider(delay_s=0.2)
+    runtime = build_sandbox_runtime(
+        root=tmp_path / "slow-cancel",
+        token=TEST_TOKEN,
+        transcribe=fixture_transcribe,
+        stream_provider=provider,
+    )
+    app = create_app(runtime)
+
+    async def scenario() -> tuple[str, int, float]:
+        created = await call_asgi(
+            app,
+            method="POST",
+            path="/api/v1/recognize/sessions",
+            client=LOCAL,
+            headers={**LOCAL_HEADERS, "content-type": "application/json"},
+            body=b'{"language":"zh"}',
+        )
+        sid = created["body"]["session_id"]
+
+        disconnect = asyncio.Event()
+        sent_request = False
+        started = asyncio.Event()
+
+        async def receive():
+            nonlocal sent_request
+            if not sent_request:
+                sent_request = True
+                return {"type": "http.request", "body": b"", "more_body": False}
+            await disconnect.wait()
+            return {"type": "http.disconnect"}
+
+        async def send(message):
+            if message["type"] == "http.response.start":
+                started.set()
+
+        scope = {
+            "type": "http",
+            "asgi": {"version": "3.0"},
+            "http_version": "1.1",
+            "method": "GET",
+            "scheme": "https",
+            "path": f"/api/v1/recognize/sessions/{sid}/events",
+            "raw_path": f"/api/v1/recognize/sessions/{sid}/events".encode(),
+            "query_string": b"",
+            "headers": [(k.lower().encode(), v.encode()) for k, v in LOCAL_HEADERS.items()],
+            "client": LOCAL,
+            "server": ("127.0.0.1", 17945),
+        }
+
+        max_gap = 0.0
+        ticks = 0
+        stop_hb = asyncio.Event()
+
+        async def heartbeat() -> None:
+            nonlocal max_gap, ticks
+            last = time.perf_counter()
+            while not stop_hb.is_set():
+                await asyncio.sleep(0.01)
+                now = time.perf_counter()
+                max_gap = max(max_gap, now - last)
+                last = now
+                ticks += 1
+
+        hb_task = asyncio.create_task(heartbeat())
+        sse_task = asyncio.create_task(app(scope, receive, send))
+        try:
+            await asyncio.wait_for(started.wait(), timeout=2.0)
+            # 让 generate() 进入 await subscriber.get_async()，确保走 CancelledError 清理路径
+            await asyncio.sleep(0.03)
+            disconnect.set()
+            await asyncio.wait_for(sse_task, timeout=3.0)
+        finally:
+            stop_hb.set()
+            await hb_task
+        return sid, ticks, max_gap
+
+    sid, ticks, max_gap = asyncio.run(scenario())
+    assert ticks >= 10, f"心跳次数过少，疑似事件循环被阻塞: ticks={ticks}, max_gap={max_gap:.4f}s"
+    assert max_gap < 0.15, f"SSE 断连清理阻塞了事件循环: max_gap={max_gap:.4f}s (cancel delay=0.2s)"
+    assert sid in provider.cancel_calls
+    snap = runtime.finals.lookup(sid)
+    assert snap is not None
+    assert snap.closed_reason == SessionClosedReason.disconnected
+    assert app.state.sessions._sessions[sid].state == "disconnected"
+    assert app.state.sessions._sessions[sid].subscribers == []
+
+
+def test_sweep_skips_concurrently_removed_session_and_propagates_real_error(sse_app, monkeypatch):
+    app, runtime, clock = sse_app
+    hub: RecognizeSessionHub = app.state.sessions
+    sid1 = hub.create(RecognizeSessionCreate(language="zh")).session_id
+    sid2 = hub.create(RecognizeSessionCreate(language="zh")).session_id
+    clock.advance(20.0)
+
+    real_mark = hub.mark_disconnected
+
+    def flaky_mark(sid: str) -> None:
+        if sid == sid1:
+            raise LogicError(ErrorCode.not_found, f"会话已并发移除: {sid}")
+        real_mark(sid)
+
+    monkeypatch.setattr(hub, "mark_disconnected", flaky_mark)
+    swept = hub.sweep()
+    assert sid1 not in swept["idle_disconnected"]
+    assert swept["idle_disconnected"] == [sid2]
+    assert runtime.finals.lookup(sid2) is not None
+    assert runtime.finals.lookup(sid2).closed_reason == SessionClosedReason.disconnected
+
+    sid3 = hub.create(RecognizeSessionCreate(language="zh")).session_id
+    clock.advance(20.0)
+
+    def broken_mark(sid: str) -> None:
+        raise RuntimeError(f"provider boom for {sid}")
+
+    monkeypatch.setattr(hub, "mark_disconnected", broken_mark)
+    with pytest.raises(RuntimeError, match="provider boom"):
+        hub.sweep()
+
+
+def test_lifespan_sweep_loop_survives_unexpected_exception(tmp_path: Path, monkeypatch, caplog):
+    monkeypatch.setattr(_v3_app, "SESSION_SWEEP_INTERVAL_S", 0.02)
+    runtime = build_sandbox_runtime(
+        root=tmp_path / "sweep-loop",
+        token=TEST_TOKEN,
+        transcribe=fixture_transcribe,
+        stream_provider=FixtureAsrProvider(final_text="fixture-final"),
+    )
+    app = create_app(runtime)
+    hub: RecognizeSessionHub = app.state.sessions
+    calls = 0
+    second_round = threading.Event()
+    real_sweep = hub.sweep
+
+    def flaky_sweep(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("transient sweep failure")
+        second_round.set()
+        return real_sweep(*args, **kwargs)
+
+    monkeypatch.setattr(hub, "sweep", flaky_sweep)
+
+    async def run_lifespan() -> None:
+        async with app.router.lifespan_context(app):
+            ok = await asyncio.to_thread(second_round.wait, 2.0)
+            assert ok, f"后台 sweep 循环在首次异常后未能继续下一轮: calls={calls}"
+
+    with caplog.at_level(logging.ERROR, logger="_v3_app"):
+        asyncio.run(run_lifespan())
+
+    assert calls >= 2
+    assert any("transient sweep failure" in rec.getMessage() or (rec.exc_info and "transient sweep failure" in str(rec.exc_info[1])) for rec in caplog.records)

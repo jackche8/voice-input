@@ -20,6 +20,7 @@
     if (!search) return null;
     var raw = String(search);
     if (raw.charAt(0) === "?") raw = raw.slice(1);
+    if (!raw) return null;
     var params = new URLSearchParams(raw);
     var token = params.get("token");
     if (!token) return null;
@@ -29,11 +30,42 @@
 
   function stripTokenFromSearch(search) {
     var raw = String(search || "");
-    if (raw.charAt(0) === "?") raw = raw.slice(1);
-    var params = new URLSearchParams(raw);
+    if (!raw) return "";
+    var body = raw.charAt(0) === "?" ? raw.slice(1) : raw;
+    if (!body) return "";
+    var params = new URLSearchParams(body);
+    if (!params.has("token")) {
+      return raw.charAt(0) === "?" ? raw : "?" + raw;
+    }
     params.delete("token");
     var s = params.toString();
     return s ? "?" + s : "";
+  }
+
+  function readTokenFromHash(hash) {
+    if (!hash) return null;
+    var raw = String(hash);
+    if (raw.charAt(0) === "#") raw = raw.slice(1);
+    if (!raw) return null;
+    var params = new URLSearchParams(raw);
+    var token = params.get("token");
+    if (!token) return null;
+    token = String(token).trim();
+    return token ? token : null;
+  }
+
+  function stripTokenFromHash(hash) {
+    var raw = String(hash || "");
+    if (!raw) return "";
+    var body = raw.charAt(0) === "#" ? raw.slice(1) : raw;
+    if (!body) return "";
+    var params = new URLSearchParams(body);
+    if (!params.has("token")) {
+      return raw.charAt(0) === "#" ? raw : "#" + raw;
+    }
+    params.delete("token");
+    var s = params.toString();
+    return s ? "#" + s : "";
   }
 
   function adoptionSnapshot() {
@@ -53,7 +85,9 @@
     var hist = opts.history || (typeof history !== "undefined" ? history : null);
     var search = opts.search != null ? opts.search : (loc && loc.search) || "";
     var hash = opts.hash != null ? opts.hash : (loc && loc.hash) || "";
-    var token = readTokenFromSearch(search);
+    var hashToken = readTokenFromHash(hash);
+    var searchToken = readTokenFromSearch(search);
+    var token = hashToken || searchToken;
 
     if (!token) {
       adopted.done = true;
@@ -72,8 +106,9 @@
     }
 
     var path = (loc && loc.pathname) || "";
-    var cleaned = stripTokenFromSearch(search);
-    var newUrl = path + cleaned + (hash || "");
+    var cleanedSearch = stripTokenFromSearch(search);
+    var cleanedHash = stripTokenFromHash(hash);
+    var newUrl = path + cleanedSearch + cleanedHash;
     try {
       hist.replaceState(hist.state, "", newUrl);
     } catch (err) {
@@ -99,6 +134,7 @@
     var origin = opts.origin != null ? opts.origin : (loc.origin || "");
     var href = opts.href != null ? opts.href : (loc.href || "");
     var search = opts.search != null ? opts.search : (loc.search || "");
+    var hash = opts.hash != null ? opts.hash : (loc.hash || "");
 
     var token;
     var tokenAdoptError = null;
@@ -108,7 +144,7 @@
       tokenAdoptError = adopted.failed || null;
       token = adopted.failed ? null : adopted.token;
     } else {
-      token = readTokenFromSearch(search);
+      token = readTokenFromHash(hash) || readTokenFromSearch(search);
     }
 
     var kind;
@@ -149,6 +185,8 @@
   root.isLoopbackHost = isLoopbackHost;
   root.readTokenFromSearch = readTokenFromSearch;
   root.stripTokenFromSearch = stripTokenFromSearch;
+  root.readTokenFromHash = readTokenFromHash;
+  root.stripTokenFromHash = stripTokenFromHash;
   root.adoptTokenFromLocation = adoptTokenFromLocation;
   root.createContext = createContext;
 })(window.V3Business = window.V3Business || {});

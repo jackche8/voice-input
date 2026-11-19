@@ -1,6 +1,7 @@
 """识别会话编排。依赖 ASR 提供者接口，不是识别引擎，不做字幕拼接。"""
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import queue
 import threading
@@ -79,6 +80,41 @@ class SessionSubscriber:
 
     queue: queue.Queue[SessionSSEEvent]
     overflow: bool = False
+    loop: asyncio.AbstractEventLoop | None = None
+    async_queue: asyncio.Queue[SessionSSEEvent] | None = None
+
+    def push(self, event: SessionSSEEvent) -> None:
+        if self.loop is not None and self.async_queue is not None:
+            aq = self.async_queue
+
+            def _put() -> None:
+                if self.overflow:
+                    return
+                try:
+                    aq.put_nowait(event)
+                except asyncio.QueueFull:
+                    self.overflow = True
+
+            try:
+                if asyncio.get_running_loop() is self.loop:
+                    _put()
+                    return
+            except RuntimeError:
+                pass
+            try:
+                self.loop.call_soon_threadsafe(_put)
+            except RuntimeError:
+                pass
+            return
+        try:
+            self.queue.put_nowait(event)
+        except queue.Full:
+            self.overflow = True
+
+    async def get_async(self) -> SessionSSEEvent:
+        if self.async_queue is None:
+            raise LogicError(ErrorCode.internal, "同步订阅不支持 get_async")
+        return await self.async_queue.get()
 
     def get(self, block: bool = True, timeout: float | None = None) -> SessionSSEEvent:
         return self.queue.get(block, timeout)
@@ -276,14 +312,40 @@ class RecognizeSessionHub:
         session = self._get(session_id)
         with self._guard:
             if session.state != "open":
-                raise LogicError(ErrorCode.conflict, f"会话已结束，不能重复 finish: {session.state}")
+                raise LogicError(ErrorCode.conflict, f"会话已结束或正在结束，不能重复 finish: {session.state}")
             if not session.provider_ready:
                 raise LogicError(ErrorCode.conflict, "会话尚未就绪，不能 finish")
-        if self._provider is None:
-            raise LogicError(ErrorCode.asr_unavailable, "未注入流式识别提供者")
-        final = self._provider.finish(session_id)
-        if not isinstance(final, SessionFinalEvent):
-            raise LogicError(ErrorCode.asr_unavailable, "finish 必须返回 final 事件")
+            if self._provider is None:
+                raise LogicError(ErrorCode.asr_unavailable, "未注入流式识别提供者")
+            session.state = "finishing"
+        try:
+            final = self._provider.finish(session_id)
+            if not isinstance(final, SessionFinalEvent):
+                raise LogicError(ErrorCode.asr_unavailable, "finish 必须返回 final 事件")
+        except BaseException as exc:
+            should_close = False
+            with self._guard:
+                if session.state == "finishing" and session.closed is None:
+                    session.state = "error"
+                    should_close = True
+            if should_close:
+                err = (
+                    exc
+                    if isinstance(exc, LogicError)
+                    else LogicError(ErrorCode.asr_unavailable, f"识别会话 finish 失败: {exc}")
+                )
+                self._publish(
+                    session,
+                    SessionErrorEvent(
+                        session_id=session_id,
+                        error=err.code,
+                        message=err.message,
+                        details=err.details,
+                    ),
+                )
+                self._finals.record_closed(session_id, SessionClosedReason.error)
+                self._close(session, SessionClosedEvent(session_id=session_id, reason=SessionClosedReason.error))
+            raise
         self._finals.record_final(session_id, final.text, final.language)
         self._publish(session, final)
         closed = SessionClosedEvent(session_id=session_id, reason=SessionClosedReason.finished)
@@ -294,7 +356,7 @@ class RecognizeSessionHub:
         session = self._get(session_id)
         with self._guard:
             if session.state != "open":
-                raise LogicError(ErrorCode.conflict, f"会话已结束，不能 cancel: {session.state}")
+                raise LogicError(ErrorCode.conflict, f"会话已结束或正在结束，不能 cancel: {session.state}")
         if self._provider is not None:
             self._provider.cancel(session_id)
         self._finals.record_closed(session_id, SessionClosedReason.cancelled)
@@ -312,6 +374,29 @@ class RecognizeSessionHub:
                 try:
                     sub.queue.put_nowait(event)
                 except queue.Full:
+                    raise LogicError(
+                        ErrorCode.internal,
+                        "有界回放无法写入订阅队列，拒绝造成功",
+                        details={"sse_queue_max": self._sse_queue_max, "replay": [getattr(item, "event", None) for item in replay]},
+                    )
+            session.subscribers.append(sub)
+        return sub
+
+    def subscribe_async(self, session_id: str, loop: asyncio.AbstractEventLoop) -> SessionSubscriber:
+        """原生异步队列订阅（零轮询、无线程池占坑），语义与 subscribe 同源。"""
+        session = self._get(session_id)
+        aq: asyncio.Queue[SessionSSEEvent] = asyncio.Queue(maxsize=self._sse_queue_max)
+        sub = SessionSubscriber(
+            queue=queue.Queue(maxsize=self._sse_queue_max),
+            loop=loop,
+            async_queue=aq,
+        )
+        with self._guard:
+            replay = self._replay_for_queue(session)
+            for event in replay:
+                try:
+                    aq.put_nowait(event)
+                except asyncio.QueueFull:
                     raise LogicError(
                         ErrorCode.internal,
                         "有界回放无法写入订阅队列，拒绝造成功",
@@ -405,15 +490,23 @@ class RecognizeSessionHub:
                         evicted.append(sid)
                 elif session.state == "open" and ts - session.last_activity >= self._idle_open_s:
                     idle.append(sid)
+        idle_disconnected: list[str] = []
         for sid in idle:
-            self.mark_disconnected(sid)
-        return {"evicted": evicted, "idle_disconnected": idle}
+            try:
+                self.mark_disconnected(sid)
+            except LogicError as exc:
+                if exc.code == ErrorCode.not_found:
+                    continue
+                raise
+            idle_disconnected.append(sid)
+        return {"evicted": evicted, "idle_disconnected": idle_disconnected}
 
     def publish_partial(self, session_id: str, event: SessionPartialEvent) -> None:
         """把 mid-stream partial 交给已有 SSE 订阅。不发明第二套识别。"""
         session = self._get(session_id)
-        if session.state != "open":
-            raise LogicError(ErrorCode.conflict, f"会话已结束，不能再发 partial: {session.state}")
+        with self._guard:
+            if session.state not in ("open", "finishing"):
+                raise LogicError(ErrorCode.conflict, f"会话已结束，不能再发 partial: {session.state}")
         if not isinstance(event, SessionPartialEvent):
             raise LogicError(ErrorCode.internal, "publish_partial 只接受 SessionPartialEvent")
         if event.session_id != session_id:
@@ -427,8 +520,9 @@ class RecognizeSessionHub:
         except LogicError:
             return
         with self._guard:
-            if session.state != "open":
+            if session.state not in ("open", "finishing") or session.closed is not None:
                 return
+            session.state = "error"
         if not isinstance(event, SessionErrorEvent):
             raise LogicError(ErrorCode.internal, "publish_provider_error 只接受 SessionErrorEvent")
         if event.session_id != session_id:
@@ -532,10 +626,7 @@ class RecognizeSessionHub:
             self._retain_snapshot(session, event)
             targets = list(session.subscribers)
         for item in targets:
-            try:
-                item.queue.put_nowait(event)
-            except queue.Full:
-                item.overflow = True
+            item.push(event)
         self._mirror_session_event(event)
 
     def _mirror_session_event(self, event: SessionSSEEvent) -> None:

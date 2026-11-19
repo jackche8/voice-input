@@ -10,7 +10,7 @@ from _config import default_config_path
 from _contracts import PolishRequest, PolishResponse, SttResponse, TranslateRequest, TranslateResponse
 from _jobs import default_jobs_path
 from _v3_app import build_sandbox_runtime, create_app
-from tests.api.providers import FixtureAsrProvider, fixture_ocr, fixture_transcribe
+from tests.api.providers import FixtureAsrProvider, fixture_ocr, fixture_ocr_layout, fixture_transcribe
 
 TEST_TOKEN = "test-api-token-not-for-production"
 LOCAL_ORIGIN = "https://127.0.0.1:17945"
@@ -60,6 +60,7 @@ def runtime(tmp_path: Path):
         polish=polish,
         translate=translate,
         ocr=fixture_ocr,
+        ocr_layout=fixture_ocr_layout,
         stream_provider=FixtureAsrProvider(final_text="fixture-final"),
         unmet_gates=("api tests: sandbox, 非生产",),
     )

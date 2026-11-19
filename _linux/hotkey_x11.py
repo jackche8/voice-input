@@ -1,77 +1,90 @@
-"""X11 XGrabKey 全局快捷键（X11 独占），通过 GLib.io_add_watch 集成到 GTK 事件循环。"""
+"""X11 XGrabKey 全局快捷键（X11 独占，支持 voice / screenshot / ocr / repeat 四键）。"""
 from __future__ import annotations
 
 import sys
 
-from gi.repository import GLib
-from Xlib import X
-from Xlib import display as xdisplay
+from _linux.hotkey_actions import GLib, HotkeyActionMixin, HotkeyContext
 
-from _linux.hotkey_actions import HotkeyActionMixin, HotkeyContext
-from _linux.x11keys import LOCK_MASKS, parse_hotkey
+# 标准 X11 常量，避免在模块导入阶段强依赖 python-xlib（隔离单测可注入假 Display）。
+_X_KEY_PRESS = 2
+_X_KEY_RELEASE = 3
+_X_GRAB_MODE_ASYNC = 1
+_DEFAULT_LOCK_MASKS = (0, 1 << 4, 1 << 1, (1 << 4) | (1 << 1))  # 0, Mod2Mask, LockMask, both
 
 
 class HotkeyGrabber(HotkeyActionMixin):
-    """XGrabKey 快捷键管理，通过 GLib.io_add_watch 集成到 GTK 事件循环。
+    """XGrabKey 快捷键管理，通过 GLib.io_add_watch 集成到事件循环。"""
 
-    自动重复检测使用 GLib.timeout_add 延迟释放方案：
-    - KeyRelease 时不立即执行，而是设置 50ms 定时器
-    - 如果 50ms 内收到同键 KeyPress，说明是自动重复，取消定时器
-    - 如果 50ms 后无 KeyPress，说明是真正释放，执行 stop
-    """
-
-    def __init__(self, ctx: HotkeyContext) -> None:
+    def __init__(
+        self,
+        ctx: HotkeyContext,
+        *,
+        display_factory=None,
+        hotkey_parser=None,
+    ) -> None:
         self._init_hotkey_actions(ctx)
-        self.dpy = xdisplay.Display()
+        if display_factory is None:
+            from Xlib import display as xdisplay
+
+            display_factory = xdisplay.Display
+        if hotkey_parser is None:
+            from _linux.x11keys import LOCK_MASKS, parse_hotkey
+
+            hotkey_parser = parse_hotkey
+            self._lock_masks = tuple(LOCK_MASKS)
+        else:
+            self._lock_masks = _DEFAULT_LOCK_MASKS
+
+        self.dpy = display_factory()
         self._grab_errors: list[str] = []
         self._reported_grab_error = False
         self.dpy.set_error_handler(self._on_x_error)
         self.root = self.dpy.screen().root
 
-        # 从配置解析快捷键
-        v_mask, v_sym = parse_hotkey(self.ctx.bindings.voice)
-        s_mask, s_sym = parse_hotkey(self.ctx.bindings.screenshot)
-        r_mask, r_sym = parse_hotkey(self.ctx.bindings.repeat)
+        v_mask, v_sym = hotkey_parser(self.ctx.bindings.voice)
+        s_mask, s_sym = hotkey_parser(self.ctx.bindings.screenshot)
+        o_mask, o_sym = (
+            hotkey_parser(self.ctx.bindings.ocr) if self.ctx.bindings.ocr else (0, 0)
+        )
+        r_mask, r_sym = hotkey_parser(self.ctx.bindings.repeat)
 
         self.voice_kc = self.dpy.keysym_to_keycode(v_sym)
         self.voice_mask = v_mask
         self.screen_kc = self.dpy.keysym_to_keycode(s_sym)
         self.screen_mask = s_mask
+        self.ocr_kc = self.dpy.keysym_to_keycode(o_sym) if o_sym else 0
+        self.ocr_mask = o_mask
         self.repeat_kc = self.dpy.keysym_to_keycode(r_sym)
         self.repeat_mask = r_mask
 
     def _on_x_error(self, err, *args):
-        """收集 XGrabKey 的 BadAccess；不能像旧代码那样静默吞掉冲突。"""
+        del args
         try:
             self._grab_errors.append(str(err))
         except Exception:
             pass
 
+    def _key_specs(self) -> list[tuple[int, int]]:
+        specs = [
+            (self.voice_kc, self.voice_mask),
+            (self.screen_kc, self.screen_mask),
+            (self.repeat_kc, self.repeat_mask),
+        ]
+        if self.ocr_kc:
+            specs.append((self.ocr_kc, self.ocr_mask))
+        return specs
+
     def grab(self) -> None:
-        for lock in LOCK_MASKS:
-            self.root.grab_key(
-                self.voice_kc,
-                self.voice_mask | lock,
-                True,
-                X.GrabModeAsync,
-                X.GrabModeAsync,
-            )
-            self.root.grab_key(
-                self.screen_kc,
-                self.screen_mask | lock,
-                True,
-                X.GrabModeAsync,
-                X.GrabModeAsync,
-            )
-            self.root.grab_key(
-                self.repeat_kc,
-                self.repeat_mask | lock,
-                True,
-                X.GrabModeAsync,
-                X.GrabModeAsync,
-            )
+        for lock in self._lock_masks:
+            for kc, mask in self._key_specs():
+                self.root.grab_key(
+                    kc,
+                    mask | lock,
+                    True,
+                    _X_GRAB_MODE_ASYNC,
+                    _X_GRAB_MODE_ASYNC,
+                )
         self.dpy.flush()
-        # 同步一次，让 BadAccess 立即进入错误处理器；XGrabKey 是异步的。
         try:
             self.dpy.sync()
         except Exception:
@@ -84,10 +97,9 @@ class HotkeyGrabber(HotkeyActionMixin):
             self._grab_errors.clear()
 
     def ungrab(self) -> None:
-        for lock in LOCK_MASKS:
-            self.root.ungrab_key(self.voice_kc, self.voice_mask | lock)
-            self.root.ungrab_key(self.screen_kc, self.screen_mask | lock)
-            self.root.ungrab_key(self.repeat_kc, self.repeat_mask | lock)
+        for lock in self._lock_masks:
+            for kc, mask in self._key_specs():
+                self.root.ungrab_key(kc, mask | lock)
         self.dpy.flush()
 
     def start(self) -> None:
@@ -98,24 +110,27 @@ class HotkeyGrabber(HotkeyActionMixin):
     def _refresh_grab(self) -> bool:
         if not self.voice_active:
             try:
-                self.grab()  # XGrabKey 对同一客户端幂等，不做 ungrab 避免注册空白
+                self.grab()
             except Exception:
                 pass
         return True
 
     def _handle_event(self, event) -> None:
-        if event.type == X.KeyPress:
+        if event.type == _X_KEY_PRESS:
             if event.detail == self.voice_kc:
                 self._on_voice_press()
             elif event.detail == self.screen_kc:
                 self._on_screenshot()
+            elif self.ocr_kc and event.detail == self.ocr_kc:
+                self._on_ocr()
             elif event.detail == self.repeat_kc:
                 self._on_repeat()
-        elif event.type == X.KeyRelease:
+        elif event.type == _X_KEY_RELEASE:
             if event.detail == self.voice_kc and self.voice_active:
                 self._schedule_release()
 
     def _on_xlib_event(self, fd, condition) -> bool:
+        del fd, condition
         try:
             self.dpy.sync()
         except Exception as e:

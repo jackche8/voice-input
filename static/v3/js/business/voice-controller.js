@@ -55,6 +55,10 @@
       if (elapsedTimer) { clearTimeoutFn(elapsedTimer); elapsedTimer = null; }
     }
 
+    function recorderSupported() {
+      return !!root.supportedRecorderType(opts.MediaRecorder);
+    }
+
     function audioBusy() {
       return !!(audio && ((audio.isAcquiring && audio.isAcquiring()) || (audio.isRecording && audio.isRecording())));
     }
@@ -65,7 +69,7 @@
       stopTimers();
       setState(Object.assign({
         phase: "idle",
-        micEnabled: false,
+        micEnabled: recorderSupported(),
         statusText: message,
         statusTone: "warn"
       }, extra || {}));
@@ -136,17 +140,20 @@
               job_id: jobId,
               job_state: "unknown",
               error: "not_found",
-              message: "任务不存在或尚未写入。"
+              message: "任务不存在或尚未写入。",
+              micEnabled: recorderSupported()
             });
             return;
           }
           var job = body.job || body;
           var mapped = mapJobPhase(job);
+          var terminal = mapped.phase === "done" || mapped.phase === "failed" || mapped.phase === "delivery_unknown";
           var patch = Object.assign({
             job_id: job.job_id || jobId,
             text: job.text || getState().text || "",
             error: mapped.phase === "failed" ? (mapped.error || "internal") : null
           }, mapped);
+          if (terminal) patch.micEnabled = recorderSupported();
           if (mapped.phase === "failed" && lastRaw) patch.raw_text = lastRaw;
           setState(patch);
           if (mapped.phase === "queued" || mapped.phase === "claimed" || mapped.phase === "waiting") {
@@ -169,7 +176,8 @@
             job_id: jobId,
             error: err.error,
             message: formatErr(err),
-            raw_text: lastRaw || ""
+            raw_text: lastRaw || "",
+            micEnabled: recorderSupported()
           });
         });
       }
@@ -193,7 +201,7 @@
           connection: "error",
           tokenValid: false,
           phase: "failed",
-          message: "缺少访问令牌，请从电脑设置页重新打开录音页。"
+          message: "缺少访问令牌，请从电脑工作台「手机扫码语音」重新打开录音页。"
         });
         return Promise.resolve();
       }
@@ -227,16 +235,18 @@
         pollJob(body.job_id || jobId);
       }, function (err) {
         if (err && err.error === "polish_failed") {
+          var rawText = (err.details && err.details.raw_text) || lastRaw || "";
+          if (rawText) lastRaw = rawText;
           setState({
             phase: "polish_failed",
             job_id: jobId,
             error: "polish_failed",
             message: formatErr(err),
             details: err.details,
-            raw_text: lastRaw || (err.details && err.details.raw_text) || "",
-            text: lastRaw || ""
+            raw_text: rawText,
+            text: rawText,
+            micEnabled: recorderSupported()
           });
-          if (err.details && err.details.raw_text) lastRaw = err.details.raw_text;
           return;
         }
         setState({
@@ -246,7 +256,8 @@
           message: formatErr(err),
           details: err.details,
           raw_text: lastRaw || "",
-          statusText: err.network ? "网络失败，再次提交将沿用同一 job_id。" : ""
+          statusText: err.network ? "网络失败，再次提交将沿用同一 job_id。" : "",
+          micEnabled: recorderSupported()
         });
       });
     }
@@ -255,7 +266,7 @@
       var newId = confirm ? jobIds.fresh(slot) : jobIds.reuse(slot);
       lastJobId = newId;
       lastOriginalId = originalId;
-      setState({ phase: "uploading", job_id: newId, error: null, message: "" });
+      setState({ phase: "uploading", job_id: newId, error: null, message: "", micEnabled: false });
       var req = {
         job_id: newId,
         text: text,
@@ -275,7 +286,8 @@
             raw_text: lastRaw || text,
             statusText: "文字可能已经输入。确认后将用新的 job_id 关联原任务再提交。",
             statusTone: "warn",
-            details: { original_job_id: body.original_job_id, new_job_id: body.new_job_id }
+            details: { original_job_id: body.original_job_id, new_job_id: body.new_job_id },
+            micEnabled: recorderSupported()
           });
           return body;
         }
@@ -294,7 +306,8 @@
           job_id: newId,
           error: err.error,
           message: formatErr(err),
-          raw_text: lastRaw || text
+          raw_text: lastRaw || text,
+          micEnabled: recorderSupported()
         });
       });
     }
@@ -343,10 +356,11 @@
           elapsedTimer = setTimeoutFn(tickElapsed, 250);
         }, function (err) {
           stopTimers();
+          var supported = recorderSupported();
           setState({
             phase: "idle",
-            micEnabled: false,
-            useFileUpload: !root.supportedRecorderType(opts.MediaRecorder),
+            micEnabled: supported,
+            useFileUpload: !supported,
             fileUploadHint: err.message || "无法开始录音",
             statusText: err.message || "无法开始录音",
             statusTone: "err"
@@ -357,19 +371,19 @@
         stopTimers();
         return audio.stop().then(function (result) {
           if (!result || !result.blob) {
-            setState({ phase: "idle", micEnabled: false, statusText: "没有采集到音频，未提交。", statusTone: "warn" });
+            setState({ phase: "idle", micEnabled: recorderSupported(), statusText: "没有采集到音频，未提交。", statusTone: "warn" });
             return;
           }
           return submitAudio(result, "from-audio");
         }, function (err) {
           audio.cancel();
-          setState({ phase: "failed", micEnabled: false, message: err.message || "结束录音失败" });
+          setState({ phase: "failed", micEnabled: recorderSupported(), message: err.message || "结束录音失败" });
         });
       },
       onRecordCancel: function () {
         stopTimers();
         audio.cancel();
-        setState({ phase: "idle", micEnabled: false, statusText: "录音已取消，未提交。", statusTone: "warn" });
+        setState({ phase: "idle", micEnabled: recorderSupported(), statusText: "录音已取消，未提交。", statusTone: "warn" });
       },
       onPickAudio: function (payload) {
         var file = payload && (payload.file || payload);
@@ -439,7 +453,7 @@
           connection: "error",
           tokenValid: false,
           phase: "idle",
-          message: "缺少访问令牌，请从电脑设置页重新打开录音页。"
+          message: "缺少访问令牌，请从电脑工作台「手机扫码语音」重新打开录音页。"
         });
         return Promise.resolve();
       }
@@ -450,7 +464,7 @@
         phase: "idle",
         useFileUpload: !mime,
         fileUploadHint: mime ? "" : "当前浏览器不能录制可上传的音频格式，请选择音频文件。",
-        micEnabled: false
+        micEnabled: !!mime
       });
       return loadHistory();
     }

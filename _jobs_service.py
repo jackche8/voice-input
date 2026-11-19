@@ -1,12 +1,11 @@
-"""Job 队列的业务规则：claim/ack、崩溃恢复与超时，不重投。
+"""Job 队列的业务规则：事件唤醒 claim、幂等 ack、崩溃恢复与租约过期收敛，不重投。
 
-存取只通过 JobStore（含 update_if / put_if_absent）。认证与来源判定不在本模块。
+存取只通过 JobStore。认证与来源判定不在本模块。
 """
 from __future__ import annotations
 
-import uuid
 from collections.abc import Callable
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 
 from _contracts import (
     AckResult,
@@ -38,13 +37,14 @@ def _iso(ts: datetime) -> str:
     return ts.isoformat()
 
 
-def _parse_iso(value: str) -> datetime | None:
-    if not value:
-        return None
-    try:
-        return datetime.fromisoformat(value)
-    except ValueError:
-        return None
+def _target_state_for_ack(result: AckResult) -> JobState:
+    if result == AckResult.complete:
+        return JobState.done
+    if result == AckResult.none:
+        return JobState.failed
+    if result == AckResult.partial_or_unknown:
+        return JobState.delivery_unknown
+    raise LogicError(ErrorCode.invalid_request, f"未知 ack result: {result}")
 
 
 class JobsService:
@@ -61,16 +61,22 @@ class JobsService:
         self._clock = clock or _utc_now
         self._claim_lease_s = claim_lease_s
 
+    def _emit_delivery_unknown(self, record: JobRecord) -> None:
+        self._events.publish(
+            ProductDeliveryUnknownEvent(job_id=record.job_id, text=record.text)
+        )
+
     def get(self, job_id: str) -> JobQueryFound | JobQueryUnknown:
         if not job_id:
             raise LogicError(ErrorCode.invalid_request, "job_id 不能为空")
+        self.expire_stale_claims()
         record = self._store.get(job_id)
         if record is None:
             return JobQueryUnknown(job_id=job_id)
         return JobQueryFound(job=record)
 
     def enqueue(self, record: JobRecord) -> JobRecord:
-        return self._store.put_if_absent(record)
+        return self._store.enqueue(record)
 
     def find_by_session_id(self, session_id: str) -> JobRecord | None:
         """以已持久的 JobRecord.session_id 查证绑定，不另建索引库。"""
@@ -87,43 +93,41 @@ class JobsService:
             )
         return matches[0]
 
-    def claim(self, wait_s: float | None = None) -> JobClaimed | None:
-        """原子 queued→claimed。无任务返回 None，不编造 job。wait_s 仅表示本次等待，不是重投。"""
-        del wait_s  # 长轮询属于路由集成；本层只做一次扫描。
-        self.expire_stale_claims()
-        candidates = [
-            job
-            for job in self._store.list_jobs()
-            if job.state == JobState.queued
-        ]
-        candidates.sort(key=lambda job: (job.created_at, job.job_id))
-        now = _iso(self._clock())
-        for job in candidates:
-            claim_id = str(uuid.uuid4())
-            try:
-                updated = self._store.update_if(
-                    job.job_id,
-                    expected={"state": JobState.queued},
-                    fields={"state": JobState.claimed, "claim_id": claim_id, "updated_at": now},
-                )
-            except LogicError as exc:
-                if exc.code == ErrorCode.conflict:
-                    continue
-                raise
-            return JobClaimed(
-                job_id=updated.job_id,
-                claim_id=updated.claim_id or claim_id,
-                text=updated.text,
-                source=updated.source,
-                focus_id=updated.focus_id,
-            )
-        return None
+    def claim_job(self, timeout_s: float | None = None) -> JobClaimed | None:
+        """基于 JobStore.wait_and_claim_next 的零轮询事件唤醒领取。"""
+        wait = max(0.0, float(timeout_s or 0.0))
+        claimed = self._store.wait_and_claim_next(
+            timeout_s=wait,
+            stale_after_s=self._claim_lease_s,
+            clock=self._clock,
+            on_expired=self._emit_delivery_unknown,
+        )
+        if claimed is None:
+            return None
+        return JobClaimed(
+            job_id=claimed.job_id,
+            claim_id=claimed.claim_id or "",
+            text=claimed.text,
+            source=claimed.source,
+            focus_id=claimed.focus_id,
+        )
+
+    def claim(
+        self,
+        wait_s: float | None = None,
+        *,
+        timeout_s: float | None = None,
+    ) -> JobClaimed | None:
+        """原子 queued→claimed。支持 Condition 事件唤醒等待，无任务返回 None。"""
+        effective_wait = timeout_s if timeout_s is not None else wait_s
+        return self.claim_job(timeout_s=effective_wait)
 
     def ack(self, job_id: str, request: JobAckRequest) -> JobRecord:
         if not job_id:
             raise LogicError(ErrorCode.invalid_request, "job_id 不能为空")
         if not request.claim_id:
             raise LogicError(ErrorCode.invalid_request, "claim_id 不能为空")
+        target_state = _target_state_for_ack(request.result)
         current = self._store.get(job_id)
         if current is None:
             raise LogicError(ErrorCode.not_found, f"job 不存在: {job_id}")
@@ -133,25 +137,23 @@ class JobsService:
                 "claim_id 不匹配",
                 details={"job_id": job_id},
             )
-        if current.state == JobState.claimed:
-            return self._apply_ack(current, request)
-        if current.state == JobState.delivery_unknown:
-            return self._apply_ack(current, request)
+        # 同一 (claim_id, 目标 state) 重复 ack（例如响应网络超时重试）幂等返回，不重复写盘与发事件
+        if current.state == target_state:
+            return current
+        if current.state in (JobState.claimed, JobState.delivery_unknown):
+            return self._apply_ack(current, request, target_state)
         raise LogicError(
             ErrorCode.conflict,
-            f"当前状态不可 ack: {current.state}",
-            details={"job_id": job_id, "state": current.state},
+            f"当前状态不可 ack 为 {target_state}: {current.state}",
+            details={"job_id": job_id, "state": current.state, "target_state": target_state},
         )
 
-    def _apply_ack(self, current: JobRecord, request: JobAckRequest) -> JobRecord:
-        if request.result == AckResult.complete:
-            new_state = JobState.done
-        elif request.result == AckResult.none:
-            new_state = JobState.failed
-        elif request.result == AckResult.partial_or_unknown:
-            new_state = JobState.delivery_unknown
-        else:
-            raise LogicError(ErrorCode.invalid_request, f"未知 ack result: {request.result}")
+    def _apply_ack(
+        self,
+        current: JobRecord,
+        request: JobAckRequest,
+        new_state: JobState,
+    ) -> JobRecord:
         now = _iso(self._clock())
         try:
             updated = self._store.update_if(
@@ -165,6 +167,13 @@ class JobsService:
             )
         except LogicError as exc:
             if exc.code == ErrorCode.conflict:
+                latest = self._store.get(current.job_id)
+                if (
+                    latest is not None
+                    and latest.claim_id == request.claim_id
+                    and latest.state == new_state
+                ):
+                    return latest
                 raise LogicError(
                     ErrorCode.conflict,
                     "ack 条件不成立，可能已被其他调用收敛",
@@ -182,46 +191,18 @@ class JobsService:
                 )
             )
         elif updated.state == JobState.delivery_unknown:
-            self._events.publish(
-                ProductDeliveryUnknownEvent(job_id=updated.job_id, text=updated.text)
-            )
+            self._emit_delivery_unknown(updated)
         return updated
 
     def expire_stale_claims(self, *, now: datetime | None = None) -> list[JobRecord]:
         """claimed 超过租约 → delivery_unknown，不退回 queued，不重投。"""
         moment = now or self._clock()
-        changed: list[JobRecord] = []
-        for job in self._store.list_jobs():
-            if job.state != JobState.claimed:
-                continue
-            stamped = _parse_iso(job.updated_at) or _parse_iso(job.created_at)
-            if stamped is None:
-                unparsable = True
-            else:
-                unparsable = False
-                if stamped.tzinfo is None:
-                    stamped = stamped.replace(tzinfo=timezone.utc)
-                if moment - stamped < timedelta(seconds=self._claim_lease_s):
-                    continue
-            detail = "claim timestamp unparsable" if unparsable else "claim timeout"
-            try:
-                updated = self._store.update_if(
-                    job.job_id,
-                    expected={"state": JobState.claimed, "claim_id": job.claim_id},
-                    fields={
-                        "state": JobState.delivery_unknown,
-                        "updated_at": _iso(moment),
-                        "detail": detail,
-                    },
-                )
-            except LogicError as exc:
-                if exc.code == ErrorCode.conflict:
-                    continue
-                raise
-            self._events.publish(
-                ProductDeliveryUnknownEvent(job_id=updated.job_id, text=updated.text)
-            )
-            changed.append(updated)
+        changed = self._store.expire_stale_claims(
+            stale_after_s=self._claim_lease_s,
+            moment=moment,
+        )
+        for updated in changed:
+            self._emit_delivery_unknown(updated)
         return changed
 
     def recover(self) -> list[JobRecord]:
@@ -245,8 +226,14 @@ class JobsService:
                 if exc.code == ErrorCode.conflict:
                     continue
                 raise
-            self._events.publish(
-                ProductDeliveryUnknownEvent(job_id=updated.job_id, text=updated.text)
-            )
+            self._emit_delivery_unknown(updated)
             changed.append(updated)
         return changed
+
+
+def claim_job(service: JobsService, *, timeout_s: float | None = None) -> JobClaimed | None:
+    """函数式入口，委托给 JobsService.claim_job。"""
+    return service.claim_job(timeout_s=timeout_s)
+
+
+__all__ = ["Clock", "JobsService", "claim_job"]
