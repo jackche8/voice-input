@@ -1,4 +1,4 @@
-"""真实模型链路：4b 未下载、长录音未达标时必须显式 skip，不得报绿。"""
+"""真实模型链路：4b 未下载时必须显式 skip，不得报绿。测试不得在 live 识别服务上建会话（单会话独占，会挡住用户语音）。"""
 from __future__ import annotations
 
 import os
@@ -8,8 +8,6 @@ from pathlib import Path
 import httpx
 import pytest
 
-from _asr import AsrSidecarClient
-from _contracts import ASR_STREAMING_BLOCKERS, SIDECAR_DEFAULT_BASE_URL
 from _ocr import DEFAULT_OCR_LANG, get_cached_languages
 from _ocr_layout import extract_ocr_layout
 from _ollama import DEFAULT_OLLAMA_BASE_URL, OllamaClient
@@ -111,19 +109,3 @@ def test_real_qwen35_4b_translates_ocr_screens_in_budget_batches(name: str) -> N
             assert "".join(code_t.split()) == "".join(code.split()), (source, translated)
             if comment:
                 assert comment_t != comment and any(is_cjk_or_fullwidth(ch) for ch in comment_t), (source, translated)
-
-
-def test_real_asr_sidecar_not_claimed_green_for_long_audio():
-    """若 sidecar 未在监听则 skip；即使可连，也不得把长录音路径标为通过。"""
-    client = AsrSidecarClient(base_url=SIDECAR_DEFAULT_BASE_URL, timeout_s=2)
-    try:
-        try:
-            client.create_session()
-        except Exception as exc:
-            pytest.skip(f"ASR sidecar 未在 {SIDECAR_DEFAULT_BASE_URL} 监听或不可用: {exc}")
-    finally:
-        client.close()
-    pytest.skip(
-        "sidecar 可连，但长录音 0.5–1s / 120s 路径尚未达标，L1 不跑长录音、不报绿: "
-        + " ".join(ASR_STREAMING_BLOCKERS)
-    )

@@ -5,9 +5,9 @@ portal 信号才会在 GTK 主循环里派发。
 """
 from __future__ import annotations
 
+import os
+from collections.abc import Mapping
 from pathlib import Path
-
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 PORTAL_NAME = "org.freedesktop.portal.Desktop"
 PORTAL_PATH = "/org/freedesktop/portal/desktop"
@@ -15,9 +15,23 @@ GLOBAL_SHORTCUTS_IFACE = "org.freedesktop.portal.GlobalShortcuts"
 SCREENSHOT_IFACE = "org.freedesktop.portal.Screenshot"
 
 # 本应用向 portal host Registry 登记的 app id（GNOME 全局快捷键授权表里以它为键）。唯一来源。
-DAEMON_APP_ID = "ollama-voice-input-daemon"  # 装了 ~/.local/share/applications/<id>.desktop 时
-FALLBACK_APP_ID = "ollama-voice-input"  # 未装时退回项目内 .desktop
-OWN_APP_IDS = (DAEMON_APP_ID, FALLBACK_APP_ID)
+DAEMON_APP_ID = "ollama-voice-input-daemon"
+# 旧版本在没有上面条目时曾退回项目根 .desktop 用这个 id 登记过；只用于把这些旧登记认作自己的（冲突检查）
+LEGACY_APP_ID = "ollama-voice-input"
+OWN_APP_IDS = (DAEMON_APP_ID, LEGACY_APP_ID)
+PORTAL_APP_ENTRY = f"{DAEMON_APP_ID}.desktop"
+
+
+def portal_app_entry_candidates(environ: Mapping[str, str]) -> list[Path]:
+    """XDG 规范的应用条目查找顺序：$XDG_DATA_HOME（缺省 ~/.local/share）在前，再 $XDG_DATA_DIRS（缺省 /usr/local/share:/usr/share）。"""
+    home = environ.get("XDG_DATA_HOME", "")
+    data_home = Path(home) if home and Path(home).is_absolute() else Path(environ.get("HOME", str(Path.home()))) / ".local/share"
+    dirs = [Path(d) for d in (environ.get("XDG_DATA_DIRS") or "/usr/local/share:/usr/share").split(":") if d and Path(d).is_absolute()]
+    return [base / "applications" / PORTAL_APP_ENTRY for base in (data_home, *dirs)]
+
+
+def find_portal_app_entry(environ: Mapping[str, str]) -> Path | None:
+    return next((path for path in portal_app_entry_candidates(environ) if path.is_file()), None)
 
 _dbus_loop_ready = False
 
@@ -82,11 +96,10 @@ def register_portal_host_app(bus=None, *, force: bool = False, dbus_mod=None) ->
             bus = dbus.SessionBus()
         obj = bus.get_object(PORTAL_NAME, PORTAL_PATH)
         iface = dbus.Interface(obj, HOST_REGISTRY_IFACE)
-        desktop = Path.home() / f".local/share/applications/{DAEMON_APP_ID}.desktop"
+        desktop = find_portal_app_entry(os.environ)
+        if desktop is None:  # 应用启动时 ensure_portal_app_entry 会写好；仍没有就如实失败，不退回别的 app id
+            raise FileNotFoundError(f"XDG 数据目录里没有 {PORTAL_APP_ENTRY}（{portal_app_entry_candidates(os.environ)[0].parent}）")
         app_id = DAEMON_APP_ID
-        if not desktop.exists():
-            desktop = PROJECT_ROOT / f"{FALLBACK_APP_ID}.desktop"
-            app_id = FALLBACK_APP_ID
         options = dbus.Dictionary(
             {"desktop_entry": dbus.String(str(desktop))}, signature="sv"
         )

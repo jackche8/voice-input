@@ -191,8 +191,9 @@ REQUIRED_API_PATHS = (
     "/api/v1/config",
     "/api/v1/status",
     "/api/setup/check",
-    "/api/setup/tasks",
-    "/api/setup/tasks/{task_id}",
+    "/api/setup/install-all",
+    "/api/v1/components",
+    "/api/v1/components/{name}/retry",
     "/api/v1/lan-access",
 )
 
@@ -479,7 +480,7 @@ def _write_aggregate(results: list[tuple[str, dict]], *, exit_code: int) -> Path
         "- P2 long-audio refresh closed by r9 GPU evidence (user scope 0.5-1s, ~1.5s at word/sentence joins);",
         "  official sidecar opt-in tests still skip here and are not re-run by this gate.",
         "- Untested: official 4b (P3/P4) and coexistence, real TLS WebKit handshake,",
-        "  mapped window focus, real mic/clipboard/keyboard, live 17945/17946/11434, production cutover.",
+        "  mapped window focus, real mic/clipboard/keyboard, the live app's ports (_ports.py), production cutover.",
     ]
     path = dest_dir / "summary.txt"
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")

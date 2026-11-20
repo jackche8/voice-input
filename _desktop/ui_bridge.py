@@ -1,10 +1,8 @@
-"""跨平台桌面 UI 线程派发桥、Qt 平台选择、框选/浮窗打开与浏览器辅助（供 daemon.py 薄入口复用）。"""
+"""跨平台桌面 UI 线程派发桥、Qt 平台选择、框选/浮窗打开（供 daemon.py 薄入口复用）。"""
 from __future__ import annotations
 
 import os
 import sys
-import threading
-import webbrowser
 from collections.abc import Callable
 
 from PySide6.QtCore import QObject, Qt, Signal, Slot
@@ -90,8 +88,3 @@ class QtUiBridge(QObject):
     @Slot(object)
     def _run(self, fn: Callable[[], None]) -> None:
         fn()
-
-
-def open_url_async(url: str) -> None:
-    """后台线程打开默认浏览器，不阻塞 Qt 主循环。"""
-    threading.Thread(target=lambda: webbrowser.open(url), name="open-url", daemon=True).start()

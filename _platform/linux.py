@@ -149,6 +149,9 @@ class LinuxHotkeyRig:
         self._manager.reset_voice()
 
 
+AUTOSTART_ENTRY = "ollama-voice-input.desktop"
+
+
 class LinuxPlatformAdapter:
     os_name = "linux"
 
@@ -407,6 +410,17 @@ class LinuxPlatformAdapter:
         if workdir is not None:
             lines.append(f"Path={workdir}")
         return "\n".join(lines) + "\n"
+
+    def configure_autostart(self, *, enabled: bool, command: Sequence[str], config_home: Path | None = None) -> None:
+        """当前用户的 XDG 自启条目 `$XDG_CONFIG_HOME/autostart/ollama-voice-input.desktop`（缺省 ~/.config）。"""
+        xdg = os.environ.get("XDG_CONFIG_HOME", "")
+        base = config_home or (Path(xdg) if xdg and Path(xdg).is_absolute() else Path.home() / ".config")
+        entry = base / "autostart" / AUTOSTART_ENTRY
+        if not enabled:
+            entry.unlink(missing_ok=True)
+            return
+        entry.parent.mkdir(parents=True, exist_ok=True)
+        entry.write_text(self.render_autostart_desktop(command), encoding="utf-8")
 
     def play_beep(self, freq: float = 440, duration: float = 0.1, volume: float = 0.3) -> None:
         common_play_beep(freq=freq, duration=duration, volume=volume)

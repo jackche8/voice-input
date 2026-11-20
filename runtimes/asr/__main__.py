@@ -1,4 +1,4 @@
-"""显式启动 sidecar。默认只绑 127.0.0.1:17946；不带 --load 不会占 GPU。
+"""显式启动 sidecar。默认只绑 127.0.0.1 上的识别服务端口（_ports.DEFAULT_ASR_PORT）；不带 --load 不会占 GPU。
 
 支持 --backend {auto,vllm,transformers}：Linux+CUDA+vLLM 环境自动走 vllm，
 Windows / macOS / 纯 CPU 环境自动走跨平台 transformers（CUDA / MPS / CPU）。
@@ -11,6 +11,7 @@ import signal
 import sys
 from pathlib import Path
 
+from _ports import DEFAULT_ASR_PORT
 from runtimes.asr.process_guard import ChildProcessGuard
 from runtimes.asr.protocol import (
     DEFAULT_BACKEND,
@@ -18,7 +19,6 @@ from runtimes.asr.protocol import (
     DEFAULT_GPU_MEMORY_UTILIZATION,
     DEFAULT_HOST,
     DEFAULT_MAX_MODEL_LEN,
-    DEFAULT_PORT,
     DEFAULT_UNFIXED_CHUNK_NUM,
     DEFAULT_UNFIXED_TOKEN_NUM,
     SUPPORTED_BACKENDS,
@@ -29,7 +29,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Qwen3-ASR sidecar (loopback only)")
     parser.add_argument("command", choices=("serve",), help="serve 启动 HTTP 宿主")
     parser.add_argument("--host", default=DEFAULT_HOST, help="只允许 127.0.0.1 / ::1")
-    parser.add_argument("--port", type=int, default=DEFAULT_PORT)
+    parser.add_argument("--port", type=int, default=DEFAULT_ASR_PORT)
     parser.add_argument(
         "--backend",
         choices=SUPPORTED_BACKENDS,
@@ -43,7 +43,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--load", action="store_true", help="启动即加载模型；省略则拒绝推理")
     parser.add_argument("--warmup", action="store_true", help="加载后用短静音预热")
-    parser.add_argument("--model", type=Path, default=None)
+    parser.add_argument("--model", type=Path, required=True, help="模型目录（看护层传 AppPaths.asr_model_dir）")
     parser.add_argument(
         "--gpu-memory-utilization",
         type=float,
@@ -81,11 +81,11 @@ def main(argv: list[str] | None = None) -> int:
     engine = None
     exit_code = 0
     try:
-        from runtimes.asr.engine import DEFAULT_MODEL_PATH, OfficialEngine
+        from runtimes.asr.engine import OfficialEngine
         from runtimes.asr.server import create_sidecar_app
 
         engine = OfficialEngine(
-            model_path=args.model or DEFAULT_MODEL_PATH,
+            model_path=args.model,
             backend=args.backend,
             device=args.device,
             gpu_memory_utilization=args.gpu_memory_utilization,

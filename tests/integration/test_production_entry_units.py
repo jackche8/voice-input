@@ -1,132 +1,26 @@
-"""§8.2-9 生产入口与启动链快照：薄 app.py / daemon.py、systemd 单元渲染、启动脚本。
+"""§8.2-9 生产入口快照：薄 app.py / daemon.py、依赖清单与静态页。
 
-不调用 systemctl、不启动服务、不碰 live 17945/17946/11434；单元渲染到临时目录。
+不调用 systemctl、不启动服务、不碰在用的服务端口。systemd 单元、启动脚本与证书脚本已在 v3.4 阶段一删除（入口即应用本身）。
 """
 from __future__ import annotations
 
 import ast
 import importlib
-import subprocess
 from pathlib import Path
 
-import pytest
 from fastapi.testclient import TestClient
 
-from _v3.production import ACCEPTANCE_ENV, CODE_ROOT, build_production_app
-from _v3.runtime import UnmetRuntimeGates
-from _v3.units import UNIT_NAMES, render_all, write_units
+from _paths import PROGRAM_ROOT
+from _v3.production import build_production_app
 
-ROOT = CODE_ROOT
+ROOT = PROGRAM_ROOT
 LEGACY_MARKERS = ("faster_whisper", "deep_translator", "web_input", "/api/transcribe", "whisper_model", "WhisperModel")
-
-
-def _rendered(tmp_path: Path, cuda: str = "") -> dict[str, str]:
-    return render_all(project_dir=tmp_path / "proj", venv=tmp_path / "proj" / ".venv", cuda_libs=cuda)
-
-
-def test_units_render_all_four_without_placeholders(tmp_path):
-    units = _rendered(tmp_path)
-    assert set(units) == set(UNIT_NAMES)
-    for name, text in units.items():
-        assert "@" not in "".join(l for l in text.splitlines() if not l.startswith("#")), name
-        # 不得残留旧 unit 写死的项目路径 / python3.12 NVIDIA 库路径
-        assert "/opt/ollama-voice-input/.venv/lib/python3.12" not in text, name
-        assert "python3.12/site-packages/nvidia" not in text, name
-        assert "qwen2.5:7b" not in text, name
-        for line in text.splitlines():
-            if line.startswith("ExecStart"):
-                assert "sg" not in line.split(), (name, line)
-
-
-def test_server_unit_https_factory_and_dynamic_cuda(tmp_path):
-    server = _rendered(tmp_path, cuda="/x/nvidia/cublas/lib")["ollama-voice-server.service"]
-    assert "--factory app:create_production_app" in server
-    assert "--ssl-certfile" in server and "--ssl-keyfile" in server and "--port 17945" in server
-    assert "-m _platform.certs --cert-dir" in server
-    assert "ensure_tls_certificates" not in server
-    assert "Environment=LD_LIBRARY_PATH=/x/nvidia/cublas/lib" in server
-    assert ACCEPTANCE_ENV not in server  # 正式单元不带验收开关
-    plain = _rendered(tmp_path)["ollama-voice-server.service"]
-    assert "LD_LIBRARY_PATH" not in plain
-
-
-def test_daemon_unit_keeps_notify_watchdog_and_no_sg(tmp_path):
-    daemon = _rendered(tmp_path)["ollama-voice-daemon.service"]
-    exec_line = next(l for l in daemon.splitlines() if l.startswith("ExecStart="))
-    argv = exec_line.split("=", 1)[1].split()
-    assert argv == [str(tmp_path / "proj" / ".venv" / "bin" / "python3"), str((tmp_path / "proj").resolve() / "daemon.py")]
-    for line in ("Type=notify", "NotifyAccess=main", "WatchdogSec=20", "WantedBy=graphical-session.target"):
-        assert line in daemon
-    assert "GDK_BACKEND" not in daemon
-
-
-def test_asr_and_ollama_units_loopback_and_guarded(tmp_path):
-    units = _rendered(tmp_path)
-    asr = units["ollama-voice-asr.service"]
-    assert "-m runtimes.asr serve --host 127.0.0.1 --port 17946" in asr
-    assert "--gpu-memory-utilization 0.45" in asr and "--max-model-len 4096" in asr
-    assert "ConditionPathExists=" in asr and "Qwen3-ASR-1.7B/config.json" in asr
-    assert "HF_HUB_OFFLINE=1" in asr
-    ollama = units["ollama-voice-ollama.service"]
-    assert "OLLAMA_HOST=127.0.0.1:17947" in ollama and "ollama-bin-0.40.16/bin/ollama serve" in ollama
-
-
-def test_write_units_to_temp_dir_only(tmp_path):
-    out = tmp_path / "user-units"
-    written = write_units(out, _rendered(tmp_path))
-    assert sorted(p.name for p in written) == sorted(UNIT_NAMES)
-    assert all(p.parent == out for p in written)
-
-
-@pytest.mark.parametrize("script", ["start.sh", "install.sh", "restart.sh", "uninstall.sh", "gen_cert.sh", "scripts/start_macos.sh"])
-def test_scripts_parse(script):
-    subprocess.run(["bash", "-n", str(ROOT / script)], check=True, timeout=30)
-
-
-def test_cross_platform_cert_cli_and_ps1_hardening():
-    for rel in ("gen_cert.sh", "scripts/start_macos.sh", "scripts/start.ps1"):
-        text = (ROOT / rel).read_text(encoding="utf-8")
-        assert "-m _platform.certs --cert-dir" in text, rel
-        assert "-c " not in text or "ensure_tls_certificates" not in text, rel
-
-    ps1 = (ROOT / "scripts/start.ps1").read_text(encoding="utf-8")
-    assert "function Quote-WinArg" in ps1
-    assert "Quote-WinArg (Join-Path $ProjectDir \"daemon.py\")" in ps1
-    # finally 恢复旧 OVI_ACCEPTANCE_RUN 必须位于全部 Start-Process 之后，避免非 -Acceptance 模式向子进程泄漏
-    assert ps1.rfind("finally {") > ps1.rfind("Start-Process -FilePath $DaemonBin")
-
-
-def test_start_script_snapshot():
-    text = (ROOT / "start.sh").read_text(encoding="utf-8")
-    assert "qwen2.5:7b" not in text and "curl -fsSL" not in text and "http://127.0.0.1:17945" not in text
-    assert "https://127.0.0.1:17945/setup" in text
-    assert "ollama-voice-asr.service" in text and "ollama-voice-ollama.service" in text
-    assert "--acceptance" in text and "OVI_ACCEPTANCE_RUN=1" in text
-    assert "_activation.py\" check" in text  # 门闩先于副作用（行为见 test_entry_scripts_gate）
-    for key in ("Ctrl+Alt+Z", "Ctrl+Alt+X", "Ctrl+Alt+R"):
-        assert key in text
-
-
-def test_install_script_snapshot():
-    text = (ROOT / "install.sh").read_text(encoding="utf-8")
-    assert "-m _v3.units" in text
-    assert "uvicorn app:app" not in text and "whisper" not in text.lower()
-    assert "ollama-voice-input-daemon.desktop" in text  # portal app id 文件保留
-    for pkg in ("xclip", "python3-dbus", "xdotool"):
-        assert pkg in text
-    assert "curl -fsSL https://ollama.com/install.sh" not in text
-    assert "https://127.0.0.1:17945/setup" in text
 
 
 def test_requirements_drop_whisper_keep_av():
     req = (ROOT / "requirements.txt").read_text(encoding="utf-8")
     assert "faster-whisper" not in req and "deep-translator" not in req
     assert "av==18.0.0" in req
-
-
-def test_desktop_file_keywords():
-    text = (ROOT / "ollama-voice-input.desktop").read_text(encoding="utf-8")
-    assert "whisper" not in text and "./start.sh" in text
 
 
 def test_old_static_pages_removed_only_v3_served():
@@ -163,13 +57,21 @@ def test_daemon_entry_is_thin():
             assert all(not a.name.startswith("_linux") for a in node.names)
         elif isinstance(node, ast.ImportFrom):
             assert not (node.module or "").startswith("_linux")
-    for marker in LEGACY_MARKERS + ("/api/web_input", "TranslationOverlay", "StatusBar(", "import gi", "WebKit2"):
+    for marker in LEGACY_MARKERS + ("/api/web_input", "TranslationOverlay", "StatusBar(", "import gi", "WebKit2", "sd_notify",
+                                    "open_url_async", "= acquire_singleton_lock("):
         assert marker not in src
     for needed in (
         "_desktop.",
         "_platform",
         "_ui_desktop",
-        'notify_systemd("READY=1")',
+        "create_supervisor(",
+        "MainWindow(",
+        "SingleInstanceServer(",
+        "run_as_second_instance(paths)",
+        "on_retry_server=lambda: supervisor.retry(\"server\")",
+        "on_config_changed=sync_autostart",
+        "ensure_portal_app_entry(paths, os.environ)",
+        "supervisor.stop(",
         "CaptureFlow",
         "DeliveryLoop",
         "VoiceHudOverlay",
@@ -178,24 +80,26 @@ def test_daemon_entry_is_thin():
         "event_loop.request_stop()",
         # 快捷键组件失败经现有 error 事件进底栏，事件流每次连上重发（main() 需要真实 Qt/平台/单例锁，测试里跑不了，只能扫接线）
         "on_error=status.set_hotkey_error",
-        "on_connected=status.resend_hotkey_error",
+        "on_connected=status.resend_on_connect",
     ):
         assert needed in src
     assert src.index("event_loop.request_stop()") < src.index("api.close()") < src.index("event_loop.stop(")
 
 
-def test_build_production_app_gated_then_acceptance(tmp_path):
-    root = tmp_path / "data"
-    root.mkdir()
-    env = {"XDG_SESSION_TYPE": "x11"}
-    with pytest.raises(UnmetRuntimeGates):
-        build_production_app(data_root=root, environ=env)
-    app, paths = build_production_app(data_root=root, environ={**env, ACCEPTANCE_ENV: "1"})
-    assert paths.data_root == root.resolve()
+def test_build_production_app_binds_environ_roots_and_serves_pages(tmp_path):
+    env = {
+        "XDG_SESSION_TYPE": "x11",
+        "HOME": str(tmp_path / "home"),
+        "XDG_CONFIG_HOME": str(tmp_path / "config"),
+        "XDG_DATA_HOME": str(tmp_path / "data"),
+        "XDG_RUNTIME_DIR": str(tmp_path / "run"),
+    }
+    app, paths = build_production_app(environ=env)
+    assert paths.live and paths.data_root == tmp_path / "data" / "ollama-voice-input"
     assert paths.token.is_file() and (paths.token.stat().st_mode & 0o777) == 0o600
     client = TestClient(app, client=("127.0.0.1", 50000), base_url="https://127.0.0.1:17945")
     body = client.get("/api/v1/status", headers={"Origin": "https://127.0.0.1:17945"}).json()
-    assert body["unmet_gates"], "验收运行仍必须显示未达门闩"
+    assert body["ok"] is True and set(body) == {"ok", "service", "injected"}
     assert client.get("/setup").status_code == 200
     for old in ("/api/transcribe", "/api/web_input/poll", "/voice_setup", "/api_docs"):
         assert client.get(old).status_code in (403, 404, 405), old

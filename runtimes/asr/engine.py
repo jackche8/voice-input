@@ -42,8 +42,6 @@ from runtimes.asr.stream_step import (
     numpy_pcm_ops,
 )
 
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_MODEL_PATH = PROJECT_ROOT / ".cache/v3-feasibility/models/Qwen3-ASR-1.7B"
 MIN_INPUT_S = 0.5
 
 
@@ -195,7 +193,7 @@ class OfficialEngine:
     def __init__(
         self,
         *,
-        model_path: Path = DEFAULT_MODEL_PATH,
+        model_path: Path,  # 由看护层按 AppPaths.asr_model_dir 显式传入，无默认位置
         backend: str = DEFAULT_BACKEND,
         device: str | None = None,
         gpu_memory_utilization: float = DEFAULT_GPU_MEMORY_UTILIZATION,
@@ -520,7 +518,6 @@ class OfficialEngine:
 
 __all__ = [
     "AsrEngine",
-    "DEFAULT_MODEL_PATH",
     "MIN_INPUT_S",
     "OfficialEngine",
     "pcm_s16le_to_float32",

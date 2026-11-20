@@ -1,6 +1,6 @@
 """本机 jobs HTTP 客户端。只 claim/ack/查询，不重做业务决策。
 
-默认校验项目根 CA / 服务端证书，禁止 verify=False，禁用系统代理劫持回环（trust_env=False）。
+必须显式给出本应用证书（`_paths.AppPaths.cert`）以校验 CA，禁止 verify=False，禁用系统代理劫持回环（trust_env=False）。
 """
 from __future__ import annotations
 
@@ -11,10 +11,9 @@ from typing import Any
 import httpx
 
 from _inject import AckResult, ClaimAckLog
+from _ports import DEFAULT_SERVER_PORT
 
-PROJECT_ROOT = Path(__file__).resolve().parent
-DEFAULT_CERT = PROJECT_ROOT / "certs" / "cert.pem"
-DEFAULT_BASE_URL = "https://127.0.0.1:17945"
+DEFAULT_BASE_URL = f"https://127.0.0.1:{DEFAULT_SERVER_PORT}"
 
 
 def resolve_verify_ca(cert: Path | str | None) -> Path:
@@ -44,7 +43,7 @@ class JobsClient:
         self,
         base_url: str = DEFAULT_BASE_URL,
         *,
-        cert: Path | None = DEFAULT_CERT,
+        cert: Path | None = None,
         transport: httpx.BaseTransport | None = None,
         client: httpx.Client | None = None,
         acks: ClaimAckLog | None = None,

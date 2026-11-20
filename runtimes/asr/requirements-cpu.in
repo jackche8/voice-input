@@ -1,0 +1,5 @@
+# torch 取自 PyTorch 官方 CPU 发行包直链（Linux 上 PyPI 的 torch 是 CUDA 版）；不加额外索引，其余依赖全部来自 PyPI。
+-r requirements.txt
+torch @ https://download.pytorch.org/whl/cpu/torch-2.9.1%2Bcpu-cp312-cp312-manylinux_2_28_x86_64.whl ; sys_platform == "linux" and platform_machine == "x86_64"
+torch @ https://download.pytorch.org/whl/cpu/torch-2.9.1%2Bcpu-cp312-cp312-manylinux_2_28_aarch64.whl ; sys_platform == "linux" and platform_machine == "aarch64"
+torch @ https://download.pytorch.org/whl/cpu/torch-2.9.1%2Bcpu-cp312-cp312-win_amd64.whl ; sys_platform == "win32"

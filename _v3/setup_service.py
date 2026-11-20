@@ -1,6 +1,7 @@
-"""设置页业务：把真实探测与作业状态组合成 SetupCheckResponse，并决定下一步动作。
+"""设置页业务：把只读探测、安装任务状态与看护层组件快照组合成 SetupCheckResponse。
 
-就绪只来自探测事实；作业 succeeded 也要以复查后的探测为准。
+是否在运行只看看护层上报的组件状态（唯一来源，服务端只缓存）；权重、模型、版本仍按探测事实；
+下载/安装进度来自安装任务；一键装齐的逐步进度在 install_all。
 """
 from __future__ import annotations
 
@@ -9,6 +10,9 @@ from dataclasses import dataclass
 
 from _contracts import (
     AsrSetupStatus,
+    ComponentName,
+    ComponentState,
+    ComponentStatus,
     OllamaSetupStatus,
     SetupCapability,
     SetupCheckResponse,
@@ -17,7 +21,9 @@ from _contracts import (
     SetupTaskKind,
     SetupTaskState,
 )
-from _v3.setup_probe import AsrWeightsProbe, OllamaProbe, SidecarProbe
+from _v3.component_routes import ComponentRegistry
+from _v3.setup_probe import AsrWeightsProbe, OllamaProbe
+from _v3.setup_sequence import InstallSequence
 from _v3.setup_tasks import SetupTaskManager
 
 
@@ -39,7 +45,6 @@ class SetupProbes:
     session: Callable[[], str]
     ollama: Callable[[], OllamaProbe]
     asr_weights: Callable[[], AsrWeightsProbe]
-    asr_sidecar: Callable[[], SidecarProbe]
     capabilities: Callable[[str], list[SetupCapability]]
 
 
@@ -51,11 +56,41 @@ def _failed(task: SetupTask | None) -> bool:
     return task is not None and task.state == SetupTaskState.failed
 
 
+ASR_LABEL = "语音识别服务"
+OLLAMA_LABEL = "Ollama 纠错/翻译服务"
+
+
+def component_message(label: str, status: ComponentStatus | None) -> str:
+    """组件当前状态的可见说明（运行与否只来自看护层上报）。"""
+    if status is None:
+        return f"{label}：尚未收到应用的组件状态（应用未运行或刚启动）"
+    reason = f"：{status.reason}" if status.reason else ""
+    return {
+        ComponentState.running: f"{label}运行中",
+        ComponentState.starting: f"{label}启动中",
+        ComponentState.not_installed: f"{label}未安装{reason}",
+        ComponentState.backing_off: f"{label}重启中（连续失败 {status.failures} 次{reason}）",
+        ComponentState.stopped: f"{label}已停止{reason}",
+    }[status.state]
+
+
+def _is_running(status: ComponentStatus | None) -> bool:
+    return status is not None and status.state == ComponentState.running
+
+
 class SetupService:
-    def __init__(self, *, probes: SetupProbes, tasks: SetupTaskManager, unmet_gates: Callable[[], list[str]]) -> None:
+    def __init__(
+        self,
+        *,
+        probes: SetupProbes,
+        tasks: SetupTaskManager,
+        sequence: InstallSequence,
+        components: ComponentRegistry,
+    ) -> None:
         self._probes = probes
         self.tasks = tasks
-        self._unmet_gates = unmet_gates
+        self.sequence = sequence
+        self._components = components
 
     def check(self) -> SetupCheckResponse:
         session = self._probes.session()
@@ -64,77 +99,55 @@ class SetupService:
             asr=self._asr_status(),
             ollama=self._ollama_status(),
             capabilities=self._probes.capabilities(session),
-            unmet_gates=self._unmet_gates(),
+            components=self._components.snapshot(),
+            install_all=self.sequence.status(),
         )
 
     def _asr_status(self) -> AsrSetupStatus:
         weights = self._probes.asr_weights()
-        sidecar = self._probes.asr_sidecar()
         download = self.tasks.latest(SetupTaskKind.asr_download)
-        start = self.tasks.latest(SetupTaskKind.asr_start)
-        running = sidecar.running and sidecar.loaded
+        component = self._components.get(ComponentName.asr)
         common = dict(
             weights_present=weights.complete,
-            sidecar_running=running,
+            sidecar_running=_is_running(component),
             size_label=size_label(weights.bytes_on_disk),
         )
         if _running(download):
             return AsrSetupStatus(status=SetupComponentState.downloading, progress=download.progress,
-                                  message=download.message, task_id=download.task_id, **common)
+                                  message=download.message, **common)
         if not weights.complete:
             if _failed(download):
-                return AsrSetupStatus(status=SetupComponentState.failed, message=download.message,
-                                      action=SetupTaskKind.asr_download, task_id=download.task_id, **common)
+                return AsrSetupStatus(status=SetupComponentState.failed, message=download.message, **common)
             return AsrSetupStatus(status=SetupComponentState.missing,
-                                  message="识别模型未下载完整：" + "、".join(weights.missing),
-                                  action=SetupTaskKind.asr_download, **common)
-        # 权重齐全：status 只表示权重（ready）；运行与否只看 sidecar_running（=running∧loaded），message 按实时事实区分。
-        ready = SetupComponentState.ready
-        if running:
-            return AsrSetupStatus(status=ready, message="识别服务已加载", **common)
-        if _running(start):
-            return AsrSetupStatus(status=ready, message=start.message or "正在启动识别服务",
-                                  task_id=start.task_id, **common)
-        if sidecar.running:
-            # 进程已响应但模型未加载完：不再给启动动作，避免重复加载
-            return AsrSetupStatus(status=ready, message="识别服务加载中（模型尚未加载完成）", **common)
-        if _failed(start):
-            # 最近一次启动作业失败且服务当前仍未响应：显示失败原因；服务之后起来时上面分支优先，不被旧失败压住
-            return AsrSetupStatus(status=ready, message=f"识别服务启动失败：{start.message}",
-                                  action=SetupTaskKind.asr_start, task_id=start.task_id, **common)
-        detail = f"（{sidecar.error}）" if sidecar.error else ""
-        return AsrSetupStatus(status=ready, message=f"识别服务未运行{detail}", action=SetupTaskKind.asr_start, **common)
+                                  message="识别模型未下载完整：" + "、".join(weights.missing), **common)
+        # 权重齐全：status 只表示权重（ready）；运行与否看 sidecar_running，说明来自看护层组件状态
+        return AsrSetupStatus(status=SetupComponentState.ready, message=component_message(ASR_LABEL, component), **common)
 
     def _ollama_status(self) -> OllamaSetupStatus:
         probe = self._probes.ollama()
+        component = self._components.get(ComponentName.ollama)
         install = self.tasks.latest(SetupTaskKind.ollama_install)
-        start = self.tasks.latest(SetupTaskKind.ollama_start)
         pull = self.tasks.latest(SetupTaskKind.ollama_pull)
-        base = dict(installed=probe.installed, version=probe.version, running=probe.running)
-        if not probe.running:
-            if _running(install) or _running(start):
-                task = install if _running(install) else start
-                return OllamaSetupStatus(model_status=SetupComponentState.missing, progress=task.progress,
-                                         message=task.message, task_id=task.task_id, **base)
+        base = dict(installed=probe.installed, version=probe.version, running=_is_running(component))
+        if not _is_running(component):
+            if _running(install):
+                return OllamaSetupStatus(model_status=SetupComponentState.missing, progress=install.progress,
+                                         message=install.message, **base)
             if not probe.installed:
-                failed = install if _failed(install) else None
                 return OllamaSetupStatus(model_status=SetupComponentState.missing,
-                                         message=failed.message if failed else "未安装用户级 Ollama",
-                                         action=SetupTaskKind.ollama_install,
-                                         task_id=failed.task_id if failed else None, **base)
-            failed = start if _failed(start) else None
+                                         message=install.message if _failed(install) else "未安装用户级 Ollama", **base)
             return OllamaSetupStatus(model_status=SetupComponentState.missing,
-                                     message=failed.message if failed else (probe.error or "Ollama 未运行"),
-                                     action=SetupTaskKind.ollama_start,
-                                     task_id=failed.task_id if failed else None, **base)
+                                     message=component_message(OLLAMA_LABEL, component), **base)
         if probe.has_model:
             return OllamaSetupStatus(model_status=SetupComponentState.ready, size_label=size_label(probe.model_size),
                                      message="纠错/翻译模型已就绪", **base)
         if _running(pull):
             return OllamaSetupStatus(model_status=SetupComponentState.downloading, progress=pull.progress,
-                                     message=pull.message, task_id=pull.task_id, **base)
+                                     message=pull.message, **base)
         if _failed(pull):
-            return OllamaSetupStatus(model_status=SetupComponentState.failed, message=pull.message,
-                                     action=SetupTaskKind.ollama_pull, task_id=pull.task_id, **base)
-        return OllamaSetupStatus(model_status=SetupComponentState.missing, message="纠错/翻译模型未下载",
-                                 action=SetupTaskKind.ollama_pull, **base)
+            return OllamaSetupStatus(model_status=SetupComponentState.failed, message=pull.message, **base)
+        return OllamaSetupStatus(model_status=SetupComponentState.missing,
+                                 message=probe.error or "纠错/翻译模型未下载", **base)
+
+
+__all__ = ["ASR_LABEL", "OLLAMA_LABEL", "SetupProbes", "SetupService", "component_message", "size_label"]

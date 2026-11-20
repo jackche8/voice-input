@@ -9,7 +9,6 @@
     translate: "translate_api_v1_translate_post",
     ocrTranslate: "ocr_translate_api_v1_ocr_translate_post",
     configGet: "get_config_api_v1_config_get",
-    status: "status_api_v1_status_get",
     check: "setup_check_api_setup_check_get",
     history: "history_api_v1_history_get",
     lanAccess: "lan_access_api_v1_lan_access_get"
@@ -63,7 +62,6 @@
       client: client,
       context: context,
       setState: setState,
-      getState: getState,
       isDestroyed: function () { return destroyed; },
       pollInterval: opts.pollInterval,
       setTimeout: opts.setTimeout,
@@ -121,34 +119,28 @@
       });
       return Promise.all([
         client.call(OP.check),
-        client.call(OP.status),
         client.call(OP.configGet),
         client.call(OP.history, { query: { limit: HISTORY_PAGE_SIZE, offset: 0 } }),
         client.call(OP.lanAccess)
       ]).then(function (results) {
         if (destroyed || reqId !== loadReqId) return;
-        var mapped = root.mapReadiness(results[0], results[1]);
-        var patch = {
+        var mapped = root.mapReadiness(results[0]);
+        var patch = Object.assign({
           connection: "connected",
           connectionError: null,
           error: null,
           message: "",
-          statusNotice: mapped.statusNotice,
-          unmetGates: mapped.gates,
-          asr: mapped.asr,
-          ollama: mapped.ollama,
-          capabilities: mapped.capabilities,
           apiPaths: root.mapApiPaths(catalog),
           aboutText: "本地运行。组件状态来自设置检查，不把检查成功或注入标记当成已就绪。",
-          history: root.applyHistory(results[3]),
+          history: root.applyHistory(results[2]),
           keywordsSaved: false,
           targetLangSaved: false,
           hotkeysSaved: false
-        };
+        }, root.readinessPatch(mapped));
         if (opts.pageOrigin) patch.serviceUrl = String(opts.pageOrigin);
-        root.applyConfig(patch, results[2]);
-        if (results[4]) {
-          var lanMapped = root.mapLanAccess(results[4]);
+        root.applyConfig(patch, results[1]);
+        if (results[3]) {
+          var lanMapped = root.mapLanAccess(results[3]);
           patch.lanEntries = storeLan(lanMapped);
           patch.lanMessage = lanMapped.message || "";
           patch.tokenMasked = lanMapped.tokenMasked;
@@ -615,13 +607,12 @@
       start: function () { return loadAll(); },
       loadAll: loadAll,
       saveConfig: setupActions.saveConfig,
-      startTask: setupActions.startTask,
       destroy: destroy,
       _debug: {
         getLanToken: function () { return lanToken; },
         getLanUrls: function () { return lanUrls.slice(); },
         isDestroyed: function () { return destroyed; },
-        polling: function () { return setupActions.getPollingTaskId(); }
+        polling: function () { return setupActions.isPolling(); }
       }
     };
   }

@@ -1,16 +1,30 @@
-/* 设置面板业务动作：任务启动/轮询/取消、失败叠加与配置持久化。
+/* 设置面板业务动作：一键装齐、组件重试、进行中重读设置检查与配置持久化。
  * 所有接口经由 OpenAPI catalog 按 operationId 派生，不手写接口路径，不使用 Web Storage。
+ * 进度与组件状态只来自 setup/check；前端不推算某步是否完成。
  */
 (function (root) {
   "use strict";
 
   var OP = {
     check: "setup_check_api_setup_check_get",
-    taskStart: "setup_task_start_api_setup_tasks_post",
-    taskGet: "setup_task_get_api_setup_tasks__task_id__get",
-    status: "status_api_v1_status_get",
+    installAll: "setup_install_all_api_setup_install_all_post",
+    componentRetry: "retry_component_api_v1_components__name__retry_post",
     configPost: "post_config_api_v1_config_post"
   };
+
+  /* 一键装齐每秒写一次步骤进度，设置检查每次都实时探测；重读不必比这更密。 */
+  var DEFAULT_POLL_MS = 1000;
+
+  /* 进行中 = 一键装齐在跑，或有组件正在启动 / 等待重启；进行中才继续重读。 */
+  var BUSY_COMPONENT_STATES = ["starting", "backing_off"];
+
+  function isBusy(mapped) {
+    if (!mapped) return false;
+    if (mapped.installAll && mapped.installAll.state === "running") return true;
+    return (mapped.components || []).some(function (item) {
+      return BUSY_COMPONENT_STATES.indexOf(item.state) >= 0;
+    });
+  }
 
   function formatErr(err) {
     var labels = (typeof V3 !== "undefined" && V3.labels) ? V3.labels : null;
@@ -39,192 +53,74 @@
     var client = opts.client;
     var context = opts.context;
     var setState = typeof opts.setState === "function" ? opts.setState : function () {};
-    var getState = typeof opts.getState === "function" ? opts.getState : function () { return {}; };
     var isDestroyed = typeof opts.isDestroyed === "function" ? opts.isDestroyed : function () { return false; };
-    var pollInterval = opts.pollInterval != null ? opts.pollInterval : 500;
+    var pollInterval = opts.pollInterval != null ? opts.pollInterval : DEFAULT_POLL_MS;
     var pollTimer = null;
-    var pollTaskId = null;
     var pollGeneration = 0;
 
     function stopPoll() {
       unschedule(pollTimer, opts);
       pollTimer = null;
-      pollTaskId = null;
       pollGeneration += 1;
     }
 
-    function getPollingTaskId() {
-      return pollTaskId;
+    function isPolling() {
+      return pollTimer != null;
     }
 
-    function applyTask(task) {
-      if (isDestroyed() || !task) return;
-      var state = getState();
-      var next = root.applyTaskToModels(state.asr, state.ollama, task);
-      var notice = task.state === "failed"
-        ? (task.message || (task.error ? String(task.error) : "任务失败"))
-        : (task.message || state.statusNotice);
-      setState({
-        asr: next.asr,
-        ollama: next.ollama,
-        statusNotice: notice,
-        connection: "connected"
-      });
-    }
-
-    function overlayTaskFailure(mapped, task) {
-      if (!mapped || !task || task.state !== "failed") return mapped;
-      var message = task.message || (task.error ? String(task.error) : "任务失败");
-      var kind = task.kind;
-      if (kind === "asr_start") {
-        mapped.asr = Object.assign({}, mapped.asr, {
-          progress: null,
-          message: message,
-          action: kind,
-          taskId: task.task_id || mapped.asr.taskId
-        });
-      } else if (kind === "asr_download") {
-        if (mapped.asr.status !== "failed" && mapped.asr.status !== "ready") {
-          mapped.asr = Object.assign({}, mapped.asr, {
-            status: "failed",
-            progress: null,
-            message: message,
-            action: kind,
-            taskId: task.task_id || mapped.asr.taskId
-          });
-        } else {
-          mapped.asr = Object.assign({}, mapped.asr, {
-            progress: null,
-            message: message,
-            action: kind,
-            taskId: task.task_id || mapped.asr.taskId
-          });
-        }
-      } else if (kind === "ollama_install" || kind === "ollama_start" || kind === "ollama_pull") {
-        var ol = Object.assign({}, mapped.ollama, {
-          progress: null,
-          message: message,
-          action: kind,
-          taskId: task.task_id || mapped.ollama.taskId
-        });
-        if (kind === "ollama_pull" && ol.modelStatus !== "ready") ol.modelStatus = "failed";
-        if (kind === "ollama_install" && ol.installed !== true) ol.installed = false;
-        if (kind === "ollama_start" && ol.running !== true) ol.running = false;
-        mapped.ollama = ol;
-      }
-      mapped.statusNotice = message;
-      return mapped;
-    }
-
-    function refreshCheck(afterTask) {
-      if (isDestroyed() || !context || !context.canCallLocal()) return Promise.resolve();
-      return Promise.all([
-        client.call(OP.check),
-        client.call(OP.status)
-      ]).then(function (results) {
-        if (isDestroyed()) return;
-        var mapped = overlayTaskFailure(root.mapReadiness(results[0], results[1]), afterTask);
-        setState({
-          asr: mapped.asr,
-          ollama: mapped.ollama,
-          unmetGates: mapped.gates,
-          capabilities: mapped.capabilities,
-          statusNotice: mapped.statusNotice,
-          connection: "connected"
-        });
+    function refreshCheck() {
+      if (isDestroyed() || !context || !context.canCallLocal()) return Promise.resolve(null);
+      return client.call(OP.check).then(function (check) {
+        if (isDestroyed()) return null;
+        var mapped = root.mapReadiness(check);
+        setState(Object.assign({ connection: "connected" }, root.readinessPatch(mapped)));
+        return mapped;
       }, function (err) {
-        if (isDestroyed()) return;
-        setState({ statusNotice: formatErr(err) });
+        if (!isDestroyed()) setState({ statusNotice: formatErr(err) });
+        return null;
       });
     }
 
-    function pollTask(taskId) {
-      if (isDestroyed() || !taskId) return Promise.resolve();
-      if (pollTaskId === taskId && pollTimer != null) return Promise.resolve();
-      unschedule(pollTimer, opts);
-      pollTimer = null;
-      pollTaskId = taskId;
+    function schedulePoll() {
+      if (isDestroyed() || pollTimer != null) return;
       var gen = pollGeneration;
-      return new Promise(function (resolve) {
-        pollTimer = schedule(function () {
-          pollTimer = null;
-          if (isDestroyed() || gen !== pollGeneration || pollTaskId !== taskId) {
-            resolve();
-            return;
-          }
-          client.call(OP.taskGet, { pathParams: { task_id: taskId } }).then(function (task) {
-            if (isDestroyed() || gen !== pollGeneration) {
-              resolve(task);
-              return;
-            }
-            applyTask(task);
-            if (task && task.state === "running") {
-              pollTaskId = null;
-              return pollTask(task.task_id).then(resolve);
-            }
-            pollTaskId = null;
-            return refreshCheck(task).then(function () { resolve(task); });
-          }, function (err) {
-            if (isDestroyed() || gen !== pollGeneration) {
-              resolve();
-              return;
-            }
-            pollTaskId = null;
-            setState({ statusNotice: formatErr(err), connection: "connected" });
-            resolve();
-          });
-        }, pollInterval, opts);
-      });
+      pollTimer = schedule(function () {
+        pollTimer = null;
+        if (isDestroyed() || gen !== pollGeneration) return;
+        refreshCheck().then(function (mapped) {
+          if (gen === pollGeneration && isBusy(mapped)) schedulePoll();
+        });
+      }, pollInterval, opts);
     }
 
     function maybeResumePoll(mapped) {
-      if (isDestroyed()) return;
-      var asrId = mapped && mapped.asr && mapped.asr.taskId && (mapped.asr.status === "downloading" || mapped.asr.action === "asr_start")
-        ? mapped.asr.taskId : null;
-      var olId = mapped && mapped.ollama && mapped.ollama.taskId && (mapped.ollama.modelStatus === "downloading" || mapped.ollama.action === "ollama_install" || mapped.ollama.action === "ollama_start")
-        ? mapped.ollama.taskId : null;
-      var taskId = asrId || olId;
-      if (taskId) pollTask(taskId);
+      if (isBusy(mapped)) schedulePoll();
     }
 
-    function startTask(kind) {
-      if (isDestroyed()) return Promise.resolve();
-      setState({ statusNotice: "正在启动任务…" });
-      return client.call(OP.taskStart, { body: { kind: kind } }).then(function (task) {
-        if (isDestroyed()) return task;
-        applyTask(task);
-        if (task && task.state === "running") return pollTask(task.task_id).then(function () { return task; });
-        if (task && (task.state === "succeeded" || task.state === "failed")) {
-          return refreshCheck(task).then(function () { return task; });
-        }
-        return task;
+    function installAll() {
+      if (isDestroyed()) return Promise.resolve(null);
+      return client.call(OP.installAll).then(function (status) {
+        if (isDestroyed()) return status;
+        setState({ installAll: root.mapInstallAll(status), connection: "connected" });
+        schedulePoll();
+        return status;
       }, function (err) {
-        if (isDestroyed()) return;
-        var message = formatErr(err);
-        var state = getState();
-        if (kind === "asr_download") {
-          setState({
-            asr: Object.assign({}, state.asr || {}, { status: "failed", progress: null, message: message, action: kind }),
-            statusNotice: message,
-            connection: "connected"
-          });
-        } else if (kind === "asr_start") {
-          setState({
-            asr: Object.assign({}, state.asr || {}, { progress: null, message: message, action: kind }),
-            statusNotice: message,
-            connection: "connected"
-          });
-        } else {
-          var ol = Object.assign({}, state.ollama || {}, { progress: null, message: message, action: kind });
-          if (kind === "ollama_pull") ol.modelStatus = "failed";
-          setState({ ollama: ol, statusNotice: message, connection: "connected" });
-        }
+        if (!isDestroyed()) setState({ statusNotice: formatErr(err), connection: "connected" });
+        return null;
       });
     }
 
-    function noticeFromGates(state) {
-      var gates = (state && (state.unmetGates || state.unmet_gates)) || [];
-      return gates.length ? ("未达上线条件：" + gates.join("；")) : null;
+    function retryComponent(name) {
+      if (isDestroyed()) return Promise.resolve(null);
+      return client.call(OP.componentRetry, { pathParams: { name: name } }).then(function (accepted) {
+        if (isDestroyed()) return accepted;
+        setState({ statusNotice: "已请求重试，等待看护层重新拉起", connection: "connected" });
+        schedulePoll();
+        return accepted;
+      }, function (err) {
+        if (!isDestroyed()) setState({ statusNotice: formatErr(err), connection: "connected" });
+        return null;
+      });
     }
 
     function saveConfig(patch, flags) {
@@ -233,7 +129,7 @@
         if (isDestroyed()) return config;
         var next = Object.assign({
           connection: "connected",
-          statusNotice: noticeFromGates(getState())
+          statusNotice: null
         }, flags || {});
         root.applyConfig(next, config);
         setState(next);
@@ -252,11 +148,11 @@
     }
 
     var hooks = {
-      onDownloadAsr: function () { return startTask("asr_download"); },
-      onStartAsr: function () { return startTask("asr_start"); },
-      onInstallOllama: function () { return startTask("ollama_install"); },
-      onStartOllama: function () { return startTask("ollama_start"); },
-      onDownloadOllamaModel: function () { return startTask("ollama_pull"); },
+      onInstallAll: function () { return installAll(); },
+      onRetryComponent: function (name) { return retryComponent(name); },
+      onToggleAutostart: function (enabled) {
+        return saveConfig({ autostart_enabled: !!enabled }, {});
+      },
       onTogglePolish: function (enabled) {
         return saveConfig({ polish_enabled: !!enabled }, {});
       },
@@ -287,13 +183,12 @@
     };
 
     return {
-      startTask: startTask,
-      pollTask: pollTask,
+      installAll: installAll,
+      retryComponent: retryComponent,
       maybeResumePoll: maybeResumePoll,
       refreshCheck: refreshCheck,
-      overlayTaskFailure: overlayTaskFailure,
       stopPoll: stopPoll,
-      getPollingTaskId: getPollingTaskId,
+      isPolling: isPolling,
       saveConfig: saveConfig,
       hooks: hooks
     };

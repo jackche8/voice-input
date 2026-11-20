@@ -11,6 +11,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+from pathlib import Path
 from types import SimpleNamespace
 
 import av
@@ -27,6 +28,7 @@ from _contracts import (
     SessionFinalEvent,
     SessionPartialEvent,
 )
+from _procfs import parse_stat_with_starttime, proc_starttime
 from runtimes.asr.__main__ import build_parser
 from runtimes.asr.engine import (
     OfficialEngine,
@@ -34,11 +36,7 @@ from runtimes.asr.engine import (
     resolve_transformers_device,
     unify_asr_tokenizer,
 )
-from runtimes.asr.process_guard import (
-    ChildProcessGuard,
-    parse_stat_with_starttime,
-    proc_starttime,
-)
+from runtimes.asr.process_guard import ChildProcessGuard
 from runtimes.asr.protocol import (
     DEFAULT_BACKEND,
     DEFAULT_GPU_MEMORY_UTILIZATION,
@@ -71,13 +69,15 @@ def test_default_vram_constants_and_cli_backend_arg():
     assert DEFAULT_BACKEND == "auto"
 
     parser = build_parser()
-    args_default = parser.parse_args(["serve"])
+    with pytest.raises(SystemExit):  # 模型目录由看护层显式给，无默认位置
+        parser.parse_args(["serve"])
+    args_default = parser.parse_args(["serve", "--model", "m"])
     assert args_default.backend == "auto"
     assert args_default.gpu_memory_utilization == 0.45
     assert args_default.max_model_len == 4096
 
     for choice in ("auto", "vllm", "transformers"):
-        parsed = parser.parse_args(["serve", "--backend", choice])
+        parsed = parser.parse_args(["serve", "--model", "m", "--backend", choice])
         assert parsed.backend == choice
 
 
@@ -122,7 +122,7 @@ def test_resolve_backend_and_transformers_device_selection():
     assert resolve_backend("auto", vllm_available_fn=lambda: True, cuda_available_fn=lambda: False) == "transformers"
 
     with pytest.raises(LogicError) as bad_err:
-        OfficialEngine(backend="onnx")
+        OfficialEngine(model_path=Path("unused-model"), backend="onnx")
     assert bad_err.value.code == ErrorCode.invalid_request
 
     fake_torch_cuda = SimpleNamespace(

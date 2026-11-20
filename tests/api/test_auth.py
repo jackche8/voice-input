@@ -19,10 +19,8 @@ def test_local_status_ok_and_does_not_echo_token(app):
     assert res.status_code == 200
     body = res.json()
     assert body["ok"] is True
-    assert body["unmet_gates"]
     dumped = str(body)
-    assert TEST_TOKEN not in dumped
-    assert "token" not in dumped.lower() or "unmet" in dumped.lower()
+    assert TEST_TOKEN not in dumped and "token" not in dumped.lower()
 
 
 def test_remote_status_and_claim_forbidden_even_with_token(app):

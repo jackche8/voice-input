@@ -101,8 +101,6 @@ if (
   home.hotkey_voice !== "" ||
   home.hotkey_ocr !== "" ||
   Object.prototype.hasOwnProperty.call(home, "hotkeyHint") ||
-  !Array.isArray(home.unmetGates) ||
-  home.unmetGates.length !== 0 ||
   home.capabilities !== null ||
   home.apiPaths !== null ||
   home.history.records.length !== 0 ||

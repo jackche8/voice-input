@@ -5,12 +5,12 @@ import datetime as dt
 import ipaddress
 from pathlib import Path
 
+from _atomic_file import atomic_write_bytes
 from _platform._certs_backends import (
     CA_COMMON_NAME,
     DEFAULT_CA_CERT_DAYS,
     SERVER_COMMON_NAME,
     CertificateInspection,
-    atomic_write_bytes,
     normalize_ip_str,
 )
 

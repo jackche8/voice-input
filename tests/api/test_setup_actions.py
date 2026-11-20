@@ -16,6 +16,7 @@ from _contracts import LogicError, SetupProgress
 from _v3.lan_access import list_physical_lan_ipv4, load_or_create_token
 from _v3.setup_actions import (
     asr_download_action,
+    ollama_asset,
     ollama_install_action,
     ollama_pull_action,
 )
@@ -120,8 +121,8 @@ def test_ollama_install_verifies_sha_and_extracts_to_user_dir(tmp_path):
     run = FakeRun(effect=extract)
     install_dir = tmp_path / "ollama-bin"
     progress: list[SetupProgress] = []
-    action = ollama_install_action(version="0.40.16", install_dir=install_dir,
-                                   client_factory=lambda: httpx.Client(transport=httpx.MockTransport(_release_handler(blob, digest))),
+    action = ollama_install_action(version="0.40.16", install_dir=install_dir, binary=install_dir / "bin" / "ollama",
+                                   asset="ollama-linux-amd64.tar.zst", client_factory=lambda: httpx.Client(transport=httpx.MockTransport(_release_handler(blob, digest))),
                                    run=run)
     assert "已安装" in action(progress.append)
     assert (install_dir / "bin" / "ollama").is_file()
@@ -134,13 +135,22 @@ def test_ollama_install_verifies_sha_and_extracts_to_user_dir(tmp_path):
 
 def test_ollama_install_rejects_checksum_mismatch(tmp_path):
     run = FakeRun()
-    action = ollama_install_action(version="0.40.16", install_dir=tmp_path / "ob",
-                                   client_factory=lambda: httpx.Client(transport=httpx.MockTransport(_release_handler(b"x", "0" * 64))),
+    action = ollama_install_action(version="0.40.16", install_dir=tmp_path / "ob", binary=tmp_path / "ob" / "bin" / "ollama",
+                                   asset="ollama-linux-amd64.tar.zst", client_factory=lambda: httpx.Client(transport=httpx.MockTransport(_release_handler(b"x", "0" * 64))),
                                    run=run)
     with pytest.raises(LogicError) as ei:
         action(lambda _p: None)
     assert "sha256" in ei.value.message
     assert run.calls == [] and not (tmp_path / "ob").exists()
+
+
+def test_ollama_release_asset_per_platform():
+    assert ollama_asset("linux", "x86_64") == "ollama-linux-amd64.tar.zst"
+    assert ollama_asset("linux", "aarch64") == "ollama-linux-arm64.tar.zst"
+    assert ollama_asset("windows", "AMD64") == "ollama-windows-amd64.zip"
+    assert ollama_asset("macos", "arm64") == "Ollama-darwin.zip"
+    with pytest.raises(LogicError):
+        ollama_asset("linux", "riscv64")
 
 
 class FakePopen:

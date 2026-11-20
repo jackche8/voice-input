@@ -1,5 +1,5 @@
-/* 把 setup/check、status、config、history、任务进度、局域网入口映到设置页状态。
- * 组件就绪只看 asr.status / ollama.model_status 等真实字段，不用 injected，不以 check.ok / status.ok 冒充全部就绪。
+/* 把 setup/check、config、history、一键装齐进度、看护组件状态、局域网入口映到设置页状态。
+ * 组件就绪只看 asr.status / ollama.model_status 等真实字段，不以 check.ok 冒充全部就绪。
  * 进度只展示服务端给出的 percent/字节/stage，不推算假百分比。
  */
 (function (root) {
@@ -12,20 +12,9 @@
     "hotkey_voice",
     "hotkey_screenshot",
     "hotkey_ocr",
-    "hotkey_repeat"
+    "hotkey_repeat",
+    "autostart_enabled"
   ];
-
-  function unique(list) {
-    var out = [];
-    var seen = Object.create(null);
-    (list || []).forEach(function (item) {
-      var s = String(item);
-      if (seen[s]) return;
-      seen[s] = true;
-      out.push(s);
-    });
-    return out;
-  }
 
   function pickLegalConfig(patch) {
     var out = {};
@@ -52,6 +41,7 @@
     state.hotkey_screenshot = config.hotkey_screenshot || "";
     state.hotkey_ocr = config.hotkey_ocr || "";
     state.hotkey_repeat = config.hotkey_repeat || "";
+    state.autostart_enabled = config.autostart_enabled;
     return state;
   }
 
@@ -90,8 +80,6 @@
       deviceLabel: asr.device_label != null ? asr.device_label : null,
       progress: status === "downloading" ? mapProgress(asr.progress) : (asr.progress ? mapProgress(asr.progress) : null),
       message: asr.message || "",
-      action: asr.action || null,
-      taskId: asr.task_id || null,
       weightsPresent: asr.weights_present,
       sidecarRunning: asr.sidecar_running
     };
@@ -108,10 +96,37 @@
       modelStatus: modelStatus,
       sizeLabel: ollama.size_label != null ? ollama.size_label : null,
       progress: modelStatus === "downloading" ? mapProgress(ollama.progress) : (ollama.progress ? mapProgress(ollama.progress) : null),
-      message: ollama.message || "",
-      action: ollama.action || null,
-      taskId: ollama.task_id || null
+      message: ollama.message || ""
     };
+  }
+
+  /* InstallAllStatus：五步固定顺序原样保留，进度只做字节换算。 */
+  function mapInstallAll(status) {
+    if (!status || typeof status !== "object") return null;
+    return {
+      state: status.state,
+      current: status.current != null ? status.current : null,
+      steps: (Array.isArray(status.steps) ? status.steps : []).map(function (step) {
+        return {
+          kind: step.kind,
+          state: step.state,
+          message: step.message || "",
+          progress: mapProgress(step.progress)
+        };
+      })
+    };
+  }
+
+  function mapComponents(list) {
+    if (!Array.isArray(list)) return null;
+    return list.map(function (item) {
+      return {
+        name: item.name,
+        state: item.state,
+        reason: item.reason || "",
+        failures: item.failures || 0
+      };
+    });
   }
 
   function mapCapabilities(list) {
@@ -151,24 +166,31 @@
     };
   }
 
-  function mapReadiness(check, status) {
-    var checkGates = (check && check.unmet_gates) || [];
-    var statusGates = (status && status.unmet_gates) || [];
-    var gates = unique(checkGates.concat(statusGates));
+  function mapReadiness(check) {
     var asr = mapAsr(check && check.asr);
     var ollama = mapOllama(check && check.ollama);
     var capabilities = mapCapabilities(check && check.capabilities);
-    var gateText = gates.length ? ("未达上线条件：" + gates.join("；")) : "";
     var asrMsg = asr.message || "";
-    var notice = gateText || null;
     return {
-      gates: gates,
       asr: asr,
       ollama: ollama,
       capabilities: capabilities,
-      statusNotice: notice,
+      installAll: mapInstallAll(check && check.install_all),
+      components: mapComponents(check && check.components),
       sessionType: check && check.session_type ? check.session_type : null,
       asrMessage: asrMsg
+    };
+  }
+
+  /* mapReadiness 的结果 → 视图状态补丁；首次加载与进行中重读共用这一份。读到最新状态即清掉上一次的操作提示。 */
+  function readinessPatch(mapped) {
+    return {
+      statusNotice: null,
+      asr: mapped.asr,
+      ollama: mapped.ollama,
+      capabilities: mapped.capabilities,
+      installAll: mapped.installAll,
+      components: mapped.components
     };
   }
 
@@ -208,41 +230,6 @@
     });
   }
 
-  function applyTaskToModels(asr, ollama, task) {
-    if (!task || !task.kind) return { asr: asr, ollama: ollama };
-    var nextAsr = Object.assign({}, asr || {});
-    var nextOllama = Object.assign({}, ollama || {});
-    var running = task.state === "running";
-    var failed = task.state === "failed";
-    var progress = running ? mapProgress(task.progress) : null;
-    var message = task.message || (failed && task.error ? String(task.error) : "") || (failed ? "任务失败" : "");
-    var kind = task.kind;
-    if (kind === "asr_download" || kind === "asr_start") {
-      if (kind === "asr_download") {
-        if (running) nextAsr.status = "downloading";
-        else if (failed) nextAsr.status = "failed";
-      }
-      nextAsr.progress = progress;
-      nextAsr.message = message;
-      nextAsr.action = kind;
-      nextAsr.taskId = task.task_id || nextAsr.taskId;
-    } else if (kind === "ollama_install" || kind === "ollama_start" || kind === "ollama_pull") {
-      if (running) {
-        if (kind === "ollama_pull") nextOllama.modelStatus = "downloading";
-        else if (kind === "ollama_install") nextOllama.installed = nextOllama.installed === true ? true : false;
-      } else if (failed) {
-        if (kind === "ollama_pull") nextOllama.modelStatus = "failed";
-        else if (kind === "ollama_install") nextOllama.installed = false;
-        else if (kind === "ollama_start") nextOllama.running = false;
-      }
-      nextOllama.progress = progress;
-      nextOllama.message = message;
-      nextOllama.action = kind;
-      nextOllama.taskId = task.task_id || nextOllama.taskId;
-    }
-    return { asr: nextAsr, ollama: nextOllama };
-  }
-
   root.LEGAL_CONFIG_KEYS = LEGAL_CONFIG_KEYS;
   root.pickLegalConfig = pickLegalConfig;
   root.parseKeywords = parseKeywords;
@@ -251,11 +238,13 @@
   root.mapProgress = mapProgress;
   root.mapAsr = mapAsr;
   root.mapOllama = mapOllama;
+  root.mapInstallAll = mapInstallAll;
+  root.mapComponents = mapComponents;
   root.mapCapabilities = mapCapabilities;
   root.mapLanAccess = mapLanAccess;
   root.mapReadiness = mapReadiness;
+  root.readinessPatch = readinessPatch;
   root.applyHistory = applyHistory;
   root.publicLanEntries = publicLanEntries;
   root.mapApiPaths = mapApiPaths;
-  root.applyTaskToModels = applyTaskToModels;
 })(window.V3Business = window.V3Business || {});

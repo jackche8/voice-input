@@ -53,7 +53,9 @@
     error: "出错",
     busy: "已排队",
     history_write_failed: "历史未写入",
-    delivery_unknown: "投递结果未知"
+    delivery_unknown: "投递结果未知",
+    component_command: "服务命令",
+    config_changed: "配置已更新"
   };
 
   const SESSION_CLOSED_REASON = {
@@ -62,6 +64,38 @@
     error: "出错",
     timeout: "超时",
     disconnected: "连接已断开"
+  };
+
+  /* 一键装齐五步（InstallStepKind，固定顺序）与步状态（InstallStepState）。 */
+  const INSTALL_STEP = {
+    ollama_install: "安装 Ollama 程序",
+    wait_ollama: "等待 Ollama 运行",
+    ollama_pull: "下载纠错与翻译模型",
+    asr_runtime_install: "安装语音识别运行环境",
+    asr_download: "下载语音识别模型"
+  };
+
+  const INSTALL_STEP_STATE = {
+    pending: "待执行",
+    running: "进行中",
+    skipped: "已具备",
+    done: "已完成",
+    failed: "失败"
+  };
+
+  /* 看护层组件（ComponentName）与组件状态（ComponentState）。 */
+  const COMPONENT = {
+    ollama: "Ollama 纠错/翻译服务",
+    asr: "语音识别服务",
+    server: "本地服务"
+  };
+
+  const COMPONENT_STATE = {
+    not_installed: "未安装",
+    starting: "启动中",
+    running: "运行中",
+    backing_off: "等待重启",
+    stopped: "已停止"
   };
 
   const SETUP_TABS = [
@@ -179,6 +213,10 @@
     HISTORY_POLISH: HISTORY_POLISH,
     PRODUCT_EVENT: PRODUCT_EVENT,
     SESSION_CLOSED_REASON: SESSION_CLOSED_REASON,
+    INSTALL_STEP: INSTALL_STEP,
+    INSTALL_STEP_STATE: INSTALL_STEP_STATE,
+    COMPONENT: COMPONENT,
+    COMPONENT_STATE: COMPONENT_STATE,
     SETUP_TABS: SETUP_TABS,
     TARGET_LANG_OPTIONS: TARGET_LANG_OPTIONS,
     FIXED_MODELS: FIXED_MODELS,

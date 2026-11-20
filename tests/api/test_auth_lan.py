@@ -165,4 +165,3 @@ def test_loopback_ipv6_can_read_status(app):
     )
     assert result["status"] == 200, result
     assert result["body"]["ok"] is True
-    assert result["body"]["unmet_gates"]

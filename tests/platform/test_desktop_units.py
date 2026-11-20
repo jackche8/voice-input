@@ -1,31 +1,29 @@
 """桌面业务编排与平台辅助单元：CaptureFlow（红十字框选复用原位翻译 + 纯 OCR）、VoiceFlow（热词 + 防409排队）、
-DesktopActions 四键、ProductEventLoop 断线退避与 HUD 映射、跨平台单例锁、冲突扫描、启动检查、sd_notify。
+DesktopActions 四键、ProductEventLoop 断线退避与 HUD 映射、跨平台单例锁、冲突扫描、启动检查。
 
 全部假对象：不开图形窗口、不截屏、不开麦、不读真实 gsettings、不连 systemd。
 """
 from __future__ import annotations
 
-import socket
 import subprocess
-import tempfile
 import threading
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 from _capture import FakeAudioSource
-from _contracts import ErrorCode, OcrTextBlock
+from _contracts import ComponentStatus, ErrorCode, OcrTextBlock
 from _desktop.actions import DesktopActions
 from _desktop.api import ApiError
 from _desktop.capture_flow import CaptureFlow
 from _desktop.delivery import LastDelivered, RepeatAction
 from _desktop.event_stream import ProductEventLoop, dispatch_product_event
-from _desktop.singleton import acquire_singleton_lock
+from _desktop.singleton import try_acquire_singleton_lock
 from _desktop.status import PlatformStatus
 from _desktop.voice import VoiceFlow, build_keywords_context_provider
 from _focus import StaticFocusProbe
 from _hotkey import HotkeyBindings
 from _linux.conflicts import ConflictScan, scan_hotkey_conflicts
-from _linux.sd_notify import sd_notify
 from _linux.startup_check import startup_issues
 
 DEFAULTS = HotkeyBindings(voice="ctrl+alt+z", screenshot="ctrl+alt+x", ocr="ctrl+alt+o", repeat="ctrl+alt+r")
@@ -33,7 +31,7 @@ DEFAULTS = HotkeyBindings(voice="ctrl+alt+z", screenshot="ctrl+alt+x", ocr="ctrl
 
 def _status():
     posted: list[dict] = []
-    return PlatformStatus(posted.append, start_thread=False), posted
+    return PlatformStatus(posted.append, post_components=posted.append, start_thread=False), posted
 
 
 class FakeSelector:
@@ -1142,8 +1140,8 @@ def test_repeat_action_confirm_resend():
     ]
 
 
-def test_hotkey_failure_is_held_and_resent_each_time_the_event_stream_connects():
-    """快捷键组件失败原因留在 PlatformStatus；事件流每条连接收到首个事件（服务端 idle）后重发一条 error。"""
+def test_hotkey_error_and_component_snapshot_are_resent_each_time_the_event_stream_connects():
+    """快捷键组件失败原因与看护层组件快照留在 PlatformStatus；事件流每条连接收到首个事件（服务端 idle）后各重报一次。"""
     status, posted = _status()
     connections = {"n": 0}
 
@@ -1163,22 +1161,36 @@ def test_hotkey_failure_is_held_and_resent_each_time_the_event_stream_connects()
     loop = ProductEventLoop(
         iter_events=iter_events,
         on_event=lambda _ev: None,
-        on_connected=status.resend_hotkey_error,
+        on_connected=status.resend_on_connect,
         wait_fn=lambda delay: (waits.append(delay) or len(waits) >= 4),
     )
     status.set_hotkey_error("Wayland 下快捷键需要读取键盘设备（evdev），当前不可用：未找到可读的键盘设备")
+    snapshot = [ComponentStatus(name=n, state="running", since="2026-11-20T00:00:00+00:00") for n in ("ollama", "asr", "server")]
+    status.set_components(snapshot)
     loop.run_forever()
     status.drain()
-    errors = [p for p in posted if p["event"] == "error"]
+    errors = [p for p in posted if p.get("event") == "error"]
+    reports = [p for p in posted if "components" in p]
     # 立即 1 条 + 前两次连上各重发 1 条；恢复后第三次连上不再发
-    assert len(errors) == 3
-    assert {e["error"] for e in errors} == {"dependency_failed"}
+    assert len(errors) == 3 and {e["error"] for e in errors} == {"dependency_failed"}
     assert all("evdev" in e["message"] for e in errors)
+    # 快照：变化时 1 次 + 三次连上各重报 1 次（服务端可能刚重启、缓存为空）
+    assert len(reports) == 4 and all([c["name"] for c in r["components"]] == ["ollama", "asr", "server"] for r in reports)
 
     quiet, quiet_posted = _status()
-    quiet.resend_hotkey_error()  # 从未出错：连上不发
+    quiet.resend_on_connect()  # 从未出错、也没有快照：连上不发
     quiet.drain()
     assert quiet_posted == []
+
+
+def test_component_command_and_config_changed_go_to_app_callbacks():
+    commands: list[tuple[str, str]] = []
+    reloads: list[bool] = []
+    untouched = SimpleNamespace()  # 底栏与托盘没有任何方法：给应用自身的命令若去改它们会直接报错
+    for ev in ({"event": "component_command", "action": "retry", "component": "server"}, {"event": "config_changed"}):
+        dispatch_product_event(ev, hud=untouched, tray=untouched, on_component_command=lambda a, c: commands.append((a, c)),
+                               on_config_changed=lambda: reloads.append(True))
+    assert commands == [("retry", "server")] and reloads == [True]
 
 
 def test_product_event_loop_exponential_backoff_and_hud_dispatch():
@@ -1263,14 +1275,14 @@ def test_product_event_loop_exponential_backoff_and_hud_dispatch():
 
 def test_cross_platform_singleton_lock_acquires_and_releases(tmp_path: Path):
     lock_file = tmp_path / "daemon.lock"
-    lock = acquire_singleton_lock(lock_file)
+    lock = try_acquire_singleton_lock(lock_file)
     try:
         assert lock_file.is_file()
         assert lock_file.read_text(encoding="ascii").strip().isdigit()
     finally:
         lock.release()
     # 释放后可重新获取
-    lock2 = acquire_singleton_lock(lock_file)
+    lock2 = try_acquire_singleton_lock(lock_file)
     lock2.release()
 
 
@@ -1315,16 +1327,3 @@ def test_startup_issues_wayland_and_x11():
         conflicts=lambda b: ConflictScan((), ()),
     )
     assert ok == []
-
-
-def test_sd_notify_noop_without_socket_and_sends_with_socket():
-    assert sd_notify("READY=1", environ={}) is False
-    with tempfile.TemporaryDirectory() as d:
-        path = str(Path(d) / "notify.sock")
-        srv = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
-        srv.bind(path)
-        try:
-            assert sd_notify("WATCHDOG=1", environ={"NOTIFY_SOCKET": path}) is True
-            assert srv.recv(64) == b"WATCHDOG=1"
-        finally:
-            srv.close()

@@ -1,13 +1,15 @@
 """生产运行时组合：显式路径 + 显式令牌 + 真实能力适配器。
 
-只有生产入口（同时传 live=True 的 ProductionPaths 与已读取的令牌）才会绑定 live 文件；
+只有生产入口（`_paths.default_app_paths` 给出的 live 路径与已读取的令牌）才会绑定 live 文件；
 测试用隔离根目录 + 假令牌 + 假传输/假进程装配同一函数，验证接线而不碰用户数据。
-组合完成后由 activation_blockers() 按验收门闩决定能否正式对用户启用。
 """
 from __future__ import annotations
 
+import os
+import platform
 import shutil
 import subprocess
+import sys
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -20,14 +22,12 @@ from _audio_codec import decode_audio_to_pcm16k
 from _config import ConfigStore, migrate_to_product_config
 from _contracts import (
     DEFAULT_OLLAMA_BASE_URL,
+    OLLAMA_VERSION,
     PRODUCT_ASR_MODEL,
     SIDECAR_DEFAULT_BASE_URL,
-    ErrorCode,
-    LogicError,
     OcrTextBlock,
     PolishRequest,
     PolishResponse,
-    SetupProgress,
     SetupTaskKind,
     SttResponse,
     TranslateRequest,
@@ -44,103 +44,45 @@ from _linux.evdev_keyboards import readable_keyboard_paths
 from _ocr import image_to_text
 from _ocr_layout import extract_ocr_layout
 from _ollama import OllamaClient
+from _paths import PROGRAM_ROOT, STATIC_V3, AppPaths, default_app_paths
 from _polish import polish_text
+from _ports import DEFAULT_SERVER_PORT, local_ports
 from _session_finals import SessionFinalIndex
 from _translate import translate_blocks as translate_ocr_blocks, translate_text
 from _utterance import UtteranceService
-from _v3.auth import SERVER_PORT, AuthSettings
+from _v3.auth import AuthSettings
+from _v3.component_routes import ComponentRegistry
 from _v3.lan_access import LanAccessService, list_physical_lan_ipv4
-from _v3.runtime import Runtime, UnmetRuntimeGates, production_unmet_gates
+from _v3.runtime import Runtime
+from _v3.runtime_install import VARIANT_DISK_BYTES, asr_runtime_cleanup, asr_runtime_install_action, detect_variant
 from _v3.setup_actions import (
     asr_download_action,
+    ollama_asset,
     ollama_install_action,
+    ollama_install_cleanup,
     ollama_pull_action,
-    systemd_unit_state,
-    systemd_user_start_action,
 )
 from _v3.setup_probe import (
-    SidecarProbe,
     dbus_portal_version,
-    desktop_daemon_capability,
     hotkey_conflicts_capability,
-    probe_asr_sidecar,
     probe_asr_weights,
     probe_capabilities,
     probe_ollama,
     session_type,
 )
+from _v3.setup_sequence import InstallSequence, SequenceFacts
 from _v3.setup_service import SetupProbes, SetupService
-from _v3.setup_tasks import ProgressFn, SetupAction, SetupTaskManager, Spawn, thread_spawn
+from _v3.setup_tasks import GIB, SetupAction, SetupTaskManager, Spawn, TaskKindSpec, thread_spawn
 
-CODE_ROOT = Path(__file__).resolve().parents[1]
-ASR_DOWNLOAD_WORKER = CODE_ROOT / "_v3" / "asr_download_worker.py"
-STATIC_V3 = CODE_ROOT / "static" / "v3"
-
-
-@dataclass(frozen=True)
-class ProductionPaths:
-    """生产数据位置的唯一表。live=False 时拒绝指向项目真实数据根。"""
-
-    data_root: Path
-    config: Path
-    history: Path
-    jobs: Path
-    token: Path
-    upload_tmp: Path
-    setup_logs: Path
-    cert: Path
-    key: Path
-    asr_model_dir: Path
-    asr_python: Path
-    hf_home: Path
-    ollama_install_dir: Path
-    ollama_models: Path
-    live: bool
-
-    @classmethod
-    def for_root(cls, data_root: Path, *, live: bool) -> "ProductionPaths":
-        root = Path(data_root).resolve()
-        if not live and root == CODE_ROOT:
-            raise RuntimeError("未显式 live 授权时拒绝绑定项目真实数据根")
-        runtime_dir = root / ".cache" / "v3-feasibility"
-        return cls(
-            data_root=root,
-            config=root / ".config.json",
-            history=root / ".cache" / "history.jsonl",
-            jobs=root / ".cache" / "jobs.json",
-            token=root / ".web_input_token",
-            upload_tmp=root / ".cache" / "upload-tmp",
-            setup_logs=root / ".cache" / "setup-logs",
-            cert=root / "certs" / "cert.pem",
-            key=root / "certs" / "key.pem",
-            asr_model_dir=runtime_dir / "models" / "Qwen3-ASR-1.7B",
-            asr_python=runtime_dir / "venv-asr" / "bin" / "python",
-            hf_home=runtime_dir / "hf-home",
-            ollama_install_dir=runtime_dir / "ollama-bin-0.40.16",
-            ollama_models=runtime_dir / "ollama-models",
-            live=live,
-        )
-
-    @property
-    def ollama_binary(self) -> Path:
-        return self.ollama_install_dir / "bin" / "ollama"
+ASR_DOWNLOAD_WORKER = PROGRAM_ROOT / "_v3" / "asr_download_worker.py"
 
 
 @dataclass(frozen=True)
 class ProductionEndpoints:
-    port: int = SERVER_PORT
+    port: int = DEFAULT_SERVER_PORT
     sidecar_url: str = SIDECAR_DEFAULT_BASE_URL
     ollama_url: str = DEFAULT_OLLAMA_BASE_URL
-    ollama_version: str = "0.40.16"
-    asr_unit: str = "ollama-voice-asr.service"
-    ollama_unit: str = "ollama-voice-ollama.service"
-    server_unit: str = "ollama-voice-server.service"
-    daemon_unit: str = "ollama-voice-daemon.service"
-
-    @property
-    def units(self) -> tuple[str, ...]:
-        """四个用户单元（与 _v3.units.UNIT_NAMES 同集合，tests/integration 断言）。"""
-        return (self.ollama_unit, self.asr_unit, self.server_unit, self.daemon_unit)
+    ollama_version: str = OLLAMA_VERSION
 
 
 @dataclass(frozen=True)
@@ -175,60 +117,97 @@ def _client(base_url: str, adapters: SystemAdapters, *, timeout: httpx.Timeout |
     )
 
 
-def asr_start_with_preflight(
-    *,
-    unit: str,
-    start: SetupAction,
-    sidecar_probe: Callable[[], SidecarProbe],
-    run: Callable[..., subprocess.CompletedProcess],
-    which: Callable[[str], str | None],
-    environ: Mapping[str, str] | None = None,
-) -> SetupAction:
-    """设置页「启动识别服务」：已加载 → 不再 start；单元已在运行/启动中 → 不预检，交给 start 动作按实际状态判定；
-    否则先做与 sidecar 同源的显存预检（读单元真实 ExecStart），不足或无法判断 → 失败且不 start。
-    读单元状态失败直接失败（未知 ≠ 已在运行）。"""
-
-    def action(report: ProgressFn) -> str:
-        probe = sidecar_probe()
-        if probe.running and probe.loaded:
-            return f"{unit} 已加载，无需启动"
-        state = systemd_unit_state(unit, run=run)
-        if state.active_state not in ("active", "activating", "reloading"):
-            report(SetupProgress(stage="显存预检"))
-            # 函数内导入：start.sh 以 `python3 -m _v3.gpu_preflight` 调同一实现，_v3 包初始化会导入本模块；
-            # 顶层导入会让 runpy 在执行 __main__ 前已载入该模块并打印 RuntimeWarning 混进启动输出。
-            from _v3.gpu_preflight import asr_gpu_preflight_for_unit
-
-            result = asr_gpu_preflight_for_unit(unit, run=run, which=which, environ=environ)
-            if not result.ok:
-                raise LogicError(
-                    ErrorCode.dependency_failed,
-                    f"未启动识别服务：{result.reason}",
-                    {"unit": unit, "preflight": result.kind, "required_mib": result.required_mib,
-                     "free_mib": result.free_mib, "total_mib": result.total_mib},
-                )
-            report(SetupProgress(stage=result.reason))
-        return start(report)
-
-    return action
+def _model(config: ConfigStore) -> str:
+    return config.load().ollama_model
 
 
-def _setup_service(
-    paths: ProductionPaths,
+def _ollama_probe(paths: AppPaths, endpoints: ProductionEndpoints, adapters: SystemAdapters, config: ConfigStore):
+    def probe():
+        with _client(endpoints.ollama_url, adapters, timeout=3.0) as client:
+            return probe_ollama(binary=paths.ollama_binary, client=client, model=_model(config))
+
+    return probe
+
+
+def setup_task_actions(
+    paths: AppPaths,
     endpoints: ProductionEndpoints,
     adapters: SystemAdapters,
     config: ConfigStore,
+) -> dict[SetupTaskKind, SetupAction]:
+    """安装 worker 进程里执行的真实动作表（服务端进程不执行动作，只拉起 worker）。"""
+    download_env = dict(adapters.environ)
+    download_env.update({"HF_HOME": str(paths.hf_home), "HF_HUB_DISABLE_PROGRESS_BARS": "1"})
+    long_read = httpx.Timeout(30.0, read=None)
+
+    def release_client() -> httpx.Client:
+        return httpx.Client(timeout=long_read, transport=adapters.http_transport, follow_redirects=True)
+
+    return {
+        SetupTaskKind.ollama_pull: lambda report: ollama_pull_action(
+            client_factory=lambda: _client(endpoints.ollama_url, adapters, timeout=long_read), model=_model(config)
+        )(report),
+        SetupTaskKind.ollama_install: ollama_install_action(
+            version=endpoints.ollama_version,
+            install_dir=paths.ollama_install_dir,
+            binary=paths.ollama_binary,
+            asset=ollama_asset(paths.os_name, platform.machine()),
+            client_factory=release_client,
+            run=adapters.run,
+        ),
+        SetupTaskKind.asr_runtime_install: asr_runtime_install_action(
+            paths=paths,
+            os_name=paths.os_name,
+            machine=platform.machine(),
+            variant=lambda: detect_variant(paths.os_name, platform.machine(), run=adapters.run, which=adapters.which),
+            environ=adapters.environ,
+            client_factory=release_client,
+            run=adapters.run,
+        ),
+        SetupTaskKind.asr_download: asr_download_action(
+            python=paths.asr_python,
+            worker=ASR_DOWNLOAD_WORKER,
+            repo_id=PRODUCT_ASR_MODEL,
+            model_dir=paths.asr_model_dir,
+            log_path=paths.logs / "setup-asr-download.log",
+            env=download_env,
+            popen=adapters.popen,
+        ),
+    }
+
+
+def setup_task_kinds(paths: AppPaths, adapters: SystemAdapters) -> dict[SetupTaskKind, TaskKindSpec]:
+    """每类任务的磁盘预检（目标目录、所需字节）与重试前清理。"""
+
+    def runtime_disk() -> tuple[Path, int]:
+        chosen, _why = detect_variant(paths.os_name, platform.machine(), run=adapters.run, which=adapters.which)
+        return paths.asr_venv, VARIANT_DISK_BYTES[chosen]
+
+    return {
+        SetupTaskKind.ollama_install: TaskKindSpec(disk=lambda: (paths.ollama_install_dir, 2 * GIB),
+                                                   cleanup=lambda: ollama_install_cleanup(paths.ollama_install_dir)),
+        SetupTaskKind.ollama_pull: TaskKindSpec(disk=lambda: (paths.ollama_models, 4 * GIB)),
+        SetupTaskKind.asr_runtime_install: TaskKindSpec(disk=runtime_disk, cleanup=lambda: asr_runtime_cleanup(paths)),
+        SetupTaskKind.asr_download: TaskKindSpec(disk=lambda: (paths.asr_model_dir, 5 * GIB)),
+    }
+
+
+def setup_worker_kind(kind: SetupTaskKind, environ: Mapping[str, str]) -> tuple[SetupAction, Callable[[], None]]:
+    """安装 worker 进程入口用：按与服务端相同的 environ 定位 live 路径，取该类任务的动作与清理。"""
+    paths = default_app_paths(environ)
+    adapters = SystemAdapters(environ=environ)
+    action = setup_task_actions(paths, ProductionEndpoints(), adapters, ConfigStore(paths.config))[kind]
+    return action, setup_task_kinds(paths, adapters)[kind].cleanup
+
+
+def _setup_service(
+    paths: AppPaths,
+    endpoints: ProductionEndpoints,
+    adapters: SystemAdapters,
+    config: ConfigStore,
+    components: ComponentRegistry,
 ) -> SetupService:
-    def model() -> str:
-        return config.load().ollama_model
-
-    def ollama_probe():
-        with _client(endpoints.ollama_url, adapters, timeout=3.0) as client:
-            return probe_ollama(binary=paths.ollama_binary, client=client, model=model())
-
-    def sidecar_probe():
-        with _client(endpoints.sidecar_url, adapters, timeout=3.0) as client:
-            return probe_asr_sidecar(client)
+    ollama_probe = _ollama_probe(paths, endpoints, adapters, config)
 
     def hotkey_scan():
         cfg = config.load()
@@ -250,12 +229,6 @@ def _setup_service(
                 keyboard_devices=adapters.keyboard_devices,
             ),
             hotkey_conflicts_capability(hotkey_scan),
-            desktop_daemon_capability(
-                read_state=lambda unit: systemd_unit_state(unit, run=adapters.run),
-                daemon_unit=endpoints.daemon_unit,
-                units=endpoints.units,
-                unmet_gates=production_unmet_gates,
-            ),
         ]
 
     ocr_languages = adapters.ocr_languages or _tesseract_languages
@@ -263,68 +236,42 @@ def _setup_service(
         session=lambda: session_type(adapters.environ),
         ollama=ollama_probe,
         asr_weights=lambda: probe_asr_weights(paths.asr_model_dir),
-        asr_sidecar=sidecar_probe,
         capabilities=capabilities,
     )
-    download_env = dict(adapters.environ)
-    download_env.update({"HF_HOME": str(paths.hf_home), "HF_HUB_DISABLE_PROGRESS_BARS": "1"})
-    long_read = httpx.Timeout(30.0, read=None)
-    actions = {
-        SetupTaskKind.ollama_pull: lambda report: ollama_pull_action(
-            client_factory=lambda: _client(endpoints.ollama_url, adapters, timeout=long_read), model=model()
-        )(report),
-        SetupTaskKind.ollama_install: ollama_install_action(
-            version=endpoints.ollama_version,
-            install_dir=paths.ollama_install_dir,
-            client_factory=lambda: httpx.Client(timeout=long_read, transport=adapters.http_transport, follow_redirects=True),
-            run=adapters.run,
-        ),
-        SetupTaskKind.ollama_start: systemd_user_start_action(
-            unit=endpoints.ollama_unit, ready=lambda: ollama_probe().running, run=adapters.run, timeout_s=60.0
-        ),
-        SetupTaskKind.asr_start: asr_start_with_preflight(
-            unit=endpoints.asr_unit,
-            start=systemd_user_start_action(
-                unit=endpoints.asr_unit,
-                ready=lambda: (lambda p: p.running and p.loaded)(sidecar_probe()),
-                run=adapters.run,
-                timeout_s=300.0,
-            ),
-            sidecar_probe=sidecar_probe,
-            run=adapters.run,
-            which=adapters.which,
-            environ=adapters.environ,
-        ),
-        SetupTaskKind.asr_download: asr_download_action(
-            python=paths.asr_python,
-            worker=ASR_DOWNLOAD_WORKER,
-            repo_id=PRODUCT_ASR_MODEL,
-            model_dir=paths.asr_model_dir,
-            log_path=paths.setup_logs / "asr-download.log",
-            env=download_env,
-            popen=adapters.popen,
-        ),
-    }
-    return SetupService(
-        probes=probes,
-        tasks=SetupTaskManager(actions, spawn=adapters.spawn),
-        unmet_gates=lambda: list(production_unmet_gates()),
+    tasks = SetupTaskManager(
+        kinds=setup_task_kinds(paths, adapters),
+        tasks_dir=paths.setup_tasks,
+        log_dir=paths.logs,
+        worker_argv=[sys.executable, "-m", "_v3.setup_worker"],
+        owner_pid=os.getppid(),  # 看护层拉起的服务端的父进程即应用主进程（macOS 为随其退出的包装进程）
+        environ=adapters.environ,
+        popen=adapters.popen,
     )
+    facts = SequenceFacts(
+        ollama_installed=paths.ollama_binary.is_file,
+        ollama_has_model=lambda: ollama_probe().has_model,
+        asr_runtime_installed=paths.asr_manifest.is_file,
+        asr_weights_complete=lambda: probe_asr_weights(paths.asr_model_dir).complete,
+    )
+    sequence = InstallSequence(tasks=tasks, facts=facts, components=components,
+                               state_file=paths.data_root / "setup" / "install_all.json", spawn=adapters.spawn)
+    return SetupService(probes=probes, tasks=tasks, sequence=sequence, components=components)
 
 
 def compose_production_runtime(
     *,
-    paths: ProductionPaths,
+    paths: AppPaths,
     token: str,
     adapters: SystemAdapters,
     endpoints: ProductionEndpoints = ProductionEndpoints(),
 ) -> Runtime:
     """组合生产运行时并执行启动恢复（claimed → delivery_unknown，不重投）。不启动 HTTP 服务。"""
-    if not isinstance(paths, ProductionPaths):
-        raise TypeError("必须显式传入 ProductionPaths")
+    if not isinstance(paths, AppPaths):
+        raise TypeError("必须显式传入 AppPaths")
     if not token or not token.strip():
         raise ValueError("必须显式传入访问令牌")
     paths.upload_tmp.mkdir(parents=True, exist_ok=True)
+    components = ComponentRegistry()  # 看护层上报的唯一缓存：设置检查与一键装齐都读它
     config = ConfigStore(paths.config)
     migrate_to_product_config(config)
     events = EventBus()
@@ -384,43 +331,27 @@ def compose_production_runtime(
         ocr_layout=extract_ocr_layout,
         decode_audio=decode_audio_to_pcm16k,
         stream_provider=SidecarStreamProvider(asr),
-        setup=_setup_service(paths, endpoints, adapters, config),
+        setup=_setup_service(paths, endpoints, adapters, config, components),
+        components=components,
         lan=LanAccessService(token=token, list_ips=adapters.list_ips, port=endpoints.port),
-        unmet_gates=production_unmet_gates(),
         upload_tmp=paths.upload_tmp,
     )
 
 
-def activation_blockers(runtime: Runtime) -> tuple[str, ...]:
-    """正式对用户启用前必须为空。"""
-    return tuple(runtime.unmet_gates)
-
-
-def require_activation_allowed(runtime: Runtime) -> None:
-    blockers = activation_blockers(runtime)
-    if blockers:
-        raise UnmetRuntimeGates(blockers)
-
-
-# 验收运行：门闩未清时仍可由用户手动启动以做真机检测；status/setup 照常显示全部未达门闩。
-# 只认显式环境变量（仅 ./start.sh --acceptance 写入单元 drop-in），常量见 _activation。
-from _activation import ACCEPTANCE_ENV  # noqa: E402
-
-
 def build_production_app(
     *,
-    data_root: Path = CODE_ROOT,
     environ: Mapping[str, str],
     static_v3: Path = STATIC_V3,
 ):
-    """唯一生产装配：live 路径 + 读/建令牌 + 真实适配器 + 门闩判定 + 唯一界面 static/v3。"""
+    """唯一生产装配：按 environ 定位的 live 路径 + 读/建令牌 + 真实适配器 + 唯一界面 static/v3。"""
     from _v3.lan_access import load_or_create_token
     from _v3_app import create_app
 
-    paths = ProductionPaths.for_root(data_root, live=True)
+    paths = default_app_paths(environ)
+    ports = local_ports(environ)
+    paths.config_root.mkdir(mode=0o700, parents=True, exist_ok=True)  # 首次运行：令牌与证书所在目录只给本用户
     token = load_or_create_token(paths.token)
     adapters = SystemAdapters(environ=environ, ocr_languages=_tesseract_languages)
-    runtime = compose_production_runtime(paths=paths, token=token, adapters=adapters)
-    if environ.get(ACCEPTANCE_ENV) != "1":
-        require_activation_allowed(runtime)
+    endpoints = ProductionEndpoints(port=ports.server, sidecar_url=ports.asr_url, ollama_url=ports.ollama_url)
+    runtime = compose_production_runtime(paths=paths, token=token, adapters=adapters, endpoints=endpoints)
     return create_app(runtime, static_v3=static_v3), paths

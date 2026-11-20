@@ -102,8 +102,12 @@ def test_parse_shortcuts_description() -> None:
     assert parsed["repeat"] == "CTRL+ALT+R"
 
 
-def test_portal_four_hotkeys_rebind_mismatch_and_bus_restart_recovery() -> None:
+def test_portal_four_hotkeys_rebind_mismatch_and_bus_restart_recovery(tmp_path, monkeypatch) -> None:
     """验证 Portal 四键指纹 ID、改键不匹配自动调 ConfigureShortcuts、以及 Portal 总线重启自动重注册宿主。"""
+    entry = tmp_path / "applications" / "ollama-voice-input-daemon.desktop"  # 门户条目按 XDG 数据目录查找
+    entry.parent.mkdir()
+    entry.write_text("[Desktop Entry]\n", encoding="utf-8")
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
 
     class FakeMatch:
         def __init__(self):
@@ -326,6 +330,7 @@ def test_portal_four_hotkeys_rebind_mismatch_and_bus_restart_recovery() -> None:
     assert len(state["host_registers"]) == regs_before_restart + 1
     assert register_portal_host_app(bus, force=True, dbus_mod=FakeDbusMod(state)) is True
     assert len(state["host_registers"]) == regs_before_restart + 2
+    assert state["host_registers"][-1] == ("ollama-voice-input-daemon", {"desktop_entry": str(entry)})
     assert state["create_sessions"] == 2
     state["requests"]["/req/sess/2"](0, {"session_handle": "/session/2"})
     state["requests"]["/req/bind/2"](

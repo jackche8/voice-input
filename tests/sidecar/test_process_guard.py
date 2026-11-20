@@ -10,7 +10,8 @@ from pathlib import Path
 
 import pytest
 
-from runtimes.asr.process_guard import ChildProcessGuard, descendants_of, is_alive
+from _procfs import descendants_of, is_alive
+from runtimes.asr.process_guard import ChildProcessGuard
 
 ROOT = Path("/opt/ollama-voice-input")
 TMP = ROOT / ".pp" / "tmp" / "sidecar" / "process-guard"

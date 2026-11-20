@@ -14,13 +14,14 @@ from _contracts import (
     HistoryListResponse,
     PlatformEventAccepted,
     PlatformEventCreate,
+    ProductConfigChangedEvent,
     ProductErrorEvent,
     ProductIdleEvent,
     ProductSSEEventEnvelope,
 )
 from _config import apply_config_update, config_view
 from _v3.http import format_sse, sse_openapi
-from _v3.runtime import Runtime, effective_unmet_gates
+from _v3.runtime import Runtime
 
 
 def build_control_router(runtime: Runtime) -> APIRouter:
@@ -36,12 +37,13 @@ def build_control_router(runtime: Runtime) -> APIRouter:
 
     @router.post("/api/v1/config", response_model=AppConfigView)
     def post_config(body: AppConfigUpdate) -> AppConfigView:
-        return apply_config_update(runtime.config, body)
+        view = apply_config_update(runtime.config, body)
+        runtime.events.publish(ProductConfigChangedEvent())  # 应用主进程据此重读配置（自启开关即时生效）
+        return view
 
     @router.get("/api/v1/status", response_model=ApiStatusResponse)
     def status() -> ApiStatusResponse:
         return ApiStatusResponse(
-            unmet_gates=effective_unmet_gates(runtime),
             injected={
                 "transcribe": runtime.transcribe is not None,
                 "polish": runtime.polish is not None,

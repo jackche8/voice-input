@@ -8,7 +8,9 @@ from __future__ import annotations
 from enum import StrEnum
 from typing import Annotated, Any, Literal, Union
 
-from pydantic import BaseModel, ConfigDict, Field, RootModel
+from pydantic import BaseModel, ConfigDict, Field, RootModel, model_validator
+
+from _ports import DEFAULT_ASR_PORT, DEFAULT_OLLAMA_PORT
 
 
 class ErrorCode(StrEnum):
@@ -120,6 +122,24 @@ class ProductEventType(StrEnum):
     busy = "busy"
     history_write_failed = "history_write_failed"
     delivery_unknown = "delivery_unknown"
+    component_command = "component_command"  # 服务端 → 应用：看护层命令（只给应用主进程，网页事件流忽略）
+    config_changed = "config_changed"  # 配置已保存：应用重读配置（开机自启开关即时生效）
+
+
+class ComponentName(StrEnum):
+    """应用看护层拉起并保持运行的三个后台组件（拉起顺序即此顺序）。"""
+
+    ollama = "ollama"
+    asr = "asr"
+    server = "server"
+
+
+class ComponentState(StrEnum):
+    not_installed = "not_installed"
+    starting = "starting"
+    running = "running"
+    backing_off = "backing_off"
+    stopped = "stopped"
 
 
 class HistoryPolish(StrEnum):
@@ -265,6 +285,20 @@ class ProductDeliveryUnknownEvent(BaseModel):
     text: str | None = None
 
 
+class ProductComponentCommandEvent(BaseModel):
+    """设置页/托盘「重试」经服务端转给应用看护层；组件是否已安装由看护层按文件自行发现，不经事件。"""
+
+    model_config = ConfigDict(extra="forbid")
+    event: Literal[ProductEventType.component_command] = ProductEventType.component_command
+    action: Literal["retry"]
+    component: ComponentName
+
+
+class ProductConfigChangedEvent(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    event: Literal[ProductEventType.config_changed] = ProductEventType.config_changed
+
+
 ProductSSEEvent = Annotated[
     Union[
         ProductIdleEvent,
@@ -276,6 +310,8 @@ ProductSSEEvent = Annotated[
         ProductBusyEvent,
         ProductHistoryWriteFailedEvent,
         ProductDeliveryUnknownEvent,
+        ProductComponentCommandEvent,
+        ProductConfigChangedEvent,
     ],
     Field(discriminator="event"),
 ]
@@ -585,6 +621,8 @@ class AppConfig(BaseModel):
     hotkey_screenshot: str = "ctrl+alt+x"
     hotkey_ocr: str = "ctrl+alt+o"
     hotkey_repeat: str = "ctrl+alt+r"
+    hotkey_annotate: str = "ctrl+alt+a"
+    autostart_enabled: bool = True
     vision_model: str | None = None
     voice_mode: str | None = None
     asr_sidecar_url: str | None = None
@@ -594,15 +632,11 @@ class AppConfig(BaseModel):
 
 
 class ApiStatusResponse(BaseModel):
-    """当前运行时状态。unmet_gates 非空即表示未达切流条件，不得把 ok 当成可上线。"""
+    """当前运行时状态。各能力是否就绪看 injected 与设置检查，不看 ok。"""
 
     model_config = ConfigDict(extra="forbid")
-    ok: Literal[True] = Field(
-        True,
-        description="本接口响应成功，不是可上线或已切流。切流条件只看 unmet_gates。",
-    )
+    ok: Literal[True] = Field(True, description="本接口响应成功；不代表各能力都已就绪。")
     service: Literal["ollama-voice-input"] = "ollama-voice-input"
-    unmet_gates: list[str] = Field(default_factory=list, description="未满足的切流条件；非空即不可上线。")
     injected: dict[str, bool] = Field(default_factory=dict)
 
 
@@ -612,7 +646,7 @@ class ApiStatusResponse(BaseModel):
 
 PRODUCT_OLLAMA_MODEL = "qwen3.5:4b"
 PRODUCT_ASR_MODEL = "Qwen/Qwen3-ASR-1.7B"
-DEFAULT_OLLAMA_PORT = 17947
+OLLAMA_VERSION = "0.40.16"  # 设置页安装的官方 Ollama 发行版本（固定，安装目录与下载地址都由它派生）
 DEFAULT_OLLAMA_BASE_URL = f"http://127.0.0.1:{DEFAULT_OLLAMA_PORT}"
 
 
@@ -627,6 +661,8 @@ class AppConfigView(BaseModel):
     hotkey_screenshot: str
     hotkey_ocr: str = "ctrl+alt+o"
     hotkey_repeat: str
+    hotkey_annotate: str
+    autostart_enabled: bool
     ollama_model: str = Field(description="产品固定纠错/翻译模型，只读")
 
 
@@ -641,6 +677,50 @@ class AppConfigUpdate(BaseModel):
     hotkey_screenshot: str | None = Field(default=None, min_length=1)
     hotkey_ocr: str | None = Field(default=None, min_length=1)
     hotkey_repeat: str | None = Field(default=None, min_length=1)
+    hotkey_annotate: str | None = Field(default=None, min_length=1)
+    autostart_enabled: bool | None = None
+
+
+# ---------------------------------------------------------------------------
+# 看护层组件状态（应用主进程唯一来源，上报服务端缓存，设置页只读）
+# ---------------------------------------------------------------------------
+
+
+class ComponentStatus(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    name: ComponentName
+    state: ComponentState
+    reason: str | None = Field(default=None, description="未安装缺什么 / 退避或停止的最后原因")
+    failures: int = Field(default=0, ge=0, description="当前连续失败次数（运行满 60s 清零）")
+    retry_at: str | None = Field(default=None, description="退避中时的下次拉起时间（ISO 8601）")
+    pid: int | None = Field(default=None, ge=1)
+    since: str = Field(description="进入当前状态的时间（ISO 8601）")
+
+
+class ComponentReport(BaseModel):
+    """POST /api/v1/components：整份快照，三个组件恰好各一项。"""
+
+    model_config = ConfigDict(extra="forbid")
+    components: list[ComponentStatus]
+
+    @model_validator(mode="after")
+    def _exactly_each_component_once(self) -> "ComponentReport":
+        names = [item.name for item in self.components]
+        if sorted(names) != sorted(ComponentName):
+            raise ValueError(f"组件快照必须恰好包含 {[n.value for n in ComponentName]} 各一项，收到 {[n.value for n in names]}")
+        return self
+
+
+class ComponentReportAccepted(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    ok: Literal[True] = True
+
+
+class ComponentRetryAccepted(BaseModel):
+    """POST /api/v1/components/{name}/retry：重试命令已经产品事件流转给应用看护层（是否拉起成功看后续组件状态）。"""
+
+    model_config = ConfigDict(extra="forbid")
+    ok: Literal[True] = True
 
 
 # ---------------------------------------------------------------------------
@@ -656,10 +736,11 @@ class SetupComponentState(StrEnum):
 
 
 class SetupTaskKind(StrEnum):
+    """安装任务种类（组件「启动」由看护层负责，不是任务）。"""
+
     asr_download = "asr_download"
-    asr_start = "asr_start"
+    asr_runtime_install = "asr_runtime_install"
     ollama_install = "ollama_install"
-    ollama_start = "ollama_start"
     ollama_pull = "ollama_pull"
 
 
@@ -667,6 +748,7 @@ class SetupTaskState(StrEnum):
     running = "running"
     succeeded = "succeeded"
     failed = "failed"
+    interrupted = "interrupted"  # worker 不在了（服务被结束、应用退出）：可清理后重试
 
 
 class SetupProgress(BaseModel):
@@ -677,13 +759,8 @@ class SetupProgress(BaseModel):
     stage: str | None = None
 
 
-class SetupTaskCreate(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    kind: SetupTaskKind
-
-
 class SetupTask(BaseModel):
-    """一次真实安装/下载/启动作业。succeeded 只在动作真实完成并复查通过后出现。"""
+    """一次真实安装/下载作业（在独立 worker 进程里执行）。succeeded 只在动作真实完成并复查通过后出现。"""
 
     model_config = ConfigDict(extra="forbid")
     task_id: str
@@ -706,8 +783,6 @@ class AsrSetupStatus(BaseModel):
     device_label: str | None = None
     progress: SetupProgress | None = None
     message: str = ""
-    action: SetupTaskKind | None = None
-    task_id: str | None = None
 
 
 class OllamaSetupStatus(BaseModel):
@@ -720,8 +795,59 @@ class OllamaSetupStatus(BaseModel):
     size_label: str | None = None
     progress: SetupProgress | None = None
     message: str = ""
-    action: SetupTaskKind | None = None
+
+
+class InstallAllState(StrEnum):
+    idle = "idle"
+    running = "running"
+    failed = "failed"
+    done = "done"
+
+
+class InstallStepKind(StrEnum):
+    """一键装齐的五步，固定顺序。wait_ollama 不是任务：等看护层把 Ollama 报为 running。"""
+
+    ollama_install = "ollama_install"
+    wait_ollama = "wait_ollama"
+    ollama_pull = "ollama_pull"
+    asr_runtime_install = "asr_runtime_install"
+    asr_download = "asr_download"
+
+
+class InstallStepState(StrEnum):
+    pending = "pending"
+    running = "running"
+    skipped = "skipped"  # 按事实已具备，不执行
+    done = "done"
+    failed = "failed"
+
+
+class InstallStep(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    kind: InstallStepKind
+    state: InstallStepState
+    message: str = ""
+    progress: SetupProgress | None = None
     task_id: str | None = None
+
+
+class InstallAllStatus(BaseModel):
+    """POST /api/setup/install-all 的响应与 SetupCheckResponse.install_all：恒为五步、固定顺序。
+
+    再次 POST = 从第一步重新判定（已具备的步 skipped），失败那步重新执行；运行中再次 POST 原样返回当前状态。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+    state: InstallAllState
+    current: InstallStepKind | None = None
+    steps: list[InstallStep]
+
+    @model_validator(mode="after")
+    def _five_steps_in_order(self) -> "InstallAllStatus":
+        kinds = [step.kind for step in self.steps]
+        if kinds != list(InstallStepKind):
+            raise ValueError(f"一键装齐必须恰好按序包含 {[k.value for k in InstallStepKind]}，收到 {[k.value for k in kinds]}")
+        return self
 
 
 class SetupCapability(BaseModel):
@@ -736,7 +862,7 @@ class SetupCapability(BaseModel):
 
 
 class SetupCheckResponse(BaseModel):
-    """ok 只表示检查本身成功；组件是否就绪看 asr/ollama/capabilities，是否可上线看 unmet_gates。"""
+    """ok 只表示检查本身成功；组件是否就绪看 components / asr / ollama / capabilities。"""
 
     model_config = ConfigDict(extra="forbid")
     ok: Literal[True] = True
@@ -744,7 +870,8 @@ class SetupCheckResponse(BaseModel):
     asr: AsrSetupStatus
     ollama: OllamaSetupStatus
     capabilities: list[SetupCapability]
-    unmet_gates: list[str] = Field(default_factory=list)
+    components: list[ComponentStatus] = Field(default_factory=list, description="看护层最新上报；尚未收到时为空")
+    install_all: InstallAllStatus
 
 
 # ---------------------------------------------------------------------------
@@ -775,7 +902,7 @@ class LanAccessResponse(BaseModel):
 # Sidecar HTTP 路径（应用核心只通过这些路径访问 ASR，不 import torch/vLLM）
 # ---------------------------------------------------------------------------
 
-SIDECAR_DEFAULT_BASE_URL = "http://127.0.0.1:17946"
+SIDECAR_DEFAULT_BASE_URL = f"http://127.0.0.1:{DEFAULT_ASR_PORT}"
 SIDECAR_TRANSCRIBE_PATH = "/v1/transcribe"
 SIDECAR_SESSIONS_PATH = "/v1/sessions"
 SIDECAR_CHUNK_HEADER = "X-Chunk-Index"
@@ -814,6 +941,8 @@ def contract_models() -> tuple[type[BaseModel], ...]:
         ProductBusyEvent,
         ProductHistoryWriteFailedEvent,
         ProductDeliveryUnknownEvent,
+        ProductComponentCommandEvent,
+        ProductConfigChangedEvent,
         ProductSSEEventEnvelope,
         PlatformEventCreate,
         PlatformEventAccepted,
@@ -848,9 +977,14 @@ def contract_models() -> tuple[type[BaseModel], ...]:
         AppConfigView,
         AppConfigUpdate,
         ApiStatusResponse,
+        ComponentStatus,
+        ComponentReport,
+        ComponentReportAccepted,
+        ComponentRetryAccepted,
         SetupProgress,
-        SetupTaskCreate,
         SetupTask,
+        InstallStep,
+        InstallAllStatus,
         AsrSetupStatus,
         OllamaSetupStatus,
         SetupCapability,
@@ -889,6 +1023,14 @@ def build_openapi_skeleton() -> dict[str, Any]:
 
 
 __all__ = [
+    "ComponentName",
+    "ComponentReport",
+    "ComponentReportAccepted",
+    "ComponentRetryAccepted",
+    "ComponentState",
+    "ComponentStatus",
+    "ProductComponentCommandEvent",
+    "ProductConfigChangedEvent",
     "AppConfigView",
     "AppConfigUpdate",
     "AsrSetupStatus",
@@ -900,9 +1042,13 @@ __all__ = [
     "SetupCapability",
     "SetupCheckResponse",
     "SetupComponentState",
+    "InstallAllState",
+    "InstallAllStatus",
+    "InstallStep",
+    "InstallStepKind",
+    "InstallStepState",
     "SetupProgress",
     "SetupTask",
-    "SetupTaskCreate",
     "SetupTaskKind",
     "SetupTaskState",
     "ASR_STREAMING_BLOCKERS",
@@ -911,7 +1057,7 @@ __all__ = [
     "AppConfig",
     "ChunkAccepted",
     "DEFAULT_OLLAMA_BASE_URL",
-    "DEFAULT_OLLAMA_PORT",
+    "OLLAMA_VERSION",
     "ErrorBody",
     "ErrorCode",
     "HistoryListResponse",

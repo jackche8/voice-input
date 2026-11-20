@@ -9,10 +9,10 @@ from urllib.parse import urlparse
 from starlette.requests import Request
 
 from _contracts import ErrorBody, ErrorCode
+from _ports import DEFAULT_SERVER_PORT
 from _v3.limits import canonical_request_path
 from _v3.pages import is_lan_public_path
 
-SERVER_PORT = 17945
 LOCALHOST_NAMES = frozenset({"127.0.0.1", "localhost", "::1"})
 
 # 明确允许的局域网：RFC1918、IPv6 ULA、必要的链路本地。
@@ -30,7 +30,7 @@ _LAN_NETWORKS = (
 @dataclass(frozen=True)
 class AuthSettings:
     token: str
-    port: int = SERVER_PORT
+    port: int = DEFAULT_SERVER_PORT
 
 
 def parse_ip(host: str | None) -> ipaddress.IPv4Address | ipaddress.IPv6Address | None:

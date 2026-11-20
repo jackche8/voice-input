@@ -22,8 +22,7 @@ def test_history_and_status_and_setup_not_faked(app, runtime):
     assert history["records"][0].get("state") in (None, "queued") or "state" not in history["records"][0]
 
     status = client.get("/api/v1/status").json()
-    assert status["unmet_gates"]
-    assert "qwen3.5:4b" in " ".join(status["unmet_gates"]) and "真机" in " ".join(status["unmet_gates"])
+    assert status["ok"] is True and set(status) == {"ok", "service", "injected"}
     assert TEST_TOKEN not in str(status)
 
     # 未注入设置探测时不得返回假就绪；完整设置用例见 test_setup_lan_config_pages.py

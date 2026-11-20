@@ -1,6 +1,7 @@
 """业务层测试夹具。禁止读写 live 配置/历史/jobs，禁止注入真实窗口或启动正式 daemon。"""
 from __future__ import annotations
 
+import os
 from collections.abc import Callable
 from pathlib import Path
 
@@ -13,13 +14,14 @@ from _history import HistoryStore
 from _history_service import HistoryService
 from _jobs import JobStore
 from _jobs_service import JobsService
+from _paths import default_app_paths
 from _session_finals import SessionFinalIndex
 from _utterance import UtteranceService
 
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
-LIVE_CONFIG = PROJECT_ROOT / ".config.json"
-LIVE_HISTORY = PROJECT_ROOT / ".cache" / "history.jsonl"
-LIVE_JOBS = PROJECT_ROOT / ".cache" / "jobs.json"
+LIVE = default_app_paths(os.environ)
+LIVE_CONFIG = LIVE.config
+LIVE_HISTORY = LIVE.history
+LIVE_JOBS = LIVE.jobs
 
 
 def _fingerprint(path: Path) -> tuple[bool, int | None, int | None]:

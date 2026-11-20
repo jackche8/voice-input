@@ -235,9 +235,9 @@ pass("设置面板覆盖 6 个子标签，且无百度/Whisper/0.6B 切换");
 if (setupPanelJs.includes("hotkeyHint") || setupPanelJs.includes("以后端返回的提示为准") || setupPanelJs.includes("已生效")) {
   fail("setup-panel.js 仍含空承诺或已生效文案");
 } else pass("快捷键区已去掉空承诺和已生效");
-if (!setupPanelJs.includes("sidecarRunning === true") || !setupPanelJs.includes("desktop_daemon")) {
-  fail("setup-panel.js 未按 sidecarRunning 与 desktop_daemon.detail 更新调用点");
-} else pass("setup-panel.js 已接线 sidecar 就绪判定与守护进程 detail");
+if (!setupPanelJs.includes("sidecarRunning === true")) {
+  fail("setup-panel.js 未按 sidecarRunning 判定识别就绪");
+} else pass("setup-panel.js 已接线 sidecar 就绪判定");
 
 const labels = fs.readFileSync(path.join(v3, "js/labels.js"), "utf8");
 const openapi = JSON.parse(fs.readFileSync(openapiPath, "utf8"));

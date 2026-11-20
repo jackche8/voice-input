@@ -71,7 +71,8 @@ def install_exception_handlers(app: FastAPI) -> None:
             content=error_body(
                 ErrorCode.invalid_request,
                 "请求无法通过校验",
-                details={"errors": exc.errors()},
+                # 模型校验器抛出的 ValueError 会出现在 ctx.error 里，按文本输出，否则 JSON 序列化失败成 500
+                details={"errors": jsonable_encoder(exc.errors(), custom_encoder={Exception: str})},
             ),
         )
 
@@ -147,7 +148,7 @@ def apply_runtime_security(schema: dict[str, Any]) -> None:
                 op.setdefault("security", [])
             if path == "/api/v1/status" and method == "get":
                 desc = op.get("description") or op.get("summary") or ""
-                note = "ok 只表示本接口响应成功，不是可上线或已切流；是否达切流条件只看 unmet_gates。"
+                note = "ok 只表示本接口响应成功；各能力是否就绪看 injected 与设置检查。"
                 if note not in desc:
                     op["description"] = (desc + " " + note).strip()
 
@@ -187,7 +188,7 @@ def install_openapi(app: FastAPI, *, title: str, version: str, description: str)
             "lan_token": "本机 loopback 免 token；或先判定对端为允许的局域网再恒定时间校验 token。不是任意对端+token。公网即使 token 正确也 403。",
             "host": "必须显式带服务端口。本机请求 Host 只能是 127.0.0.1 / localhost / ::1；局域网请求 Host 必须是允许的局域网地址。缺 Origin 的非浏览器请求仍受 Host 约束，防 DNS rebinding。TestClient 默认 Host testserver 不在白名单，测试须显式配置可信 Host，生产不得放行任意 Host。",
             "origin": "若存在 Origin，必须 https、端口正确，且与 Host 和对端类型一致：本机 Origin 不能搭私网 Host。未知 Origin 拒绝。缺 Origin 视为非浏览器，跳过 CSRF Origin 检查，但不等于未知 Origin，仍受对端 / token / Host 约束。无 CORS *。",
-            "status_ok": "GET /api/v1/status 的 ok 只表示本接口响应成功，不是可上线；未满足的切流条件在 unmet_gates。",
+            "status_ok": "GET /api/v1/status 的 ok 只表示本接口响应成功；各能力是否就绪看 injected 与设置检查。",
         })
         apply_runtime_security(schema)
         app.openapi_schema = schema

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""临时起一个隔离的 v3 ASGI 沙箱，监听 127.0.0.1 随机端口（禁用 17945/11434）。不改服务源码。
+"""临时起一个隔离的 v3 ASGI 沙箱，监听 127.0.0.1 随机端口（避开 _v3.isolated.FORBIDDEN_PORTS：live 三端口与 Ollama 官方端口）。不改服务源码。
 
 ready / meta 只在 uvicorn 确认已监听之后写入，避免调用方在端口尚未 accept 时就开始 fetch。
-注入测试用 setup/lan 替身，不探测本机真实环境、不启动官方软件、不安装 qrcode。
+注入测试用 setup/lan 替身（一键装齐用真实顺序任务，只替换安装 worker），不探测本机真实环境、不启动官方软件、不安装 qrcode。
 挂载 static/v3，使 /setup /voice /openapi.snapshot.json 走真实新路由。
 """
 from __future__ import annotations
@@ -19,7 +19,23 @@ from threading import Lock
 REPO = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO))
 
-RESERVED = {17945, 11434}
+from _contracts import (  # noqa: E402  仓库根目录需先加入 sys.path
+    AsrSetupStatus,
+    ComponentName,
+    ComponentState,
+    ErrorCode,
+    LogicError,
+    OllamaSetupStatus,
+    SetupCheckResponse,
+    SetupComponentState,
+    SetupProgress,
+    SetupTask,
+    SetupTaskKind,
+    SetupTaskState,
+)
+from _v3.component_routes import ComponentRegistry  # noqa: E402
+from _v3.isolated import FORBIDDEN_PORTS  # noqa: E402
+from _v3.setup_sequence import InstallSequence, SequenceFacts  # noqa: E402
 
 
 def _pick_port() -> int:
@@ -28,202 +44,116 @@ def _pick_port() -> int:
         sock.bind(("127.0.0.1", 0))
         port = sock.getsockname()[1]
         sock.close()
-        if port not in RESERVED:
+        if port not in FORBIDDEN_PORTS:
             return port
     raise RuntimeError("无法分配非保留端口")
 
 
 class SandboxTasks:
-    """内存任务表：同 kind 在 running 时幂等返回，轮询推进进度后 succeeded。"""
+    """内存安装任务（替身只替换 worker 进程）：同 kind 在 running 时幂等返回，每读一次推进进度，第二次读到 succeeded。"""
 
     def __init__(self) -> None:
         self._lock = Lock()
-        self._tasks: dict[str, dict] = {}
-        self._by_kind: dict[str, str] = {}
+        self._tasks: dict[str, SetupTask] = {}
+        self._ticks: dict[str, int] = {}
+        self._by_kind: dict[SetupTaskKind, str] = {}
         self._seq = 0
 
-    def _public(self, task: dict) -> dict:
-        return {
-            "task_id": task["task_id"],
-            "kind": task["kind"],
-            "state": task["state"],
-            "progress": task.get("progress"),
-            "message": task.get("message") or "",
-            "error": task.get("error"),
-            "started_at": task["started_at"],
-            "finished_at": task.get("finished_at"),
-        }
-
-    def start(self, kind):
-        from _contracts import SetupTaskKind
-
-        kind_value = kind.value if isinstance(kind, SetupTaskKind) else str(kind)
+    def start(self, kind: SetupTaskKind) -> SetupTask:
         with self._lock:
-            existing_id = self._by_kind.get(kind_value)
-            if existing_id and self._tasks[existing_id]["state"] == "running":
-                return self._public(self._tasks[existing_id])
+            existing = self._tasks.get(self._by_kind.get(kind, ""))
+            if existing is not None and existing.state == SetupTaskState.running:
+                return existing
             self._seq += 1
-            task_id = "sandbox-task-" + str(self._seq)
-            task = {
-                "task_id": task_id,
-                "kind": kind_value,
-                "state": "running",
-                "progress": {
-                    "completed_bytes": 0,
-                    "total_bytes": 100,
-                    "percent": 0,
-                    "stage": "start",
-                },
-                "message": "sandbox running",
-                "error": None,
-                "started_at": "2026-11-10T00:00:00+00:00",
-                "finished_at": None,
-                "_ticks": 0,
-            }
-            self._tasks[task_id] = task
-            self._by_kind[kind_value] = task_id
-            return self._public(task)
+            task = SetupTask(
+                task_id="sandbox-task-" + str(self._seq),
+                kind=kind,
+                state=SetupTaskState.running,
+                progress=SetupProgress(completed_bytes=0, total_bytes=100, percent=0, stage="start"),
+                message="sandbox running",
+                started_at="2026-11-10T00:00:00+00:00",
+            )
+            self._tasks[task.task_id] = task
+            self._ticks[task.task_id] = 0
+            self._by_kind[kind] = task.task_id
+            return task
 
-    def get(self, task_id: str):
-        from _contracts import ErrorCode, LogicError
-
+    def get(self, task_id: str) -> SetupTask:
         with self._lock:
             task = self._tasks.get(task_id)
             if task is None:
                 raise LogicError(ErrorCode.not_found, "没有这个任务")
-            if task["state"] == "running":
-                task["_ticks"] += 1
-                percent = min(100, task["_ticks"] * 25)
-                task["progress"] = {
-                    "completed_bytes": percent,
-                    "total_bytes": 100,
-                    "percent": percent,
-                    "stage": "download",
-                }
-                task["message"] = "sandbox running"
-                if task["_ticks"] >= 2:
-                    task["state"] = "succeeded"
-                    task["finished_at"] = "2026-11-10T00:00:01+00:00"
-                    task["message"] = "sandbox completed"
-                    task["progress"] = {
-                        "completed_bytes": 100,
-                        "total_bytes": 100,
-                        "percent": 100,
-                        "stage": "done",
-                    }
-                    self._status_after_success(task["kind"])
-            return self._public(task)
+            if task.state != SetupTaskState.running:
+                return task
+            self._ticks[task_id] += 1
+            percent = min(100, self._ticks[task_id] * 50)
+            update = {"progress": SetupProgress(completed_bytes=percent, total_bytes=100, percent=percent, stage="download")}
+            if self._ticks[task_id] >= 2:
+                update.update(state=SetupTaskState.succeeded, message="sandbox completed",
+                              finished_at="2026-11-10T00:00:01+00:00")
+            task = task.model_copy(update=update)
+            self._tasks[task_id] = task
+            return task
 
-    def _status_after_success(self, kind: str) -> None:
-        # 由 Setup 替身在 check() 里读取 _done kinds
-        return
+    def succeeded(self, kind: SetupTaskKind) -> bool:
+        with self._lock:
+            task = self._tasks.get(self._by_kind.get(kind, ""))
+            return task is not None and task.state == SetupTaskState.succeeded
 
 
 class SandboxSetup:
-    def __init__(self) -> None:
+    """设置替身：真实一键装齐顺序任务（InstallSequence）+ 真实组件登记表，只替换安装 worker 与本机探测。"""
+
+    def __init__(self, components: ComponentRegistry, state_file: Path) -> None:
         self.tasks = SandboxTasks()
-        self._done: set[str] = set()
-
-    def check(self):
-        done = set()
-        with self.tasks._lock:
-            for kind, task_id in self.tasks._by_kind.items():
-                task = self.tasks._tasks.get(task_id)
-                if task and task["state"] == "succeeded":
-                    done.add(kind)
-        asr_ready = "asr_download" in done and "asr_start" in done
-        asr_downloading = any(
-            self._running(k) for k in ("asr_download", "asr_start")
+        self._components = components
+        done = self.tasks.succeeded
+        self.sequence = InstallSequence(
+            tasks=self.tasks,
+            facts=SequenceFacts(
+                ollama_installed=lambda: done(SetupTaskKind.ollama_install),
+                ollama_has_model=lambda: done(SetupTaskKind.ollama_pull),
+                asr_runtime_installed=lambda: done(SetupTaskKind.asr_runtime_install),
+                asr_weights_complete=lambda: done(SetupTaskKind.asr_download),
+            ),
+            components=components,
+            state_file=state_file,
+            poll_s=0.05,
+            wait_ollama_s=5.0,
         )
-        if asr_ready:
-            asr_status = "ready"
-            asr_action = None
-        elif asr_downloading:
-            asr_status = "downloading" if self._running("asr_download") else "missing"
-            asr_action = "asr_download" if self._running("asr_download") else "asr_start"
-        elif "asr_download" in done:
-            asr_status = "missing"
-            asr_action = "asr_start"
-        else:
-            asr_status = "missing"
-            asr_action = "asr_download"
-        running_asr = self._running_task("asr_download") or self._running_task("asr_start")
 
-        ollama_installed = "ollama_install" in done
-        ollama_running = "ollama_start" in done
-        model_ready = "ollama_pull" in done
-        if self._running("ollama_pull"):
-            model_status = "downloading"
-            ol_action = "ollama_pull"
-        elif model_ready:
-            model_status = "ready"
-            ol_action = None if ollama_running else "ollama_start"
-        elif not ollama_installed:
-            model_status = "missing"
-            ol_action = "ollama_install"
-        elif not ollama_running:
-            model_status = "missing"
-            ol_action = "ollama_start"
-        else:
-            model_status = "missing"
-            ol_action = "ollama_pull"
-        running_ol = (
-            self._running_task("ollama_install")
-            or self._running_task("ollama_start")
-            or self._running_task("ollama_pull")
-        )
-        return {
-            "ok": True,
-            "session_type": "sandbox",
-            "asr": {
-                "model_name": "Qwen/Qwen3-ASR-1.7B",
-                "status": asr_status,
-                "weights_present": "asr_download" in done,
-                "sidecar_running": "asr_start" in done,
-                "size_label": None,
-                "device_label": None,
-                "progress": (running_asr or {}).get("progress") if asr_status == "downloading" else None,
-                "message": "沙箱探测：未接生产设备" if asr_status != "ready" else "沙箱识别已就绪",
-                "action": asr_action,
-                "task_id": (running_asr or {}).get("task_id"),
-            },
-            "ollama": {
-                "model_name": "qwen3.5:4b",
-                "installed": ollama_installed,
-                "version": "sandbox" if ollama_installed else None,
-                "running": ollama_running,
-                "model_status": model_status,
-                "size_label": None,
-                "progress": (running_ol or {}).get("progress") if model_status == "downloading" else None,
-                "message": "沙箱探测：未接生产设备" if model_status != "ready" else "沙箱模型已就绪",
-                "action": ol_action,
-                "task_id": (running_ol or {}).get("task_id"),
-            },
-            "capabilities": [
-                {
-                    "id": "clipboard",
-                    "label": "剪贴板",
-                    "available": False,
-                    "required": True,
-                    "detail": "沙箱未提供剪贴板",
-                }
+    def _running(self, name: ComponentName) -> bool:
+        status = self._components.get(name)
+        return status is not None and status.state == ComponentState.running
+
+    def check(self) -> SetupCheckResponse:
+        done = self.tasks.succeeded
+        weights = done(SetupTaskKind.asr_download)
+        has_model = done(SetupTaskKind.ollama_pull)
+        ollama_installed = done(SetupTaskKind.ollama_install)
+        return SetupCheckResponse(
+            session_type="sandbox",
+            asr=AsrSetupStatus(
+                model_name="Qwen/Qwen3-ASR-1.7B",
+                status=SetupComponentState.ready if weights else SetupComponentState.missing,
+                weights_present=weights,
+                sidecar_running=self._running(ComponentName.asr),
+                message="沙箱识别权重已在" if weights else "沙箱探测：未接生产设备",
+            ),
+            ollama=OllamaSetupStatus(
+                model_name="qwen3.5:4b",
+                installed=ollama_installed,
+                version="sandbox" if ollama_installed else None,
+                running=self._running(ComponentName.ollama),
+                model_status=SetupComponentState.ready if has_model else SetupComponentState.missing,
+                message="沙箱模型已就绪" if has_model else "沙箱探测：未接生产设备",
+            ),
+            capabilities=[
+                {"id": "clipboard", "label": "剪贴板", "available": False, "required": True, "detail": "沙箱未提供剪贴板"}
             ],
-            "unmet_gates": ["sandbox runtime: 非生产，未切流"],
-        }
-
-    def _running(self, kind: str) -> bool:
-        task = self._running_task(kind)
-        return bool(task)
-
-    def _running_task(self, kind: str):
-        with self.tasks._lock:
-            task_id = self.tasks._by_kind.get(kind)
-            if not task_id:
-                return None
-            task = self.tasks._tasks.get(task_id)
-            if task and task["state"] == "running":
-                return task
-            return None
+            components=self._components.snapshot(),
+            install_all=self.sequence.status(),
+        )
 
 
 class SandboxLan:
@@ -265,22 +195,20 @@ def main() -> int:
     import uvicorn
 
     port = _pick_port()
-    if port in RESERVED:
-        raise SystemExit("拒绝使用保留端口")
+    if port in FORBIDDEN_PORTS:
+        raise SystemExit(f"拒绝使用保留端口 {port}（{sorted(FORBIDDEN_PORTS)}）")
 
     def transcribe(audio: bytes, language=None, context=None):
         return SttResponse(text="sandbox transcript", language=language or "zh")
 
     token = "ui-business-sandbox-token"
-    setup = SandboxSetup()
     runtime = build_sandbox_runtime(
         root=sandbox_root,
         token=token,
         port=port,
         transcribe=transcribe,
-        setup=setup,
-        unmet_gates=("sandbox runtime: 非生产，未切流",),
     )
+    runtime.setup = SandboxSetup(runtime.components, sandbox_root / "install_all.json")
     runtime.lan = SandboxLan(port, token)
     static_v3 = REPO / "static" / "v3"
     app = create_app(runtime, static_v3=static_v3)

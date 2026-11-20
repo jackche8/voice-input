@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "ollama-voice-input v1",
-    "description": "v3 `/api/v1` 与 `/api/setup/*` 路由，以及 static/v3 唯一界面入口。是否已可上线只看 unmet_gates。\n\n鉴权：本机以 socket 对端 loopback（127.0.0.1 / ::1，含 IPv4-mapped）判定，忽略 X-Forwarded-For。\n局域网路径：先判定对端属于 RFC1918、IPv6 ULA 或必要链路本地，再恒定时间校验 token。\n公网、198.18/15、TEST-NET、保留网段以及无法解析的对端，即使 token 正确也 403。\n仅本机路径即使带 token 也不对远程放行。\nHost 必须带服务端口：本机请求只能是 127.0.0.1 / localhost / ::1；局域网请求必须是允许的局域网地址。\n缺 Origin 视为非浏览器，不做 CSRF Origin 检查，但仍受对端 / token / Host 约束（防 DNS rebinding）。\n若存在 Origin，必须是 https 且与 Host、对端类型一致；本机 Origin 不能搭私网 Host；未知 Origin 拒绝。不开 CORS *。\nGET /api/v1/status 的 ok 只表示本接口响应成功，不是可上线；是否达切流条件只看 unmet_gates。\nSSE 走 HTTP，不使用 WebSocket。请求体在 ASGI receive 层按累计实际字节限流，超限 413，不把超额字节喂给下游。",
+    "description": "v3 `/api/v1` 与 `/api/setup/*` 路由，以及 static/v3 唯一界面入口。\n\n鉴权：本机以 socket 对端 loopback（127.0.0.1 / ::1，含 IPv4-mapped）判定，忽略 X-Forwarded-For。\n局域网路径：先判定对端属于 RFC1918、IPv6 ULA 或必要链路本地，再恒定时间校验 token。\n公网、198.18/15、TEST-NET、保留网段以及无法解析的对端，即使 token 正确也 403。\n仅本机路径即使带 token 也不对远程放行。\nHost 必须带服务端口：本机请求只能是 127.0.0.1 / localhost / ::1；局域网请求必须是允许的局域网地址。\n缺 Origin 视为非浏览器，不做 CSRF Origin 检查，但仍受对端 / token / Host 约束（防 DNS rebinding）。\n若存在 Origin，必须是 https 且与 Host、对端类型一致；本机 Origin 不能搭私网 Host；未知 Origin 拒绝。不开 CORS *。\nGET /api/v1/status 的 ok 只表示本接口响应成功；各能力是否就绪看 injected 与 /api/setup/check。\nSSE 走 HTTP，不使用 WebSocket。请求体在 ASGI receive 层按累计实际字节限流，超限 413，不把超额字节喂给下游。",
     "version": "0.0.0-v3-api"
   },
   "paths": {
@@ -1258,7 +1258,7 @@
           }
         },
         "security": [],
-        "description": "Status ok 只表示本接口响应成功，不是可上线或已切流；是否达切流条件只看 unmet_gates。"
+        "description": "Status ok 只表示本接口响应成功；各能力是否就绪看 injected 与设置检查。"
       }
     },
     "/api/v1/events": {
@@ -1356,50 +1356,18 @@
         "security": []
       }
     },
-    "/api/setup/check": {
-      "get": {
-        "tags": [
-          "setup"
-        ],
-        "summary": "Setup Check",
-        "operationId": "setup_check_api_setup_check_get",
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/SetupCheckResponse"
-                }
-              }
-            }
-          },
-          "403": {
-            "description": "鉴权失败：非本机、对端不是允许的局域网、token 无效、Host/Origin 不可信。",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          }
-        },
-        "security": []
-      }
-    },
-    "/api/setup/tasks": {
+    "/api/v1/components": {
       "post": {
         "tags": [
-          "setup"
+          "components"
         ],
-        "summary": "Setup Task Start",
-        "operationId": "setup_task_start_api_setup_tasks_post",
+        "summary": "Report Components",
+        "operationId": "report_components_api_v1_components_post",
         "requestBody": {
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/SetupTaskCreate"
+                "$ref": "#/components/schemas/ComponentReport"
               }
             }
           },
@@ -1411,7 +1379,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/SetupTask"
+                  "$ref": "#/components/schemas/ComponentReportAccepted"
                 }
               }
             }
@@ -1450,31 +1418,31 @@
         "security": []
       }
     },
-    "/api/setup/tasks/{task_id}": {
-      "get": {
+    "/api/v1/components/{name}/retry": {
+      "post": {
         "tags": [
-          "setup"
+          "components"
         ],
-        "summary": "Setup Task Get",
-        "operationId": "setup_task_get_api_setup_tasks__task_id__get",
+        "summary": "Retry Component",
+        "operationId": "retry_component_api_v1_components__name__retry_post",
         "parameters": [
           {
-            "name": "task_id",
+            "name": "name",
             "in": "path",
             "required": true,
             "schema": {
               "type": "string",
-              "title": "Task Id"
+              "title": "Name"
             }
           }
         ],
         "responses": {
-          "200": {
+          "202": {
             "description": "Successful Response",
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/SetupTask"
+                  "$ref": "#/components/schemas/ComponentRetryAccepted"
                 }
               }
             }
@@ -1491,6 +1459,91 @@
           },
           "403": {
             "description": "鉴权失败：非本机、对端不是允许的局域网、token 无效、Host/Origin 不可信。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "请求体超过该路径的累计字节上限（缺 Content-Length 时同样生效）。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": []
+      }
+    },
+    "/api/setup/check": {
+      "get": {
+        "tags": [
+          "setup"
+        ],
+        "summary": "Setup Check",
+        "operationId": "setup_check_api_setup_check_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SetupCheckResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "鉴权失败：非本机、对端不是允许的局域网、token 无效、Host/Origin 不可信。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": []
+      }
+    },
+    "/api/setup/install-all": {
+      "post": {
+        "tags": [
+          "setup"
+        ],
+        "summary": "Setup Install All",
+        "description": "开始（或从失败步重试）一键装齐；正在进行时原样返回当前状态，不重复启动。",
+        "operationId": "setup_install_all_api_setup_install_all_post",
+        "responses": {
+          "202": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InstallAllStatus"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "鉴权失败：非本机、对端不是允许的局域网、token 无效、Host/Origin 不可信。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "请求体超过该路径的累计字节上限（缺 Content-Length 时同样生效）。",
             "content": {
               "application/json": {
                 "schema": {
@@ -1554,7 +1607,7 @@
             "type": "boolean",
             "const": true,
             "title": "Ok",
-            "description": "本接口响应成功，不是可上线或已切流。切流条件只看 unmet_gates。",
+            "description": "本接口响应成功；不代表各能力都已就绪。",
             "default": true
           },
           "service": {
@@ -1562,14 +1615,6 @@
             "const": "ollama-voice-input",
             "title": "Service",
             "default": "ollama-voice-input"
-          },
-          "unmet_gates": {
-            "items": {
-              "type": "string"
-            },
-            "type": "array",
-            "title": "Unmet Gates",
-            "description": "未满足的切流条件；非空即不可上线。"
           },
           "injected": {
             "additionalProperties": {
@@ -1582,7 +1627,7 @@
         "additionalProperties": false,
         "type": "object",
         "title": "ApiStatusResponse",
-        "description": "当前运行时状态。unmet_gates 非空即表示未达切流条件，不得把 ok 当成可上线。"
+        "description": "当前运行时状态。各能力是否就绪看 injected 与设置检查，不看 ok。"
       },
       "AppConfigUpdate": {
         "properties": {
@@ -1670,6 +1715,29 @@
               }
             ],
             "title": "Hotkey Repeat"
+          },
+          "hotkey_annotate": {
+            "anyOf": [
+              {
+                "type": "string",
+                "minLength": 1
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Hotkey Annotate"
+          },
+          "autostart_enabled": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Autostart Enabled"
           }
         },
         "additionalProperties": false,
@@ -1711,6 +1779,14 @@
             "type": "string",
             "title": "Hotkey Repeat"
           },
+          "hotkey_annotate": {
+            "type": "string",
+            "title": "Hotkey Annotate"
+          },
+          "autostart_enabled": {
+            "type": "boolean",
+            "title": "Autostart Enabled"
+          },
           "ollama_model": {
             "type": "string",
             "title": "Ollama Model",
@@ -1726,6 +1802,8 @@
           "hotkey_voice",
           "hotkey_screenshot",
           "hotkey_repeat",
+          "hotkey_annotate",
+          "autostart_enabled",
           "ollama_model"
         ],
         "title": "AppConfigView",
@@ -1785,27 +1863,6 @@
             "type": "string",
             "title": "Message",
             "default": ""
-          },
-          "action": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/SetupTaskKind"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
-          "task_id": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Task Id"
           }
         },
         "additionalProperties": false,
@@ -2006,6 +2063,138 @@
         ],
         "title": "ChunkAccepted"
       },
+      "ComponentName": {
+        "type": "string",
+        "enum": [
+          "ollama",
+          "asr",
+          "server"
+        ],
+        "title": "ComponentName",
+        "description": "应用看护层拉起并保持运行的三个后台组件（拉起顺序即此顺序）。"
+      },
+      "ComponentReport": {
+        "properties": {
+          "components": {
+            "items": {
+              "$ref": "#/components/schemas/ComponentStatus"
+            },
+            "type": "array",
+            "title": "Components"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "components"
+        ],
+        "title": "ComponentReport",
+        "description": "POST /api/v1/components：整份快照，三个组件恰好各一项。"
+      },
+      "ComponentReportAccepted": {
+        "properties": {
+          "ok": {
+            "type": "boolean",
+            "const": true,
+            "title": "Ok",
+            "default": true
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "ComponentReportAccepted"
+      },
+      "ComponentRetryAccepted": {
+        "properties": {
+          "ok": {
+            "type": "boolean",
+            "const": true,
+            "title": "Ok",
+            "default": true
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "ComponentRetryAccepted",
+        "description": "POST /api/v1/components/{name}/retry：重试命令已经产品事件流转给应用看护层（是否拉起成功看后续组件状态）。"
+      },
+      "ComponentState": {
+        "type": "string",
+        "enum": [
+          "not_installed",
+          "starting",
+          "running",
+          "backing_off",
+          "stopped"
+        ],
+        "title": "ComponentState"
+      },
+      "ComponentStatus": {
+        "properties": {
+          "name": {
+            "$ref": "#/components/schemas/ComponentName"
+          },
+          "state": {
+            "$ref": "#/components/schemas/ComponentState"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason",
+            "description": "未安装缺什么 / 退避或停止的最后原因"
+          },
+          "failures": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Failures",
+            "description": "当前连续失败次数（运行满 60s 清零）",
+            "default": 0
+          },
+          "retry_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Retry At",
+            "description": "退避中时的下次拉起时间（ISO 8601）"
+          },
+          "pid": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 1.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Pid"
+          },
+          "since": {
+            "type": "string",
+            "title": "Since",
+            "description": "进入当前状态的时间（ISO 8601）"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "name",
+          "state",
+          "since"
+        ],
+        "title": "ComponentStatus"
+      },
       "ErrorCode": {
         "type": "string",
         "enum": [
@@ -2151,6 +2340,114 @@
         ],
         "title": "HistoryRecord",
         "description": "新记录显式使用 source / polish / job_id。旧 mode 仅兼容读取，不是这些字段的别名。"
+      },
+      "InstallAllState": {
+        "type": "string",
+        "enum": [
+          "idle",
+          "running",
+          "failed",
+          "done"
+        ],
+        "title": "InstallAllState"
+      },
+      "InstallAllStatus": {
+        "properties": {
+          "state": {
+            "$ref": "#/components/schemas/InstallAllState"
+          },
+          "current": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/InstallStepKind"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "steps": {
+            "items": {
+              "$ref": "#/components/schemas/InstallStep"
+            },
+            "type": "array",
+            "title": "Steps"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "state",
+          "steps"
+        ],
+        "title": "InstallAllStatus",
+        "description": "POST /api/setup/install-all 的响应与 SetupCheckResponse.install_all：恒为五步、固定顺序。\n\n再次 POST = 从第一步重新判定（已具备的步 skipped），失败那步重新执行；运行中再次 POST 原样返回当前状态。"
+      },
+      "InstallStep": {
+        "properties": {
+          "kind": {
+            "$ref": "#/components/schemas/InstallStepKind"
+          },
+          "state": {
+            "$ref": "#/components/schemas/InstallStepState"
+          },
+          "message": {
+            "type": "string",
+            "title": "Message",
+            "default": ""
+          },
+          "progress": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SetupProgress"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "task_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Task Id"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "kind",
+          "state"
+        ],
+        "title": "InstallStep"
+      },
+      "InstallStepKind": {
+        "type": "string",
+        "enum": [
+          "ollama_install",
+          "wait_ollama",
+          "ollama_pull",
+          "asr_runtime_install",
+          "asr_download"
+        ],
+        "title": "InstallStepKind",
+        "description": "一键装齐的五步，固定顺序。wait_ollama 不是任务：等看护层把 Ollama 报为 running。"
+      },
+      "InstallStepState": {
+        "type": "string",
+        "enum": [
+          "pending",
+          "running",
+          "skipped",
+          "done",
+          "failed"
+        ],
+        "title": "InstallStepState"
       },
       "JobAckAccepted": {
         "properties": {
@@ -2724,27 +3021,6 @@
             "type": "string",
             "title": "Message",
             "default": ""
-          },
-          "action": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/SetupTaskKind"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
-          "task_id": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Task Id"
           }
         },
         "additionalProperties": false,
@@ -3057,12 +3333,16 @@
             "type": "array",
             "title": "Capabilities"
           },
-          "unmet_gates": {
+          "components": {
             "items": {
-              "type": "string"
+              "$ref": "#/components/schemas/ComponentStatus"
             },
             "type": "array",
-            "title": "Unmet Gates"
+            "title": "Components",
+            "description": "看护层最新上报；尚未收到时为空"
+          },
+          "install_all": {
+            "$ref": "#/components/schemas/InstallAllStatus"
           }
         },
         "additionalProperties": false,
@@ -3071,10 +3351,11 @@
           "session_type",
           "asr",
           "ollama",
-          "capabilities"
+          "capabilities",
+          "install_all"
         ],
         "title": "SetupCheckResponse",
-        "description": "ok 只表示检查本身成功；组件是否就绪看 asr/ollama/capabilities，是否可上线看 unmet_gates。"
+        "description": "ok 只表示检查本身成功；组件是否就绪看 components / asr / ollama / capabilities。"
       },
       "SetupComponentState": {
         "type": "string",
@@ -3140,103 +3421,6 @@
         "additionalProperties": false,
         "type": "object",
         "title": "SetupProgress"
-      },
-      "SetupTask": {
-        "properties": {
-          "task_id": {
-            "type": "string",
-            "title": "Task Id"
-          },
-          "kind": {
-            "$ref": "#/components/schemas/SetupTaskKind"
-          },
-          "state": {
-            "$ref": "#/components/schemas/SetupTaskState"
-          },
-          "progress": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/SetupProgress"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
-          "message": {
-            "type": "string",
-            "title": "Message",
-            "default": ""
-          },
-          "error": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/ErrorCode"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
-          "started_at": {
-            "type": "string",
-            "title": "Started At"
-          },
-          "finished_at": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Finished At"
-          }
-        },
-        "additionalProperties": false,
-        "type": "object",
-        "required": [
-          "task_id",
-          "kind",
-          "state",
-          "started_at"
-        ],
-        "title": "SetupTask",
-        "description": "一次真实安装/下载/启动作业。succeeded 只在动作真实完成并复查通过后出现。"
-      },
-      "SetupTaskCreate": {
-        "properties": {
-          "kind": {
-            "$ref": "#/components/schemas/SetupTaskKind"
-          }
-        },
-        "additionalProperties": false,
-        "type": "object",
-        "required": [
-          "kind"
-        ],
-        "title": "SetupTaskCreate"
-      },
-      "SetupTaskKind": {
-        "type": "string",
-        "enum": [
-          "asr_download",
-          "asr_start",
-          "ollama_install",
-          "ollama_start",
-          "ollama_pull"
-        ],
-        "title": "SetupTaskKind"
-      },
-      "SetupTaskState": {
-        "type": "string",
-        "enum": [
-          "running",
-          "succeeded",
-          "failed"
-        ],
-        "title": "SetupTaskState"
       },
       "SttResponse": {
         "properties": {
@@ -3582,6 +3766,16 @@
             "title": "Hotkey Repeat",
             "type": "string"
           },
+          "hotkey_annotate": {
+            "default": "ctrl+alt+a",
+            "title": "Hotkey Annotate",
+            "type": "string"
+          },
+          "autostart_enabled": {
+            "default": true,
+            "title": "Autostart Enabled",
+            "type": "boolean"
+          },
           "vision_model": {
             "anyOf": [
               {
@@ -3721,6 +3915,45 @@
           }
         },
         "title": "JobStoreDocument",
+        "type": "object"
+      },
+      "ProductComponentCommandEvent": {
+        "additionalProperties": false,
+        "description": "设置页/托盘「重试」经服务端转给应用看护层；组件是否已安装由看护层按文件自行发现，不经事件。",
+        "properties": {
+          "event": {
+            "const": "component_command",
+            "default": "component_command",
+            "title": "Event",
+            "type": "string"
+          },
+          "action": {
+            "const": "retry",
+            "title": "Action",
+            "type": "string"
+          },
+          "component": {
+            "$ref": "#/components/schemas/ComponentName"
+          }
+        },
+        "required": [
+          "action",
+          "component"
+        ],
+        "title": "ProductComponentCommandEvent",
+        "type": "object"
+      },
+      "ProductConfigChangedEvent": {
+        "additionalProperties": false,
+        "properties": {
+          "event": {
+            "const": "config_changed",
+            "default": "config_changed",
+            "title": "Event",
+            "type": "string"
+          }
+        },
+        "title": "ProductConfigChangedEvent",
         "type": "object"
       },
       "ProductDeliveryUnknownEvent": {
@@ -3900,6 +4133,8 @@
         "discriminator": {
           "mapping": {
             "busy": "#/components/schemas/ProductBusyEvent",
+            "component_command": "#/components/schemas/ProductComponentCommandEvent",
+            "config_changed": "#/components/schemas/ProductConfigChangedEvent",
             "delivery_unknown": "#/components/schemas/ProductDeliveryUnknownEvent",
             "error": "#/components/schemas/ProductErrorEvent",
             "history_write_failed": "#/components/schemas/ProductHistoryWriteFailedEvent",
@@ -3938,6 +4173,12 @@
           },
           {
             "$ref": "#/components/schemas/ProductDeliveryUnknownEvent"
+          },
+          {
+            "$ref": "#/components/schemas/ProductComponentCommandEvent"
+          },
+          {
+            "$ref": "#/components/schemas/ProductConfigChangedEvent"
           }
         ],
         "title": "ProductSSEEventEnvelope"
@@ -4128,6 +4369,94 @@
         ],
         "title": "SessionSSEEventEnvelope"
       },
+      "SetupTask": {
+        "additionalProperties": false,
+        "description": "一次真实安装/下载作业（在独立 worker 进程里执行）。succeeded 只在动作真实完成并复查通过后出现。",
+        "properties": {
+          "task_id": {
+            "title": "Task Id",
+            "type": "string"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/SetupTaskKind"
+          },
+          "state": {
+            "$ref": "#/components/schemas/SetupTaskState"
+          },
+          "progress": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SetupProgress"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "message": {
+            "default": "",
+            "title": "Message",
+            "type": "string"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ErrorCode"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "started_at": {
+            "title": "Started At",
+            "type": "string"
+          },
+          "finished_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Finished At"
+          }
+        },
+        "required": [
+          "task_id",
+          "kind",
+          "state",
+          "started_at"
+        ],
+        "title": "SetupTask",
+        "type": "object"
+      },
+      "SetupTaskKind": {
+        "description": "安装任务种类（组件「启动」由看护层负责，不是任务）。",
+        "enum": [
+          "asr_download",
+          "asr_runtime_install",
+          "ollama_install",
+          "ollama_pull"
+        ],
+        "title": "SetupTaskKind",
+        "type": "string"
+      },
+      "SetupTaskState": {
+        "enum": [
+          "running",
+          "succeeded",
+          "failed",
+          "interrupted"
+        ],
+        "title": "SetupTaskState",
+        "type": "string"
+      },
       "SttRequest": {
         "additionalProperties": false,
         "properties": {
@@ -4219,6 +4548,6 @@
     "lan_token": "本机 loopback 免 token；或先判定对端为允许的局域网再恒定时间校验 token。不是任意对端+token。公网即使 token 正确也 403。",
     "host": "必须显式带服务端口。本机请求 Host 只能是 127.0.0.1 / localhost / ::1；局域网请求 Host 必须是允许的局域网地址。缺 Origin 的非浏览器请求仍受 Host 约束，防 DNS rebinding。TestClient 默认 Host testserver 不在白名单，测试须显式配置可信 Host，生产不得放行任意 Host。",
     "origin": "若存在 Origin，必须 https、端口正确，且与 Host 和对端类型一致：本机 Origin 不能搭私网 Host。未知 Origin 拒绝。缺 Origin 视为非浏览器，跳过 CSRF Origin 检查，但不等于未知 Origin，仍受对端 / token / Host 约束。无 CORS *。",
-    "status_ok": "GET /api/v1/status 的 ok 只表示本接口响应成功，不是可上线；未满足的切流条件在 unmet_gates。"
+    "status_ok": "GET /api/v1/status 的 ok 只表示本接口响应成功；各能力是否就绪看 injected 与设置检查。"
   }
 }

@@ -1,67 +1,54 @@
-"""跨平台桌面守护进程入口（薄装配层 · PySide6-Essentials，零 GTK / WebKit 依赖）。
+"""应用主进程入口（薄装配层 · PySide6-Essentials，零 GTK / WebKit 依赖）。
 
-所有平台能力来自 `_platform`（Linux / Windows / macOS），原生视图来自 `_ui_desktop`
-（红十字框选器、原位识别/翻译浮窗、语音一体底栏、系统托盘），业务流程来自
-`_desktop`（录音排队上传、投递循环、截屏翻译与纯 OCR 复用、SSE 断线退避重连）。本文件不含业务规则。
+平台能力来自 `_platform`，原生视图来自 `_ui_desktop`，业务流程来自 `_desktop`：本地服务（Ollama、识别服务、服务端）
+由看护层拉起与照看，主界面是独立的窗口进程，同一用户只运行一个实例（第二次启动只唤起主窗口）。本文件不含业务规则。
+`--background`（开机自启）只启动不弹主窗口。
 """
 from __future__ import annotations
 
-from _activation import exit_if_blocked
-
 import atexit
+import os
 import signal
 import sys
 import threading
-from collections.abc import Callable
 from pathlib import Path
 
 from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QApplication
 
 from _config import ConfigStore
+from _contracts import ErrorCode
 from _desktop.actions import DesktopActions
 from _desktop.api import DesktopApi
 from _desktop.capture_flow import CaptureFlow
-from _desktop.delivery import (
-    DeliveryLoop,
-    LastDelivered,
-    PlatformFocusProbe,
-    PlatformInjector,
-    RepeatAction,
-)
+from _desktop.delivery import DeliveryLoop, LastDelivered, PlatformFocusProbe, PlatformInjector, RepeatAction
+from _desktop.desktop_integration import apply_autostart, ensure_portal_app_entry
 from _desktop.event_stream import ProductEventLoop, dispatch_product_event
-from _desktop.singleton import acquire_singleton_lock
+from _desktop.main_window import MainWindow
+from _desktop.single_instance import SingleInstanceServer, run_as_second_instance, socket_name
+from _desktop.singleton import try_acquire_singleton_lock
 from _desktop.status import PlatformStatus
+from _desktop.supervisor import create_supervisor
 from _desktop.ui_bridge import (
-    QtUiBridge,
-    configure_qt_platform_env,
-    open_live_selector,
-    open_translate_overlay,
-    open_url_async,
-    query_virtual_screen_rect,
+    QtUiBridge, configure_qt_platform_env, open_live_selector, open_translate_overlay, query_virtual_screen_rect,
 )
 from _desktop.voice import VoiceFlow, build_keywords_context_provider, new_job_id
 from _hotkey import HotkeyBindings, format_hotkey
+from _paths import default_app_paths
 from _platform import create_platform_adapter
 from _platform._common import SoundDeviceSource
-from _ui_desktop import (
-    InplaceTranslateOverlay,
-    RedCrosshairSelector,
-    StudioTrayIcon,
-    VoiceHudOverlay,
-)
+from _platform.certs import ensure_tls_certificates
+from _ports import local_ports
+from _ui_desktop import InplaceTranslateOverlay, RedCrosshairSelector, StudioTrayIcon, VoiceHudOverlay
+from _version import APP_VERSION
 
-VERSION = "3.2.0"
-PROJECT_ROOT = Path(__file__).resolve().parent
-API_ORIGIN = "https://127.0.0.1:17945"
-CERT = PROJECT_ROOT / "certs" / "cert.pem"
-CONFIG = PROJECT_ROOT / ".config.json"  # 与 _v3.production.ProductionPaths.config 同一文件，只读
-WATCHDOG_MS = 2000
+VOICE_CHECK_MS = 2000
 VOICE_MAX_SECONDS = 120.0
+SUPERVISOR_STOP_S = 60.0
 
 
-def load_bindings() -> HotkeyBindings:
-    cfg = ConfigStore(CONFIG).load()
+def load_bindings(config: Path) -> HotkeyBindings:
+    cfg = ConfigStore(config).load()  # 与服务端同一配置文件（AppPaths.config），只读
     return HotkeyBindings(
         voice=cfg.hotkey_voice,
         screenshot=cfg.hotkey_screenshot,
@@ -71,31 +58,28 @@ def load_bindings() -> HotkeyBindings:
 
 
 def main() -> None:
-    exit_if_blocked()
-    lock = acquire_singleton_lock()
-    bindings = load_bindings()
-    platform = create_platform_adapter()
-    atexit.register(platform.close)
-
-    notify_systemd: Callable[[str], object] = lambda _state: False
-    if platform.os_name == "linux":
-        from _linux.sd_notify import sd_notify
-
-        notify_systemd = sd_notify
-
+    paths = default_app_paths(os.environ)
+    origin = local_ports(os.environ).server_origin
     configure_qt_platform_env()
     app = QApplication(sys.argv[:1])
     app.setApplicationName("Ollama Voice Input")
     app.setQuitOnLastWindowClosed(False)
+    lock = try_acquire_singleton_lock(paths.lock)
+    if lock is None:  # 已有实例在运行：请它打开主窗口，本进程退出
+        sys.exit(run_as_second_instance(paths))
+    ensure_tls_certificates(paths.cert_dir)  # 首次运行先生成本地 CA 与服务端证书（本机 API 客户端要用它校验）
+    config = ConfigStore(paths.config)
+    bindings = load_bindings(paths.config)
+    platform = create_platform_adapter()
+    atexit.register(platform.close)
     bridge = QtUiBridge()
 
-    api = DesktopApi(API_ORIGIN, cert=CERT)
-    status = PlatformStatus(api.post_platform_event)
+    api = DesktopApi(origin, cert=paths.cert)
+    status = PlatformStatus(api.post_platform_event, post_components=api.post_components)
     probe = PlatformFocusProbe(platform)
     injector = PlatformInjector(platform)
     last = LastDelivered()
     hud = VoiceHudOverlay()
-
     capture_flow = CaptureFlow(
         capture_region=lambda rect, vrect: platform.capture_region(rect, virtual_rect=vrect),
         open_selector=lambda rect, mode_label, on_sel, on_cancel: open_live_selector(
@@ -118,54 +102,68 @@ def main() -> None:
     )
     repeat_action = RepeatAction(api=api, last=last, probe=probe, status=status, job_ids=new_job_id)
     actions = DesktopActions(voice=voice, capture=capture_flow, repeat=repeat_action)
+    main_window = MainWindow(paths=paths, origin=origin, environ=os.environ,
+                             on_failed=lambda message: status.error(ErrorCode.dependency_failed, message))
     tray = StudioTrayIcon(
-        on_open_home=lambda: open_url_async(f"{API_ORIGIN}/"),
+        on_open_home=lambda: main_window.show("/"),
         on_screenshot_translate=actions.screenshot,
         on_pure_ocr=actions.ocr,
-        on_open_setup=lambda: open_url_async(f"{API_ORIGIN}/setup"),
+        on_open_setup=lambda: main_window.show("/setup"),
         on_toggle_hud=hud.set_enabled,
         on_quit=app.quit,
+        on_retry_server=lambda: supervisor.retry("server"),
         hud_enabled=hud.enabled,
     )
     tray.show()
+    supervisor = create_supervisor(paths, os.environ, status=status, tray=tray, ui=bridge.post,
+                                   on_server_running=None if "--background" in sys.argv[1:] else lambda: main_window.show("/"))
+    single = SingleInstanceServer(socket_name(paths), on_show=main_window.show, on_quit=app.quit)  # quit 与托盘「退出」同一路径
+    single.listen()
+
+    def sync_autostart() -> None:  # 启动时与设置页改了配置（config_changed）时都按配置落地
+        try:
+            apply_autostart(platform, paths, config.load().autostart_enabled)
+        except OSError as exc:
+            status.error(ErrorCode.config_io, f"开机自启设置失败：{exc}")
+
+    sync_autostart()
+    if platform.os_name == "linux":
+        ensure_portal_app_entry(paths, os.environ)  # 全局快捷键门户按它认本应用
+    supervisor.start()
 
     def _on_confirm_resend(job_id: str, text: str, confirmed: bool) -> None:
         threading.Thread(
             target=lambda: repeat_action.confirm_resend(job_id, text, confirmed), name="confirm-resend", daemon=True
         ).start()
 
+    def _on_component_command(action: str, component: str) -> None:
+        if action == "retry":
+            supervisor.retry(component)
+
     event_loop = ProductEventLoop(
         iter_events=api.iter_product_events,
         on_event=lambda ev: bridge.post(
-            lambda _ev=ev: dispatch_product_event(_ev, hud=hud, tray=tray, on_confirm_resend=_on_confirm_resend)
+            lambda _ev=ev: dispatch_product_event(_ev, hud=hud, tray=tray, on_confirm_resend=_on_confirm_resend,
+                                                  on_component_command=_on_component_command,
+                                                  on_config_changed=sync_autostart)
         ),
-        on_connected=status.resend_hotkey_error,
+        on_connected=status.resend_on_connect,
     )
     event_loop.start()
 
     hotkey_rig = platform.create_hotkey_rig(
-        bindings,
-        on_voice_start=actions.voice_start,
-        on_voice_stop=actions.voice_stop,
-        on_screenshot=actions.screenshot,
-        on_ocr=actions.ocr,
-        on_repeat=actions.repeat,
-        overlay_active=actions.overlay_active,
-        close_overlay=actions.close_overlay,
-        on_error=status.set_hotkey_error,
+        bindings, on_voice_start=actions.voice_start, on_voice_stop=actions.voice_stop, on_screenshot=actions.screenshot,
+        on_ocr=actions.ocr, on_repeat=actions.repeat, overlay_active=actions.overlay_active,
+        close_overlay=actions.close_overlay, on_error=status.set_hotkey_error,
     )
     hotkey_rig.start()
 
     delivery = DeliveryLoop(jobs=api.jobs, injector=injector, last=last)
     threading.Thread(target=delivery.run_forever, name="jobs-delivery", daemon=True).start()
 
-    print(f"Ollama Voice Input v{VERSION} 跨平台守护进程已启动 ({platform.os_name}/{platform.session_type})", flush=True)
-    print(f"  热键后端:  {hotkey_rig.backend_name} | 工作台: {API_ORIGIN}/", flush=True)
-    print(
-        f"  快捷键:    语音 {format_hotkey(bindings.voice)} · 原位翻译 {format_hotkey(bindings.screenshot)}"
-        f" · 纯 OCR {format_hotkey(bindings.ocr)} · 重复 {format_hotkey(bindings.repeat)}",
-        flush=True,
-    )
+    print(f"Ollama Voice Input v{APP_VERSION} 已启动 ({platform.os_name}/{platform.session_type})，热键后端 "
+          f"{hotkey_rig.backend_name}，快捷键 语音 {format_hotkey(bindings.voice)} · 原位翻译 {format_hotkey(bindings.screenshot)}"
+          f" · 纯 OCR {format_hotkey(bindings.ocr)} · 重复 {format_hotkey(bindings.repeat)}", flush=True)
 
     for sig_name in ("SIGTERM", "SIGINT", "SIGHUP"):
         sig = getattr(signal, sig_name, None)
@@ -177,30 +175,34 @@ def main() -> None:
     signal_pump.timeout.connect(lambda: None)
     signal_pump.start()
 
-    def _on_watchdog_tick() -> None:
-        notify_systemd("WATCHDOG=1")
+    def _on_voice_check() -> None:
         if voice.stop_if_exceeded(VOICE_MAX_SECONDS):
             hotkey_rig.reset_voice()
 
-    watchdog_timer = QTimer()
-    watchdog_timer.setInterval(WATCHDOG_MS)
-    watchdog_timer.timeout.connect(_on_watchdog_tick)
-    watchdog_timer.start()
-    notify_systemd("READY=1")
+    voice_timer = QTimer()
+    voice_timer.setInterval(VOICE_CHECK_MS)
+    voice_timer.timeout.connect(_on_voice_check)
+    voice_timer.start()
 
     try:
         app.exec()
     except KeyboardInterrupt:
         pass
     finally:
-        watchdog_timer.stop()
+        voice_timer.stop()
         signal_pump.stop()
         event_loop.request_stop()
         delivery.stop()
+        main_window.close()
+        try:
+            supervisor.stop(SUPERVISOR_STOP_S)  # 逆序结束服务端、识别服务、Ollama 的会话
+        except RuntimeError as exc:  # 时限内没结束：记下原因照常退出，残留由 PDEATHSIG 与下次启动的记录清理收尾
+            print(f"  看护: {exc}", flush=True)
         api.close()
         event_loop.stop(timeout=0.5)
         hotkey_rig.stop()
         capture_flow.close_overlay()
+        single.close()
         hud.close()
         tray.close()
         status.close()

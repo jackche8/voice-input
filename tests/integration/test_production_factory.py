@@ -6,24 +6,25 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
+import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import httpx
 import pytest
 from fastapi.testclient import TestClient
 
 from _asr_provider import SidecarStreamProvider
+from _contracts import SetupTaskKind
+from _paths import PROGRAM_ROOT, STATIC_V3, AppPaths
 from _v3.production import (
-    CODE_ROOT,
-    STATIC_V3,
     ProductionEndpoints,
-    ProductionPaths,
     SystemAdapters,
     compose_production_runtime,
-    require_activation_allowed,
+    setup_task_actions,
 )
-from _v3.runtime import UnmetRuntimeGates as Gates
 from _v3_app import create_app
 from tests.api.providers import make_text_wav
 
@@ -77,30 +78,19 @@ class FakeRun:
 
     def __call__(self, cmd, **_kw):
         self.calls.append(list(cmd))
-        if cmd[:3] == ["systemctl", "--user", "start"] and cmd[3] == "ollama-voice-asr.service":
-            self.services.sidecar_loaded = True
-        if cmd[:3] == ["systemctl", "--user", "show"]:
-            # start_action 先后读单元真实状态；假单元在 start 后 active（就绪仍由 sidecar /health 判定）
-            started = ["systemctl", "--user", "start", cmd[3]] in self.calls
-            state = "ActiveState=active\nSubState=running\n" if started else "ActiveState=inactive\nSubState=dead\n"
-            exec_start = (
-                "ExecStart={ path=/v/bin/python ; argv[]=/v/bin/python -m runtimes.asr serve --host 127.0.0.1 "
-                "--port 17946 --load --warmup --model /m/Qwen3-ASR-1.7B ; pid=0 ; code=(null) ; status=0/0 }\n"
-                if cmd[3] == "ollama-voice-asr.service" else ""
-            )
-            return subprocess.CompletedProcess(cmd, 0, stdout=(
-                f"LoadState=loaded\n{state}Result=success\nConditionResult=yes\n"
-                f"ConditionTimestampMonotonic={2 if started else 1}\nExecMainCode=0\nExecMainStatus=0\nNRestarts=0\n"
-                f"{exec_start}DropInPaths=\n"
-            ), stderr="")
         if cmd[0] == "nvidia-smi":  # 假单卡读数：16303 MiB 总量、14574 MiB 空闲（本机 06:3x EST 只读读数）
             return subprocess.CompletedProcess(cmd, 0, stdout="0, GPU-fixture, 16303, 14574, Fixture GPU\n", stderr="")
         return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
 
 
-def _seed(root: Path) -> None:
-    (root / ".cache").mkdir(parents=True)
-    (root / ".config.json").write_text(json.dumps({
+def _paths_for(root: Path) -> AppPaths:
+    return AppPaths.for_roots(config_root=root / "config", data_root=root / "data", runtime_dir=root / "run")
+
+
+def _seed(paths: AppPaths) -> None:
+    paths.config_root.mkdir(parents=True)
+    paths.data_root.mkdir(parents=True)
+    paths.config.write_text(json.dumps({
         "ollama_model": "qwen2.5:7b",
         "hotkey_voice": "ctrl+alt+z",
         "custom_keywords": ["专名甲"],
@@ -113,47 +103,58 @@ def _seed(root: Path) -> None:
         "job_id": "job-claimed", "state": "claimed", "text": "旧句", "source": "desktop", "focus_id": "x11:1",
         "claim_id": "c1", "created_at": "2026-11-10T00:00:00+00:00", "updated_at": "2026-11-10T00:00:00+00:00",
     }
-    (root / ".cache" / "jobs.json").write_text(json.dumps({"version": 1, "jobs": {"job-claimed": claimed}}), encoding="utf-8")
+    paths.jobs.write_text(json.dumps({"version": 1, "jobs": {"job-claimed": claimed}}), encoding="utf-8")
+
+
+class WorkerSpy:
+    """记录服务端拉起的安装 worker 命令行；不真起进程（动作本身在下面用同一动作表就地执行）。"""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[list[str], dict]] = []
+
+    def __call__(self, argv, **kwargs):
+        self.calls.append((list(argv), kwargs))
+        return SimpleNamespace(pid=999_999, returncode=None, poll=lambda: None)
 
 
 @pytest.fixture
 def world(tmp_path: Path):
-    root = tmp_path / "prod-root"
-    _seed(root)
+    paths = _paths_for(tmp_path / "prod-root")
+    _seed(paths)
     services = FakeServices()
     run = FakeRun(services)
+    workers = WorkerSpy()
+    runners: list = []  # 一键装齐的编排线程：只记录不运行（其编排行为见 tests/api/test_setup_sequence.py）
     adapters = SystemAdapters(
         environ={"XDG_SESSION_TYPE": "wayland"},
         run=run,
-        popen=lambda *a, **k: (_ for _ in ()).throw(AssertionError("测试不得启动下载进程")),
+        popen=workers,
         which=lambda name: f"/usr/bin/{name}" if name in ("xclip", "nvidia-smi") else None,
         portal_version=lambda iface: (1, None),
         ocr_languages=lambda: ["eng", "chi_sim", "chi_tra"],
         keyboard_devices=lambda: ["/dev/input/event5"],  # Wayland 环境：不碰真实输入设备
         list_ips=lambda: ["192.168.10.20"],
         http_transport=httpx.MockTransport(services),
-        spawn=lambda fn: fn(),
+        spawn=runners.append,
     )
-    paths = ProductionPaths.for_root(root, live=False)
     runtime = compose_production_runtime(paths=paths, token=FAKE_TOKEN, adapters=adapters, endpoints=ENDPOINTS)
     app = create_app(runtime, static_v3=STATIC_V3)
     client = TestClient(app, client=("127.0.0.1", 50000), base_url="https://127.0.0.1:17945")
-    yield {"root": root, "runtime": runtime, "client": client, "services": services, "run": run, "paths": paths}
+    yield {"runtime": runtime, "client": client, "services": services, "run": run, "paths": paths,
+           "adapters": adapters, "workers": workers, "runners": runners}
     client.close()
 
 
 H = {"Origin": "https://127.0.0.1:17945"}
 
 
-def test_live_root_refused_without_explicit_authorization():
-    with pytest.raises(RuntimeError):
-        ProductionPaths.for_root(CODE_ROOT, live=False)
+def test_production_compose_requires_explicit_paths():
     with pytest.raises(TypeError):
         compose_production_runtime()  # type: ignore[call-arg]
 
 
 def test_startup_recovers_claimed_jobs_without_redelivery(world):
-    doc = json.loads((world["root"] / ".cache" / "jobs.json").read_text(encoding="utf-8"))
+    doc = json.loads(world["paths"].jobs.read_text(encoding="utf-8"))
     job = doc["jobs"]["job-claimed"]
     assert job["state"] == "delivery_unknown"
     claim = world["client"].post("/api/v1/jobs/claim", json={}, headers=H)
@@ -162,7 +163,7 @@ def test_startup_recovers_claimed_jobs_without_redelivery(world):
 
 
 def test_config_migrated_keeps_user_fields_and_hides_secrets(world):
-    disk = json.loads((world["root"] / ".config.json").read_text(encoding="utf-8"))
+    disk = json.loads(world["paths"].config.read_text(encoding="utf-8"))
     assert disk["ollama_model"] == "qwen3.5:4b" and disk["legacy_ollama_model"] == "qwen2.5:7b"
     assert disk["custom_keywords"] == ["专名甲"] and disk["translate_target_lang"] == "en"
     assert disk["baidu_appkey"] == "fixture-secret" and disk["hotkey_screenshot"] == "ctrl+alt+x"
@@ -193,22 +194,35 @@ def test_real_adapters_drive_from_audio_polish_and_queue(world):
 def test_setup_check_and_real_actions_via_fakes(world):
     client = world["client"]
     check = client.get("/api/setup/check").json()
-    assert check["session_type"] == "wayland"
-    assert check["ollama"]["running"] and check["ollama"]["model_status"] == "missing"
-    assert check["ollama"]["action"] == "ollama_pull"
-    assert check["asr"]["status"] == "missing" and check["asr"]["action"] == "asr_download"
-    assert check["unmet_gates"], "官方门闩仍需显示"
-    pulled = client.post("/api/setup/tasks", json={"kind": "ollama_pull"}, headers=H).json()
-    assert pulled["state"] == "succeeded", pulled
-    assert client.get("/api/setup/check").json()["ollama"]["model_status"] == "ready"
+    assert check["session_type"] == "wayland" and check["components"] == [] and check["ollama"]["running"] is False
+    assert check["asr"]["status"] == "missing" and check["install_all"]["state"] == "idle"
     caps = {c["id"]: c for c in check["capabilities"]}
     assert caps["hotkey_conflicts"]["available"] is False and "gsettings 不可用" in caps["hotkey_conflicts"]["detail"]
-    assert caps["desktop_daemon"]["available"] is False and "./start.sh --acceptance" in caps["desktop_daemon"]["detail"]
-    started = client.post("/api/setup/tasks", json={"kind": "asr_start"}, headers=H).json()
-    assert started["state"] == "succeeded", started
-    calls = world["run"].calls
-    smi = next(i for i, c in enumerate(calls) if c[0] == "nvidia-smi")
-    assert smi < calls.index(["systemctl", "--user", "start", "ollama-voice-asr.service"]), "预检必须先于 start"
+    assert "desktop_daemon" not in caps
+
+    # 应用上报组件快照后，设置检查与一键装齐读的是同一份缓存
+    report = {"components": [{"name": n, "state": "running", "since": "2026-11-20T00:00:00+00:00"} for n in ("ollama", "asr", "server")]}
+    assert client.post("/api/v1/components", json=report, headers=H).status_code == 202
+    check = client.get("/api/setup/check").json()
+    assert check["ollama"]["running"] and check["ollama"]["model_status"] == "missing" and check["asr"]["sidecar_running"]
+
+    install_all = client.post("/api/setup/install-all", headers=H)
+    assert install_all.status_code == 202 and install_all.json()["state"] == "running" and len(world["runners"]) == 1
+    assert (world["paths"].data_root / "setup" / "install_all.json").is_file()
+
+    started = world["runtime"].setup.tasks.start(SetupTaskKind.ollama_pull)
+    assert started.state == "running"
+    (argv, kwargs), = world["workers"].calls
+    task_file = world["paths"].setup_tasks / f"{started.task_id}.json"
+    assert argv == [sys.executable, "-m", "_v3.setup_worker", "--task-file", str(task_file), "--kind", "ollama_pull",
+                    "--owner-pid", str(os.getppid()), "--owner-identity", argv[-1]]
+    assert kwargs["start_new_session"] is True and kwargs["cwd"] == str(PROGRAM_ROOT)
+
+    # worker 进程执行的是同一张动作表：就地执行验证真实动作接线（假 Ollama）
+    actions = setup_task_actions(world["paths"], ENDPOINTS, world["adapters"], world["runtime"].config)
+    assert set(actions) == set(SetupTaskKind)
+    assert actions[SetupTaskKind.ollama_pull](lambda p: None).endswith("已下载")
+    assert client.get("/api/setup/check").json()["ollama"]["model_status"] == "ready"
 
 
 def test_lan_access_uses_explicit_token(world):
@@ -217,10 +231,5 @@ def test_lan_access_uses_explicit_token(world):
     assert body["entries"][0]["url"].startswith("https://192.168.10.20:17945/voice#token=")
 
 
-def test_pages_served_and_activation_refused_until_gates_close(world):
+def test_pages_served(world):
     assert world["client"].get("/setup").status_code == 200
-    with pytest.raises(Gates) as ei:
-        require_activation_allowed(world["runtime"])
-    joined = " ".join(ei.value.gates)
-    # P2 已由 r9 证据关闭；4b（P3/P4）与真机门闩必须仍在，生产工厂照样拒绝激活
-    assert "P2" not in joined and "qwen3.5:4b" in joined and "真机" in joined

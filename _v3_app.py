@@ -26,6 +26,7 @@ from _v3.auth import (
     token_matches,
 )
 from _v3.capability_routes import build_capability_router
+from _v3.component_routes import build_component_router
 from _v3.control_routes import build_control_router
 from _v3.http import error_body, install_exception_handlers, install_openapi
 from _v3.jobs_routes import build_jobs_router
@@ -39,13 +40,13 @@ from _v3.limits import (
 from _v3.recognize_routes import build_recognize_router
 from _v3.pages import install_pages
 from _v3.production import compose_production_runtime
-from _v3.runtime import Runtime, UnmetRuntimeGates, build_sandbox_runtime, production_unmet_gates
+from _v3.runtime import Runtime, build_sandbox_runtime
 from _v3.setup_routes import build_setup_router
 from _v3.sessions import RecognizeSessionHub
 from _v3.utterance_routes import build_utterance_router
 
 _DESCRIPTION = """
-v3 `/api/v1` 与 `/api/setup/*` 路由，以及 static/v3 唯一界面入口。是否已可上线只看 unmet_gates。
+v3 `/api/v1` 与 `/api/setup/*` 路由，以及 static/v3 唯一界面入口。
 
 鉴权：本机以 socket 对端 loopback（127.0.0.1 / ::1，含 IPv4-mapped）判定，忽略 X-Forwarded-For。
 局域网路径：先判定对端属于 RFC1918、IPv6 ULA 或必要链路本地，再恒定时间校验 token。
@@ -54,7 +55,7 @@ v3 `/api/v1` 与 `/api/setup/*` 路由，以及 static/v3 唯一界面入口。�
 Host 必须带服务端口：本机请求只能是 127.0.0.1 / localhost / ::1；局域网请求必须是允许的局域网地址。
 缺 Origin 视为非浏览器，不做 CSRF Origin 检查，但仍受对端 / token / Host 约束（防 DNS rebinding）。
 若存在 Origin，必须是 https 且与 Host、对端类型一致；本机 Origin 不能搭私网 Host；未知 Origin 拒绝。不开 CORS *。
-GET /api/v1/status 的 ok 只表示本接口响应成功，不是可上线；是否达切流条件只看 unmet_gates。
+GET /api/v1/status 的 ok 只表示本接口响应成功；各能力是否就绪看 injected 与 /api/setup/check。
 SSE 走 HTTP，不使用 WebSocket。请求体在 ASGI receive 层按累计实际字节限流，超限 413，不把超额字节喂给下游。
 """.strip()
 
@@ -245,6 +246,7 @@ def create_app(runtime: Runtime, *, static_v3: Path | None = None) -> FastAPI:
     app.include_router(build_jobs_router(runtime))
     app.include_router(build_capability_router(runtime))
     app.include_router(build_control_router(runtime))
+    app.include_router(build_component_router(runtime.components, runtime.events))
     app.include_router(build_setup_router(runtime))
     if static_v3 is not None:
         install_pages(app, static_v3)
@@ -259,7 +261,7 @@ def create_app(runtime: Runtime, *, static_v3: Path | None = None) -> FastAPI:
 
 def export_openapi_document(*, root: Path, token: str = "test-openapi-export-token") -> dict:
     """从真实 FastAPI 应用派生 OpenAPI，不手写 paths。"""
-    runtime = build_sandbox_runtime(root=root, token=token, unmet_gates=("openapi export sandbox",))
+    runtime = build_sandbox_runtime(root=root, token=token)
     app = create_app(runtime)
     return app.openapi()
 
@@ -267,12 +269,10 @@ def export_openapi_document(*, root: Path, token: str = "test-openapi-export-tok
 __all__ = [
     "AccessGuardMiddleware",
     "Runtime",
-    "UnmetRuntimeGates",
     "build_sandbox_runtime",
     "compose_production_runtime",
     "create_app",
     "export_openapi_document",
-    "production_unmet_gates",
 ]
 
 

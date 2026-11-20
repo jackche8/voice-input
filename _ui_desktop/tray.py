@@ -1,18 +1,22 @@
 """跨平台系统托盘图标与菜单（方案 C Studio 工作站）。
 
 纯 UI 组件：使用 `QPainter` 动态绘制多状态矢量麦克风托盘图标，所有菜单项通过
-`Callable` 回调向外派发意图；在无系统托盘环境（如精简窗口管理器或离屏测试）中安全降级，
-不抛异常、不阻塞主程序常驻。
+`Callable` 回调向外派发意图。托盘暂不可用时（Linux 托盘宿主 StatusNotifierWatcher 未注册：
+锁屏中、扩展未加载或开机早于宿主）写一行日志，并在宿主注册时自动建立 / 重新登记图标，
+不轮询、不阻塞主程序常驻。
 """
 from __future__ import annotations
 
 from collections.abc import Callable
 
-from PySide6.QtCore import QObject, QPointF, QRectF, QSignalBlocker, Qt
+from PySide6.QtCore import QObject, QPointF, QRectF, QSignalBlocker, QSysInfo, Qt
+from PySide6.QtDBus import QDBusConnection, QDBusServiceWatcher
 from PySide6.QtGui import QAction, QIcon, QImage, QPainter, QPainterPath, QPen, QPixmap
 from PySide6.QtWidgets import QMenu, QSystemTrayIcon
 
 from _ui_desktop import theme
+
+TRAY_HOST_SERVICE = "org.kde.StatusNotifierWatcher"
 
 STATE_BADGE_HEX: dict[str, str] = {
     "idle": theme.STATE_OK_HEX,
@@ -77,6 +81,21 @@ def render_status_image(state: str = "idle", size: int = 64) -> QImage:
     return image
 
 
+def watch_tray_host(on_registered: Callable[[], None], parent: QObject) -> QObject | None:
+    """Linux：托盘宿主（StatusNotifierWatcher）每次注册时回调；其它系统托盘不依赖它，返回 None。"""
+    if QSysInfo.kernelType() != "linux":
+        return None
+    bus = QDBusConnection.sessionBus()
+    if not bus.isConnected():
+        print(f"[tray] 会话总线不可用，无法监听托盘宿主：{bus.lastError().message()}", flush=True)
+        return None
+    watcher = QDBusServiceWatcher(
+        TRAY_HOST_SERVICE, bus, QDBusServiceWatcher.WatchModeFlag.WatchForRegistration, parent
+    )
+    watcher.serviceRegistered.connect(lambda _name: on_registered())
+    return watcher
+
+
 def render_status_icon(state: str = "idle", size: int = 64) -> QIcon:
     """生成多尺寸自适应 QIcon。"""
     icon = QIcon()
@@ -97,10 +116,12 @@ class StudioTrayIcon(QObject):
         on_open_setup: Callable[[], None] | None = None,
         on_toggle_hud: Callable[[bool], None] | None = None,
         on_quit: Callable[[], None] | None = None,
+        on_retry_server: Callable[[], None] | None = None,
         *,
         hud_enabled: bool = True,
         tooltip: str = "Voice Studio · 本地语音与原位翻译",
         tray_available_fn: Callable[[], bool] | None = None,
+        watch_host: Callable[[Callable[[], None], QObject], QObject | None] = watch_tray_host,
         parent: QObject | None = None,
     ) -> None:
         super().__init__(parent)
@@ -110,6 +131,7 @@ class StudioTrayIcon(QObject):
         self._on_open_setup = on_open_setup
         self._on_toggle_hud = on_toggle_hud
         self._on_quit = on_quit
+        self._on_retry_server = on_retry_server
 
         self._state: str = "idle"
         self._tooltip: str = tooltip
@@ -118,21 +140,21 @@ class StudioTrayIcon(QObject):
         self.menu = QMenu()
         self._build_menu(hud_enabled=bool(hud_enabled))
 
-        checker = tray_available_fn or QSystemTrayIcon.isSystemTrayAvailable
-        try:
-            self._available = bool(checker())
-        except Exception:
-            self._available = False
-
+        self._tray_available = tray_available_fn or QSystemTrayIcon.isSystemTrayAvailable
         self._tray: QSystemTrayIcon | None = None
-        if self._available:
-            self._tray = QSystemTrayIcon(self._current_icon, self)
-            self._tray.setToolTip(self._tooltip)
-            self._tray.setContextMenu(self.menu)
-            self._tray.activated.connect(self._on_activated)
+        self._wants_visible = False
+        self._ensure_tray()
+        self._host_watch = watch_host(self._on_host_registered, self)
 
     def _build_menu(self, *, hud_enabled: bool) -> None:
-        self.open_home_action = QAction("打开翻译工作台 (/)", self.menu)
+        # 只在本地服务停止时显示（set_server_stopped）；隐藏时其后的分隔线被 QMenu 折叠
+        self.retry_server_action = QAction("重试启动本地服务", self.menu)
+        self.retry_server_action.setVisible(False)
+        self.retry_server_action.triggered.connect(self._trigger_retry_server)
+        self.menu.addAction(self.retry_server_action)
+        self.menu.addSeparator()
+
+        self.open_home_action = QAction("打开主界面", self.menu)
         self.open_home_action.triggered.connect(self._trigger_open_home)
         self.menu.addAction(self.open_home_action)
 
@@ -164,8 +186,30 @@ class StudioTrayIcon(QObject):
 
     @property
     def available(self) -> bool:
-        """当前桌面环境是否支持系统托盘。"""
-        return self._available and self._tray is not None
+        """托盘图标是否已建立（宿主晚到时在其注册后变为 True）。"""
+        return self._tray is not None
+
+    def _ensure_tray(self) -> bool:
+        """托盘可用且尚未建立时建立图标（沿用当前状态图标与提示）。"""
+        if self._tray is None and self._tray_available():
+            self._tray = QSystemTrayIcon(self._current_icon, self)
+            self._tray.setToolTip(self._tooltip)
+            self._tray.setContextMenu(self.menu)
+            self._tray.activated.connect(self._on_activated)
+        return self._tray is not None
+
+    def _on_host_registered(self) -> None:
+        """托盘宿主注册（解锁、扩展重载、宿主重启）：建立图标，或隐藏再显示以向新宿主重新登记。"""
+        if not self._wants_visible:
+            return
+        existed = self._tray is not None
+        if not self._ensure_tray():
+            print("[tray] 托盘宿主已注册，但系统仍报告托盘不可用；托盘图标未显示", flush=True)
+            return
+        if existed:
+            self._tray.hide()
+        self._tray.show()
+        print("[tray] 托盘宿主已就绪，已显示托盘图标", flush=True)
 
     @property
     def state(self) -> str:
@@ -189,25 +233,35 @@ class StudioTrayIcon(QObject):
             if tooltip is not None:
                 self._tray.setToolTip(self._tooltip)
 
+    def set_server_stopped(self, stopped: bool) -> None:
+        """本地服务停止时显示「重试启动本地服务」，恢复后隐藏（由应用显式调用，不从错误状态推断）。"""
+        self.retry_server_action.setVisible(bool(stopped))
+
     def set_hud_enabled(self, enabled: bool) -> None:
         """同步菜单勾选状态而不重复触发外部回调。"""
         with QSignalBlocker(self.toggle_hud_action):
             self.toggle_hud_action.setChecked(bool(enabled))
 
     def show(self) -> bool:
-        """显示托盘图标；若当前无系统托盘则安全返回 False。"""
-        if self._tray is None:
+        """显示托盘图标；暂不可用时写一行原因并返回 False，宿主注册后自动显示。"""
+        self._wants_visible = True
+        if not self._ensure_tray():
+            print(
+                f"[tray] 系统托盘暂不可用（{TRAY_HOST_SERVICE} 未注册：锁屏中、扩展未加载或早于宿主启动），"
+                "将在宿主注册时自动显示",
+                flush=True,
+            )
             return False
         self._tray.show()
         return True
 
     def hide(self) -> None:
+        self._wants_visible = False
         if self._tray is not None:
             self._tray.hide()
 
     def close(self) -> None:
-        if self._tray is not None:
-            self._tray.hide()
+        self.hide()
         self.menu.close()
 
     def _on_activated(self, reason: QSystemTrayIcon.ActivationReason) -> None:
@@ -240,3 +294,7 @@ class StudioTrayIcon(QObject):
     def _trigger_quit(self) -> None:
         if self._on_quit is not None:
             self._on_quit()
+
+    def _trigger_retry_server(self) -> None:
+        if self._on_retry_server is not None:
+            self._on_retry_server()

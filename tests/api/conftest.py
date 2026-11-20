@@ -1,14 +1,14 @@
 """API 层测试夹具。必须显式 sandbox Runtime；禁止指向 live 配置/历史/队列或读取真实 token。"""
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
 
-from _config import default_config_path
 from _contracts import PolishRequest, PolishResponse, SttResponse, TranslateRequest, TranslateResponse
-from _jobs import default_jobs_path
+from _paths import default_app_paths
 from _v3_app import build_sandbox_runtime, create_app
 from tests.api.providers import FixtureAsrProvider, fixture_ocr, fixture_ocr_layout, fixture_transcribe
 
@@ -17,12 +17,12 @@ LOCAL_ORIGIN = "https://127.0.0.1:17945"
 LAN_HOST = "192.168.10.20"
 LAN_ORIGIN = f"https://{LAN_HOST}:17945"
 
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
+LIVE = default_app_paths(os.environ)
 LIVE_PATHS = {
-    "config": default_config_path(),
-    "jobs": default_jobs_path(),
-    "history": PROJECT_ROOT / ".cache" / "history.jsonl",
-    "token": PROJECT_ROOT / ".web_input_token",
+    "config": LIVE.config,
+    "jobs": LIVE.jobs,
+    "history": LIVE.history,
+    "token": LIVE.token,
 }
 
 
@@ -62,7 +62,6 @@ def runtime(tmp_path: Path):
         ocr=fixture_ocr,
         ocr_layout=fixture_ocr_layout,
         stream_provider=FixtureAsrProvider(final_text="fixture-final"),
-        unmet_gates=("api tests: sandbox, 非生产",),
     )
 
 

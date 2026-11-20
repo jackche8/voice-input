@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import json
 import os
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -16,9 +16,8 @@ import httpx
 from _contracts import SetupCapability
 from _ocr import default_ocr_languages
 
-if TYPE_CHECKING:  # 运行时不导入：setup_actions 反向依赖本模块
+if TYPE_CHECKING:  # 只用于类型标注
     from _linux.conflicts import ConflictScan
-    from _v3.setup_actions import UnitState
 
 
 @dataclass(frozen=True)
@@ -224,10 +223,6 @@ def probe_capabilities(
 
 
 HOTKEY_CONFLICTS_ID = "hotkey_conflicts"
-DESKTOP_DAEMON_ID = "desktop_daemon"
-# 与 start.sh 的 ACCEPTANCE_CONF 同名（tests/integration 断言两处一致）：验收运行写给各单元的 drop-in 文件名。
-ACCEPTANCE_DROPIN = "acceptance.conf"
-_RUNNING_STATES = ("active", "activating", "reloading")
 
 
 def hotkey_conflicts_capability(scan: Callable[[], "ConflictScan"]) -> SetupCapability:
@@ -250,63 +245,4 @@ def hotkey_conflicts_capability(scan: Callable[[], "ConflictScan"]) -> SetupCapa
     return SetupCapability(
         id=HOTKEY_CONFLICTS_ID, label=label, available=True, required=False,
         detail="已读取的 GNOME 键位与其它应用全局快捷键登记中未发现冲突（第三方 evdev 监听与应用内快捷键无法检测）",
-    )
-
-
-def _acceptance_units(states: Sequence["UnitState"]) -> list[str]:
-    return [st.unit for st in states if any(Path(p).name == ACCEPTANCE_DROPIN for p in st.drop_in_paths)]
-
-
-def desktop_daemon_capability(
-    *,
-    read_state: Callable[[str], "UnitState"],
-    daemon_unit: str,
-    units: Sequence[str],
-    unmet_gates: Callable[[], Sequence[str]],
-) -> SetupCapability:
-    """桌面守护进程（快捷键/截屏）是否在运行、保存的快捷键如何生效。只读 systemd 单元状态与门闩，不执行任何命令。
-
-    结论只来自实际读到的事实：daemon 运行中 → 保存后 ./restart.sh；未运行且门闩未关 → 完整受控运行
-    ./start.sh --acceptance（并说明无参数 ./start.sh/桌面图标会撤销验收运行）；门闩已关 → ./start.sh；
-    任一读取失败 → 无法判断。"""
-    label = "桌面守护进程（快捷键/截屏）"
-
-    def cap(available: bool, detail: str) -> SetupCapability:
-        return SetupCapability(id=DESKTOP_DAEMON_ID, label=label, available=available, required=False, detail=detail)
-
-    try:
-        states = [read_state(unit) for unit in units]
-        gates = list(unmet_gates())
-    except Exception as exc:  # LogicError(读单元失败) 或其它：一律未知
-        message = getattr(exc, "message", None) or f"{type(exc).__name__}: {exc}"
-        return cap(False, f"无法读取守护进程状态：{message}；无法判断快捷键是否生效")
-    by_unit = {st.unit: st for st in states}
-    daemon = by_unit.get(daemon_unit)
-    if daemon is None:
-        return cap(False, f"未读取 {daemon_unit} 状态；无法判断快捷键是否生效")
-    accepted = _acceptance_units(states)
-    if daemon.load_state != "loaded":
-        return cap(False, f"守护进程单元未安装（LoadState={daemon.load_state}），快捷键/截屏不会生效")
-    if daemon.active_state == "active" and daemon.sub_state == "running":
-        return cap(True, "守护进程运行中。保存快捷键后，在项目目录运行 ./restart.sh 重启守护进程才会按新快捷键生效"
-                         "（重新向 GNOME 登记，可能弹出确认）；不重启则继续使用启动时的快捷键")
-    if daemon.active_state in _RUNNING_STATES:
-        return cap(False, f"守护进程正在启动或重启中（{daemon.summary()}），快捷键暂未生效；"
-                          f"若持续如此请查看 journalctl --user -u {daemon_unit}")
-    failed = daemon.active_state == "failed" or daemon.result not in ("success", "exec-condition")
-    state_note = (f"守护进程启动失败（{daemon.summary()}），请查看 journalctl --user -u {daemon_unit}。"
-                  if failed else "守护进程未运行，快捷键/截屏不会生效。")
-    if not gates:
-        return cap(False, state_note + "请在项目目录运行 ./start.sh 启动")
-    if accepted and daemon_unit not in accepted:
-        scope = f"当前只有 {'、'.join(accepted)} 处于验收运行（部分），设置页可用但守护进程不在其中。"
-    elif accepted:
-        scope = "守护进程已有验收 drop-in 但未运行。"
-    else:
-        scope = "当前没有任何单元处于验收运行。"
-    return cap(
-        False,
-        state_note + scope + "生产门闩未关闭，完整受控运行方式：在项目目录执行 ./start.sh --acceptance"
-        "（依次启动 Ollama、识别服务〔启动前做显存预检〕、Web 服务与守护进程）。"
-        "不要运行无参数 ./start.sh 或桌面图标：门闩未关时它们会撤销验收运行并停止全部服务。",
     )

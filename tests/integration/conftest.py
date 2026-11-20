@@ -1,23 +1,23 @@
 """隔离集成夹具。禁止指向 live 配置/历史/队列或读取生产 token。"""
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
 
-from _config import default_config_path
 from _contracts import PolishRequest, PolishResponse, TranslateRequest, TranslateResponse
-from _jobs import default_jobs_path
+from _paths import default_app_paths
 from _v3.isolated import compose_isolated_candidate
 from tests.integration.fixtures import FixtureStreamProvider, fixture_transcribe
 
 TEST_TOKEN = "test-isolated-composition-token"
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
+LIVE = default_app_paths(os.environ)
 LIVE_PATHS = {
-    "config": default_config_path(),
-    "jobs": default_jobs_path(),
-    "history": PROJECT_ROOT / ".cache" / "history.jsonl",
-    "token": PROJECT_ROOT / ".web_input_token",
+    "config": LIVE.config,
+    "jobs": LIVE.jobs,
+    "history": LIVE.history,
+    "token": LIVE.token,
 }
 
 
@@ -42,8 +42,8 @@ def _forbid_live_mutation(live_fingerprints):
 
 @pytest.fixture
 def composition(tmp_path: Path):
-    cert = PROJECT_ROOT / "certs" / "cert.pem"
-    key = PROJECT_ROOT / "certs" / "key.pem"
+    cert = LIVE.cert
+    key = LIVE.key
 
     def polish(request: PolishRequest) -> PolishResponse:
         return PolishResponse(text=request.text.replace("错字", "正字"))

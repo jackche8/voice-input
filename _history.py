@@ -8,10 +8,6 @@ from pathlib import Path
 from _contracts import ErrorCode, HistoryListResponse, HistoryRecord, LogicError
 
 
-def default_history_path() -> Path:
-    return Path(__file__).resolve().parent / ".cache" / "history.jsonl"
-
-
 class HistoryStore:
     """读写指定 jsonl。测试必须使用 fixture 路径，不得打开私人历史文件。
 

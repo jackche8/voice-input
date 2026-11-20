@@ -1,4 +1,4 @@
-"""逻辑层测试夹具。禁止读写 live .config.json / 私人 history.jsonl / jobs.json。"""
+"""逻辑层测试夹具。禁止读写当前用户真实的配置 / 私人历史 / 任务队列（AppPaths 的 live 路径）。"""
 from __future__ import annotations
 
 import os
@@ -6,10 +6,12 @@ from pathlib import Path
 
 import pytest
 
-ROOT = Path(__file__).resolve().parents[2]
-LIVE_CONFIG = ROOT / ".config.json"
-LIVE_HISTORY = ROOT / ".cache" / "history.jsonl"
-LIVE_JOBS = ROOT / ".cache" / "jobs.json"
+from _paths import default_app_paths
+
+LIVE = default_app_paths(os.environ)
+LIVE_CONFIG = LIVE.config
+LIVE_HISTORY = LIVE.history
+LIVE_JOBS = LIVE.jobs
 
 
 def _fingerprint(path: Path) -> tuple[bool, int | None, int | None]:

@@ -350,7 +350,7 @@ class WindowsPlatformAdapter:
         enabled: bool,
         command: Sequence[str],
         app_name: str = "OllamaVoiceInput",
-    ) -> dict[str, str]:
+    ) -> None:
         spec = self.autostart_registry_entry(command, app_name=app_name)
         reg = self._reg_api
         if reg is None:
@@ -364,7 +364,6 @@ class WindowsPlatformAdapter:
                     reg.DeleteValue(key, app_name)
                 except FileNotFoundError:
                     pass
-        return spec
 
     def capabilities(self) -> list[SetupCapability]:
         win32_ok = True

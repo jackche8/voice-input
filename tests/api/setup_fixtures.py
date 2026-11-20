@@ -1,13 +1,13 @@
-"""设置页夹具：显式假探测与可控假动作。不触网、不调 systemctl、不读 live 文件。"""
+"""设置页夹具：显式假探测与固定任务状态。不触网、不调 systemctl、不读 live 文件。"""
 from __future__ import annotations
 
-import threading
 from dataclasses import dataclass, field
 
-from _contracts import ErrorCode, LogicError, SetupCapability, SetupProgress, SetupTaskKind
-from _v3.setup_probe import AsrWeightsProbe, OllamaProbe, SidecarProbe, probe_capabilities
+from _contracts import ErrorCode, InstallAllStatus, LogicError, SetupCapability, SetupTask, SetupTaskKind
+from _v3.component_routes import ComponentRegistry
+from _v3.setup_probe import AsrWeightsProbe, OllamaProbe, probe_capabilities
+from _v3.setup_sequence import idle_status
 from _v3.setup_service import SetupProbes, SetupService
-from _v3.setup_tasks import SetupTaskManager
 
 FAKE_LAN_IPS = ["192.168.10.20", "10.1.2.3"]
 
@@ -17,7 +17,6 @@ class FakeWorld:
     session: str = "wayland"
     ollama: OllamaProbe = field(default_factory=lambda: OllamaProbe(True, True, "0.40.16", False, None, None))
     weights: AsrWeightsProbe = field(default_factory=lambda: AsrWeightsProbe(False, 0, ("config.json",)))
-    sidecar: SidecarProbe = field(default_factory=lambda: SidecarProbe(False, False, "识别服务未响应: fixture"))
     tools: dict[str, str] = field(default_factory=lambda: {"xclip": "/usr/bin/xclip"})
     portals: dict[str, int] = field(default_factory=lambda: {
         "org.freedesktop.portal.Screenshot": 2,
@@ -45,36 +44,49 @@ class FakeWorld:
             session=lambda: self.session,
             ollama=lambda: self.ollama,
             asr_weights=lambda: self.weights,
-            asr_sidecar=lambda: self.sidecar,
             capabilities=self.capabilities,
         )
 
 
-class GatedAction:
-    """进度可观察、由测试放行的假动作。fail=True 时以 LogicError 结束。"""
+class FixedTasks:
+    """设置业务读任务状态用的固定替身（任务执行本身在 worker 进程里，见 test_setup_tasks_process）。"""
 
-    def __init__(self, *, fail: str | None = None, on_success=None) -> None:
-        self.release = threading.Event()
-        self.reported = threading.Event()
-        self.fail = fail
-        self.on_success = on_success
-        self.calls = 0
+    def __init__(self, tasks: dict[SetupTaskKind, SetupTask | None] | None = None) -> None:
+        self._fixed = dict(tasks or {})
 
-    def __call__(self, report) -> str:
-        self.calls += 1
-        report(SetupProgress(completed_bytes=50, total_bytes=200, percent=25.0, stage="fixture 下载中"))
-        self.reported.set()
-        assert self.release.wait(5), "测试未放行假动作"
-        if self.fail:
-            raise LogicError(ErrorCode.dependency_failed, self.fail)
-        if self.on_success:
-            self.on_success()
-        return "fixture 完成"
+    def latest(self, kind: SetupTaskKind) -> SetupTask | None:
+        return self._fixed.get(kind)
+
+    def start(self, kind: SetupTaskKind) -> SetupTask:
+        raise LogicError(ErrorCode.dependency_failed, f"当前运行环境未提供动作 {kind.value}，拒绝假成功")
+
+    def get(self, task_id: str) -> SetupTask:
+        raise LogicError(ErrorCode.not_found, f"未知的设置作业 {task_id}")
 
 
-def build_setup(world: FakeWorld, actions: dict[SetupTaskKind, GatedAction] | None = None, gates=("fixture gate",)):
+class FixedSequence:
+    """一键装齐的固定替身：设置检查只读它的状态（编排本身见 test_setup_sequence）。"""
+
+    def __init__(self, status: InstallAllStatus | None = None) -> None:
+        self._status = status or idle_status()
+
+    def status(self) -> InstallAllStatus:
+        return self._status
+
+    def start(self) -> InstallAllStatus:
+        raise LogicError(ErrorCode.dependency_failed, "当前运行环境未提供安装动作，拒绝假成功")
+
+
+def task(state, message="", kind=SetupTaskKind.asr_download, progress=None) -> SetupTask:
+    return SetupTask(task_id="t1", kind=kind, state=state, message=message, progress=progress,
+                     started_at="2026-11-11T12:00:00+00:00")
+
+
+def build_setup(world: FakeWorld, tasks: dict[SetupTaskKind, SetupTask | None] | None = None,
+                components: ComponentRegistry | None = None):
     return SetupService(
         probes=world.probes(),
-        tasks=SetupTaskManager(actions or {}),
-        unmet_gates=lambda: list(gates),
+        tasks=FixedTasks(tasks),
+        sequence=FixedSequence(),
+        components=components or ComponentRegistry(),
     )

@@ -117,6 +117,10 @@ class PlatformAdapter(Protocol):
 
     def capabilities(self) -> list[SetupCapability]: ...
 
+    def configure_autostart(self, *, enabled: bool, command: Sequence[str]) -> None:
+        """当前用户登录后自动运行 command（开 → 写入/覆盖；关 → 删除）。三端同一签名。"""
+        ...
+
     def play_beep(
         self,
         freq: float = 440,

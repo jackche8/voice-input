@@ -57,10 +57,9 @@ else pass("唯一快照 operationId 集合为 " + snapIds.length + " 个");
 
 const requiredOps = [
   "setup_check_api_setup_check_get",
-  "setup_task_start_api_setup_tasks_post",
-  "setup_task_get_api_setup_tasks__task_id__get",
+  "setup_install_all_api_setup_install_all_post",
+  "retry_component_api_v1_components__name__retry_post",
   "lan_access_api_v1_lan_access_get",
-  "status_api_v1_status_get",
   "get_config_api_v1_config_get",
   "post_config_api_v1_config_post",
   "history_api_v1_history_get",
@@ -274,6 +273,15 @@ function fakeView(initial) {
 
 function wait(ms) { return new Promise(function (resolve) { setTimeout(resolve, ms); }); }
 
+async function waitFor(predicate, timeoutMs) {
+  const deadline = Date.now() + (timeoutMs || 2000);
+  while (!predicate()) {
+    if (Date.now() > deadline) return false;
+    await wait(5);
+  }
+  return true;
+}
+
 async function runUnit() {
   const catalogCtx = loadBusiness();
   const B = catalogCtx.window.V3Business;
@@ -368,9 +376,7 @@ async function runUnit() {
         size_label: null,
         device_label: null,
         progress: null,
-        message: "尚未下载识别模型",
-        action: "asr_download",
-        task_id: null
+        message: "尚未下载识别模型"
       },
       ollama: {
         model_name: "qwen3.5:4b",
@@ -380,30 +386,50 @@ async function runUnit() {
         model_status: "missing",
         size_label: null,
         progress: null,
-        message: "尚未安装 Ollama",
-        action: "ollama_install",
-        task_id: null
+        message: "尚未安装 Ollama"
       },
       capabilities: [
         { id: "clipboard", label: "剪贴板", available: false, required: true, detail: "当前环境无法写入剪贴板" }
       ],
-      unmet_gates: ["v3 尚未切流"]
+      components: [
+        componentBody("ollama", "not_installed", { reason: "未找到 Ollama 程序" }),
+        componentBody("asr", "not_installed", { reason: "未找到识别运行环境" }),
+        componentBody("server", "running")
+      ],
+      install_all: installAllBody("idle", [])
     };
     return Object.assign(base, overrides || {});
   }
 
-  /* setup controller: real schema mapping, config POST, tasks, LAN */
+  const STEP_KINDS = ["ollama_install", "wait_ollama", "ollama_pull", "asr_runtime_install", "asr_download"];
+  function installAllBody(state, stepStates, extra) {
+    const stepExtra = (extra && extra.steps) || {};
+    return {
+      state: state,
+      current: (extra && extra.current) || null,
+      steps: STEP_KINDS.map(function (kind, i) {
+        return Object.assign({ kind: kind, state: stepStates[i] || "pending", message: "", progress: null, task_id: null }, stepExtra[kind] || {});
+      })
+    };
+  }
+  function componentBody(name, state, extra) {
+    return Object.assign({ name: name, state: state, reason: null, failures: 0, retry_at: null, pid: null, since: "2026-11-20T00:00:00+00:00" }, extra || {});
+  }
+
+  /* setup controller: real schema mapping, config POST, install-all, component retry, LAN */
   const setupWorld = createWorld();
   setupWorld.check = setupCheckBody();
+  setupWorld.checkReads = 0;
+  setupWorld.installPosts = 0;
+  setupWorld.retried = [];
   setupWorld.routes = [
     { path: "/api/setup/check", method: "GET", handler: function () {
+      setupWorld.checkReads += 1;
+      if (typeof setupWorld.onCheck === "function") setupWorld.check = setupWorld.onCheck(setupWorld.check, setupWorld.checkReads);
       return jsonRes(200, setupWorld.check);
     } },
-    { path: "/api/v1/status", method: "GET", handler: function () {
-      return jsonRes(200, { ok: true, service: "ollama-voice-input", unmet_gates: ["v3 尚未切流"], injected: { transcribe: true, polish: true, translate: true } });
-    } },
     { path: "/api/v1/config", method: "GET", handler: function () {
-      return jsonRes(200, { polish_enabled: false, custom_keywords: ["Alpha"], translate_target_lang: "zh", hotkey_voice: "ctrl+alt+z", hotkey_screenshot: "ctrl+alt+x", hotkey_ocr: "ctrl+alt+o", hotkey_repeat: "ctrl+alt+r", ollama_model: "qwen3.5:4b" });
+      return jsonRes(200, { polish_enabled: false, custom_keywords: ["Alpha"], translate_target_lang: "zh", hotkey_voice: "ctrl+alt+z", hotkey_screenshot: "ctrl+alt+x", hotkey_ocr: "ctrl+alt+o", hotkey_repeat: "ctrl+alt+r", hotkey_annotate: "ctrl+alt+a", autostart_enabled: true, ollama_model: "qwen3.5:4b" });
     } },
     { path: "/api/v1/config", method: "POST", handler: function (rec) {
       const body = JSON.parse(rec.body);
@@ -411,7 +437,7 @@ async function runUnit() {
       if (Object.prototype.hasOwnProperty.call(body, "baidu_appkey") || Object.prototype.hasOwnProperty.call(body, "ollama_model")) {
         return jsonRes(400, { ok: false, error: "invalid_request", message: "未知或只读字段" });
       }
-      return jsonRes(200, Object.assign({ polish_enabled: false, custom_keywords: [], translate_target_lang: "zh", hotkey_voice: "ctrl+alt+z", hotkey_screenshot: "ctrl+alt+x", hotkey_ocr: "ctrl+alt+o", hotkey_repeat: "ctrl+alt+r", ollama_model: "qwen3.5:4b" }, body));
+      return jsonRes(200, Object.assign({ polish_enabled: false, custom_keywords: [], translate_target_lang: "zh", hotkey_voice: "ctrl+alt+z", hotkey_screenshot: "ctrl+alt+x", hotkey_ocr: "ctrl+alt+o", hotkey_repeat: "ctrl+alt+r", hotkey_annotate: "ctrl+alt+a", autostart_enabled: true, ollama_model: "qwen3.5:4b" }, body));
     } },
     { path: "/api/v1/history", method: "GET", handler: function () {
       return jsonRes(200, { records: [{ timestamp: "t", raw_text: "a", final_text: "a", job_id: "j1", source: "web", polish: "off" }], total: 1, skipped_malformed: 0 });
@@ -435,57 +461,18 @@ async function runUnit() {
       setupWorld.setConfigCalled = true;
       return jsonRes(404, { ok: false, error: "not_found", message: "set_config 已删除" });
     } },
-    { path: "/api/setup/tasks", method: "POST", handler: function (rec) {
-      const urlPath = rec.url.split("?")[0];
-      if (/\/api\/setup\/tasks\/[^/]+$/.test(urlPath) && rec.method === "POST") return jsonRes(404, { ok: false, error: "not_found", message: "no post task id" });
-      if (urlPath.indexOf("/api/setup/tasks/") >= 0 && urlPath !== "/api/setup/tasks" && !urlPath.endsWith("/api/setup/tasks")) {
-        return null;
-      }
-      const body = JSON.parse(rec.body || "{}");
-      setupWorld.started = (setupWorld.started || []).concat([body.kind]);
-      if (setupWorld.failStart) {
-        return jsonRes(500, { ok: false, error: "dependency_failed", message: setupWorld.failStart });
-      }
-      setupWorld.task = {
-        task_id: "task-asr-1",
-        kind: body.kind,
-        state: "running",
-        progress: setupWorld.startProgress || { completed_bytes: 10, total_bytes: 100, percent: 10, stage: "download" },
-        message: "downloading",
-        error: null,
-        started_at: "2026-11-10T00:00:00+00:00",
-        finished_at: null
-      };
-      setupWorld.polls = 0;
-      return jsonRes(202, setupWorld.task);
+    { path: "/api/setup/install-all", method: "POST", handler: function (rec) {
+      setupWorld.installPosts += 1;
+      setupWorld.installBodies = (setupWorld.installBodies || []).concat([rec.body == null ? null : rec.body]);
+      if (setupWorld.failInstall) return jsonRes(403, { ok: false, error: "forbidden", message: setupWorld.failInstall });
+      setupWorld.check = setupCheckBody({ install_all: installAllBody("running", ["running"], { current: "ollama_install" }) });
+      return jsonRes(202, setupWorld.check.install_all);
     } },
-    { match: function (url, rec) {
-      return rec.method === "GET" && /\/api\/setup\/tasks\/[^/]+/.test(String(url).split("?")[0]);
-    }, handler: function (rec) {
-      setupWorld.polls = (setupWorld.polls || 0) + 1;
-      if (typeof setupWorld.onPoll === "function") return setupWorld.onPoll(rec, setupWorld.polls);
-      const cur = Object.assign({}, setupWorld.task || {});
-      if (setupWorld.polls === 1) {
-        cur.state = "running";
-        cur.progress = { completed_bytes: 40, total_bytes: 100, percent: 40, stage: "download" };
-      } else {
-        cur.state = "succeeded";
-        cur.progress = { completed_bytes: 100, total_bytes: 100, percent: 100, stage: "done" };
-        cur.finished_at = "2026-11-10T00:00:01+00:00";
-        cur.message = "downloaded";
-        setupWorld.check = setupCheckBody({
-          unmet_gates: ["v3 尚未切流"],
-          asr: Object.assign({}, setupCheckBody().asr, {
-            status: "missing",
-            weights_present: true,
-            message: "权重已在，等待启动",
-            action: "asr_start",
-            task_id: null
-          })
-        });
-      }
-      setupWorld.task = cur;
-      return jsonRes(200, cur);
+    { match: function (url) { return /\/api\/v1\/components\/[^/]+\/retry$/.test(String(url).split("?")[0]); }, method: "POST", handler: function (rec) {
+      const name = decodeURIComponent(rec.url.split("?")[0].split("/").slice(-2)[0]);
+      setupWorld.retried.push(name);
+      if (["ollama", "asr", "server"].indexOf(name) < 0) return jsonRes(404, { ok: false, error: "not_found", message: "没有组件 '" + name + "'" });
+      return jsonRes(202, { ok: true });
     } }
   ];
   const setupCtl = B.createHomeController({
@@ -498,11 +485,18 @@ async function runUnit() {
   setupCtl.bind(setupView);
   await setupCtl.start();
   const st = setupView.getState();
-  if (st.connection === "connected" && st.asr && st.asr.status === "missing" && st.asr.action === "asr_download" && st.ollama.modelStatus === "missing" && !st.asr.progress && st.history.records.length === 1 && st.polish_enabled === false) {
-    pass("统一工作台设置已连接，按 asr.status/model_status 映射，不用 injected 猜就绪，也无假进度");
-  } else fail("设置就绪映射错误：" + JSON.stringify({ connection: st.connection, asr: st.asr, ollama: st.ollama }));
-  if (st.statusNotice && (st.statusNotice.indexOf("未达上线") >= 0 || st.statusNotice.indexOf("尚未切流") >= 0)) pass("设置展示 unmet_gates 说明");
-  else fail("设置未展示上线条件：" + st.statusNotice);
+  if (st.connection === "connected" && st.asr && st.asr.status === "missing" && st.ollama.modelStatus === "missing" && !st.asr.progress && st.history.records.length === 1 && st.polish_enabled === false && st.autostart_enabled === true) {
+    pass("统一工作台设置已连接，按 asr.status/model_status 映射，不用 injected 猜就绪，也无假进度；读到 autostart_enabled");
+  } else fail("设置就绪映射错误：" + JSON.stringify({ connection: st.connection, asr: st.asr, ollama: st.ollama, autostart: st.autostart_enabled }));
+  if (
+    st.installAll && st.installAll.state === "idle" && st.installAll.current === null
+    && st.installAll.steps.map(function (x) { return x.kind + ":" + x.state; }).join(",") === STEP_KINDS.map(function (k) { return k + ":pending"; }).join(",")
+    && st.components && st.components.map(function (c) { return c.name + ":" + c.state; }).join(",") === "ollama:not_installed,asr:not_installed,server:running"
+    && st.components[0].reason === "未找到 Ollama 程序"
+    && setupCtl._debug.polling() === false
+  ) {
+    pass("加载时映射 install_all（五步固定顺序）与 components；空闲时不重读");
+  } else fail("install_all/components 映射错误：" + JSON.stringify({ installAll: st.installAll, components: st.components, polling: setupCtl._debug.polling() }));
   if (st.capabilities && st.capabilities[0] && st.capabilities[0].available === false && /剪贴板/.test(st.capabilities[0].name) && /无法写入剪贴板/.test(st.capabilities[0].message)) {
     pass("平台能力按真实 capabilities 呈现不可用原因");
   } else fail("能力映射错误：" + JSON.stringify(st.capabilities));
@@ -572,125 +566,131 @@ async function runUnit() {
     pass("home-controller + setup-actions 读取并保存第四热键 hotkey_ocr，保存成功时清空 hotkeyCaptureWarning");
   } else fail("home-controller hotkey_ocr 保存异常：" + JSON.stringify({ initOcr: st.hotkey_ocr, savedKeys: savedKeys, afterOcr: afterKeys.hotkey_ocr, warn: afterKeys.hotkeyCaptureWarning }));
 
-  const downloadP = setupCtl.hooks.onDownloadAsr();
-  await downloadP;
-  const after = setupView.getState();
-  if (setupWorld.started && setupWorld.started[0] === "asr_download" && setupWorld.polls >= 2 && after.asr.action === "asr_start" && after.asr.status !== "ready" && after.asr.progress == null) {
-    pass("下载任务经 202 与轮询完成后再查 check，不以任务成功冒充模型就绪");
-  } else fail("任务生命周期映射错误：" + JSON.stringify({ started: setupWorld.started, polls: setupWorld.polls, asr: after.asr }));
-
-  /* injected 不得覆盖真实 missing */
-  const injWorld = createWorld();
-  injWorld.routes = setupWorld.routes.map(function (r) { return r; });
-  const injCheck = setupCheckBody();
-  injWorld.routes = injWorld.routes.filter(function (r) { return r.path !== "/api/setup/check"; });
-  injWorld.routes.unshift({ path: "/api/setup/check", method: "GET", handler: function () { return jsonRes(200, injCheck); } });
-  const injCtl = B.createHomeController({
-    client: B.createHttp({ catalog: catalog, context: localCtx, fetch: injWorld.fetch, origin: "https://127.0.0.1:17945" }),
-    context: localCtx,
-    catalog: catalog,
-    pollInterval: 10
-  });
-  const injView = fakeView();
-  injCtl.bind(injView);
-  await injCtl.start();
-  if (injView.getState().asr.status === "missing" && injView.getState().ollama.modelStatus === "missing") {
-    pass("status.injected=true 时仍按 check.asr.status 显示未就绪");
-  } else fail("injected 干扰了就绪判断：" + JSON.stringify(injView.getState().asr));
-  injCtl.destroy();
-
-  /* 无 percent 时不编造百分比 */
-  const nopWorld = createWorld();
-  nopWorld.check = setupCheckBody();
-  nopWorld.failStart = null;
-  nopWorld.startProgress = { completed_bytes: 5, total_bytes: null, percent: null, stage: "fetch" };
-  nopWorld.routes = setupWorld.routes;
-  const origOnStart = setupWorld.startProgress;
-  setupWorld.startProgress = { completed_bytes: 5, total_bytes: null, percent: null, stage: "fetch" };
-  setupWorld.check = setupCheckBody();
-  setupWorld.onPoll = function (rec, n) {
-    if (n === 1) {
-      return jsonRes(200, {
-        task_id: "task-asr-1",
-        kind: "asr_download",
-        state: "running",
-        progress: { completed_bytes: 5, total_bytes: null, percent: null, stage: "fetch" },
-        message: "fetching",
-        error: null,
-        started_at: "2026-11-10T00:00:00+00:00",
-        finished_at: null
-      });
+  /* 一键装齐：POST 一次（无请求体）→ 进行中按 setup/check 重读 → 结束即停；模型就绪仍只看 check.asr/ollama */
+  setupWorld.onCheck = function (check, n) {
+    if (check.install_all.state !== "running") return check;
+    if (check.install_all.current === "ollama_install") {
+      return setupCheckBody({ install_all: installAllBody("running", ["done", "done", "running"], {
+        current: "ollama_pull",
+        steps: { ollama_pull: { message: "下载中", progress: { completed_bytes: 5, total_bytes: null, percent: null, stage: "pull" } } }
+      }) });
     }
-    return jsonRes(200, {
-      task_id: "task-asr-1",
-      kind: "asr_download",
-      state: "failed",
-      progress: null,
-      message: "download failed",
-      error: "dependency_failed",
-      started_at: "2026-11-10T00:00:00+00:00",
-      finished_at: "2026-11-10T00:00:02+00:00"
-    });
+    return setupCheckBody({ install_all: installAllBody("done", ["skipped", "done", "done", "done", "done"]) });
   };
-  const nopCtl = B.createHomeController({
-    client: B.createHttp({ catalog: catalog, context: localCtx, fetch: setupWorld.fetch, origin: "https://127.0.0.1:17945" }),
-    context: localCtx,
-    catalog: catalog,
-    pollInterval: 10
-  });
-  const nopView = fakeView();
-  nopCtl.bind(nopView);
-  await nopCtl.start();
-  const midP = nopCtl.hooks.onDownloadAsr();
-  await wait(5);
-  const mid = nopView.getState();
-  if (mid.asr && mid.asr.progress && mid.asr.progress.percent == null && mid.asr.progress.receivedLabel && !mid.asr.progress.totalLabel && mid.asr.status === "downloading") {
-    pass("服务端未给 percent 时不展示假百分比，只显示已给字节");
-  } else fail("假百分比或进度映射错误：" + JSON.stringify(mid.asr && mid.asr.progress));
-  await midP;
-  if (nopView.getState().asr.status === "failed" && /failed|失败/.test(nopView.getState().asr.message || nopView.getState().statusNotice || "")) {
-    pass("任务失败如实呈现，不造成功");
-  } else fail("失败任务未正确呈现：" + JSON.stringify(nopView.getState().asr));
-  nopCtl.destroy();
-  setupWorld.onPoll = null;
-  setupWorld.startProgress = origOnStart;
+  await setupCtl.hooks.onInstallAll();
+  const afterPost = setupView.getState();
+  if (setupWorld.installPosts === 1 && setupWorld.installBodies[0] == null && afterPost.installAll.state === "running" && afterPost.installAll.current === "ollama_install" && setupCtl._debug.polling() === true) {
+    pass("一键装齐只 POST 一次 install-all（无请求体），202 状态立即进视图并开始重读");
+  } else fail("install-all 请求或 202 映射错误：" + JSON.stringify({ posts: setupWorld.installPosts, bodies: setupWorld.installBodies, installAll: afterPost.installAll }));
+  await waitFor(function () { const ia = setupView.getState().installAll; return ia.steps[2].state === "running"; });
+  const stepProgress = setupView.getState().installAll.steps[2].progress;
+  if (stepProgress && stepProgress.percent == null && stepProgress.receivedLabel === "5 B" && stepProgress.totalLabel == null && setupView.getState().installAll.steps[2].message === "下载中") {
+    pass("步骤进度只换算服务端字节，未给 percent 时不编造百分比");
+  } else fail("步骤进度映射错误：" + JSON.stringify(setupView.getState().installAll.steps[2]));
+  const doneOk = await waitFor(function () { return setupView.getState().installAll.state === "done" && setupCtl._debug.polling() === false; });
+  const afterDone = setupView.getState();
+  if (doneOk && afterDone.installAll.steps.map(function (x) { return x.state; }).join(",") === "skipped,done,done,done,done" && afterDone.asr.status === "missing" && setupWorld.installPosts === 1) {
+    pass("装齐结束后停止重读；模型行仍按 check.asr 显示，不以装齐完成冒充就绪");
+  } else fail("装齐结束映射或停读错误：" + JSON.stringify({ done: doneOk, installAll: afterDone.installAll, asr: afterDone.asr, polling: setupCtl._debug.polling() }));
+
+  setupWorld.onCheck = function (check) {
+    if (check.install_all.state !== "running") return check;
+    return setupCheckBody({ install_all: installAllBody("failed", ["skipped", "done", "skipped", "failed"], {
+      current: "asr_runtime_install",
+      steps: { asr_runtime_install: { message: "安装识别运行环境失败：网络不可达" } }
+    }) });
+  };
+  await setupCtl.hooks.onInstallAll();
+  const failedOk = await waitFor(function () { return setupView.getState().installAll.state === "failed" && setupCtl._debug.polling() === false; });
+  const afterFail = setupView.getState().installAll;
+  if (failedOk && afterFail.current === "asr_runtime_install" && afterFail.steps[3].state === "failed" && afterFail.steps[3].message.indexOf("网络不可达") >= 0 && afterFail.steps[4].state === "pending" && setupWorld.installPosts === 2) {
+    pass("某步失败即停在该步：失败步与原因进视图，后续步保持待执行，停止重读");
+  } else fail("装齐失败映射错误：" + JSON.stringify({ ok: failedOk, installAll: afterFail, posts: setupWorld.installPosts }));
+  setupWorld.onCheck = null;
+
+  setupWorld.failInstall = "仅本机可调用";
+  const beforeDenied = setupView.getState().installAll;
+  await setupCtl.hooks.onInstallAll();
+  if (/禁止访问/.test(setupView.getState().statusNotice || "") && /仅本机可调用/.test(setupView.getState().statusNotice || "") && setupView.getState().installAll === beforeDenied && setupCtl._debug.polling() === false) {
+    pass("install-all 被拒时把后端错误写进提示，不改装齐状态、不开始重读");
+  } else fail("install-all 错误未呈现：" + JSON.stringify({ notice: setupView.getState().statusNotice, polling: setupCtl._debug.polling() }));
+  setupWorld.failInstall = null;
+
+  /* 组件重试：POST /api/v1/components/{name}/retry → 202 后重读，直到不再启动中；未知组件的 404 呈现给用户 */
+  setupWorld.check = setupCheckBody({ components: [
+    componentBody("ollama", "running"),
+    componentBody("asr", "stopped", { reason: "连续失败 5 次：CUDA out of memory", failures: 5 }),
+    componentBody("server", "running")
+  ] });
+  await setupCtl.loadAll();
+  if (setupView.getState().components[1].state === "stopped" && setupView.getState().components[1].reason.indexOf("CUDA") >= 0 && setupCtl._debug.polling() === false) {
+    pass("组件已停止时映射原因，不自动重读");
+  } else fail("组件 stopped 映射错误：" + JSON.stringify(setupView.getState().components));
+  setupWorld.onCheck = function (check, n) {
+    const asr = check.components[1];
+    const next = asr.state === "stopped" ? "starting" : "running";
+    return setupCheckBody({ components: [check.components[0], componentBody("asr", next), check.components[2]] });
+  };
+  await setupCtl.hooks.onRetryComponent("asr");
+  const retryNotice = setupView.getState().statusNotice || "";
+  const retryOk = await waitFor(function () { return setupView.getState().components[1].state === "running" && setupCtl._debug.polling() === false; });
+  if (setupWorld.retried.join(",") === "asr" && /已请求重试/.test(retryNotice) && retryOk) {
+    pass("组件重试只发 retry(name)，随后重读到启动中→运行中并停止重读");
+  } else fail("组件重试流程错误：" + JSON.stringify({ retried: setupWorld.retried, notice: retryNotice, components: setupView.getState().components, polling: setupCtl._debug.polling() }));
+  if (setupView.getState().statusNotice === null) pass("重读到最新状态后清掉上一次的操作提示");
+  else fail("重读后残留操作提示：" + JSON.stringify(setupView.getState().statusNotice));
+  setupWorld.onCheck = null;
+  await setupCtl.hooks.onRetryComponent("nope");
+  if (/未找到/.test(setupView.getState().statusNotice || "") && /nope/.test(setupView.getState().statusNotice || "")) {
+    pass("未知组件重试的 404 原样呈现");
+  } else fail("组件重试错误未呈现：" + JSON.stringify(setupView.getState().statusNotice));
   setupWorld.check = setupCheckBody();
 
-  /* destroy 停止轮询且不重复启动 */
-  const desWorldPolls = { n: 0, afterDestroy: 0 };
-  let setupDes;
-  setupWorld.onPoll = function (rec, n) {
-    desWorldPolls.n += 1;
-    if (setupDes && setupDes._debug.isDestroyed()) desWorldPolls.afterDestroy += 1;
-    return jsonRes(200, {
-      task_id: "task-asr-1",
-      kind: "asr_download",
-      state: "running",
-      progress: { completed_bytes: 1, total_bytes: 100, percent: 1, stage: "download" },
-      message: "still running",
-      error: null,
-      started_at: "2026-11-10T00:00:00+00:00",
-      finished_at: null
-    });
-  };
-  setupDes = B.createHomeController({
-    client: B.createHttp({ catalog: catalog, context: localCtx, fetch: setupWorld.fetch, origin: "https://127.0.0.1:17945" }),
+  /* 开机自启：只提交 autostart_enabled，回读结果进视图 */
+  setupWorld.lastConfig = null;
+  await setupCtl.hooks.onToggleAutostart(false);
+  if (setupWorld.lastConfig && JSON.stringify(setupWorld.lastConfig) === JSON.stringify({ autostart_enabled: false }) && setupView.getState().autostart_enabled === false) {
+    pass("开机自启开关只经 config POST 提交 autostart_enabled 并回读");
+  } else fail("开机自启保存错误：" + JSON.stringify({ sent: setupWorld.lastConfig, state: setupView.getState().autostart_enabled }));
+
+  /* destroy 清掉待执行的重读，之后不再请求（假定时器，不靠等待时长） */
+  const desTimers = [];
+  const desWorld = createWorld();
+  desWorld.routes = setupWorld.routes.filter(function (r) { return r.path !== "/api/setup/check" && r.path !== "/api/setup/install-all"; });
+  desWorld.reads = 0;
+  desWorld.routes.unshift(
+    { path: "/api/setup/check", method: "GET", handler: function () {
+      desWorld.reads += 1;
+      return jsonRes(200, setupCheckBody({ install_all: installAllBody("running", ["running"], { current: "ollama_install" }) }));
+    } },
+    { path: "/api/setup/install-all", method: "POST", handler: function () {
+      return jsonRes(202, installAllBody("running", ["running"], { current: "ollama_install" }));
+    } }
+  );
+  const setupDes = B.createHomeController({
+    client: B.createHttp({ catalog: catalog, context: localCtx, fetch: desWorld.fetch, origin: "https://127.0.0.1:17945" }),
     context: localCtx,
     catalog: catalog,
-    pollInterval: 10
+    setTimeout: function (fn) { desTimers.push(fn); return desTimers.length; },
+    clearTimeout: function (id) { desTimers[id - 1] = null; }
   });
   const desView = fakeView();
   setupDes.bind(desView);
   await setupDes.start();
-  setupDes.hooks.onDownloadAsr();
-  await wait(25);
-  const pollsBefore = desWorldPolls.n;
+  const readsAfterStart = desWorld.reads;
+  const pendingAfterStart = desTimers.filter(Boolean).length;
+  const firstTimer = desTimers.findIndex(Boolean);
+  if (firstTimer >= 0) {
+    const fireFirst = desTimers[firstTimer];
+    desTimers[firstTimer] = null;
+    fireFirst();
+    await waitFor(function () { return desWorld.reads === readsAfterStart + 1 && desTimers.filter(Boolean).length === 1; });
+  }
   setupDes.destroy();
-  await wait(40);
-  if (setupDes._debug.isDestroyed() && setupDes._debug.polling() === null && desWorldPolls.afterDestroy === 0 && desWorldPolls.n >= 1 && pollsBefore === desWorldPolls.n) {
-    pass("destroy 后停止任务轮询，不再重新启动");
-  } else fail("destroy 未停轮询：" + JSON.stringify(desWorldPolls) + " before=" + pollsBefore);
-  setupWorld.onPoll = null;
+  const pendingAfterDestroy = desTimers.filter(Boolean).length;
+  if (pendingAfterStart === 1 && desWorld.reads === readsAfterStart + 1 && pendingAfterDestroy === 0 && setupDes._debug.polling() === false) {
+    pass("装齐进行中打开页面即续读；destroy 清掉待执行的重读，不再请求");
+  } else fail("destroy 未停重读：" + JSON.stringify({ pendingAfterStart: pendingAfterStart, reads: desWorld.reads, readsAfterStart: readsAfterStart, pendingAfterDestroy: pendingAfterDestroy }));
 
   /* LAN setup must not call local endpoints */
   const lanSetupWorld = createWorld();
@@ -713,13 +713,9 @@ async function runUnit() {
   homeWorld.routes = [
     { path: "/api/setup/check", method: "GET", handler: function () {
       return jsonRes(200, setupCheckBody({
-        unmet_gates: [],
-        asr: Object.assign({}, setupCheckBody().asr, { status: "ready", weights_present: true, sidecar_running: true, action: null, message: "" }),
-        ollama: Object.assign({}, setupCheckBody().ollama, { installed: true, running: true, model_status: "ready", action: null, message: "" })
+        asr: Object.assign({}, setupCheckBody().asr, { status: "ready", weights_present: true, sidecar_running: true, message: "" }),
+        ollama: Object.assign({}, setupCheckBody().ollama, { installed: true, running: true, model_status: "ready", message: "" })
       }));
-    } },
-    { path: "/api/v1/status", method: "GET", handler: function () {
-      return jsonRes(200, { ok: true, service: "ollama-voice-input", unmet_gates: [] });
     } },
     { path: "/api/v1/config", method: "GET", handler: function () {
       return jsonRes(200, {
@@ -1531,14 +1527,14 @@ async function runUnit() {
   voiceCtl.destroy();
 
   const mappedCaps = B.mapCapabilities([
-    { id: "desktop_daemon", label: "桌面守护进程", available: true, required: true, detail: "守护进程正在运行，快捷键已加载。" },
+    { id: "evdev_keyboards", label: "键盘设备读取", available: true, required: true, detail: "已读到 2 个键盘设备。" },
     { id: "clipboard", label: "剪贴板", available: false, required: true, detail: "当前环境无法写入剪贴板" }
   ]);
   if (
     mappedCaps
     && mappedCaps[0]
-    && mappedCaps[0].id === "desktop_daemon"
-    && mappedCaps[0].detail === "守护进程正在运行，快捷键已加载。"
+    && mappedCaps[0].id === "evdev_keyboards"
+    && mappedCaps[0].detail === "已读到 2 个键盘设备。"
     && mappedCaps[0].message === mappedCaps[0].detail
     && mappedCaps[1].id === "clipboard"
     && mappedCaps[1].detail.indexOf("无法写入剪贴板") >= 0
@@ -1546,31 +1542,8 @@ async function runUnit() {
     pass("mapCapabilities 保留 id 与 detail");
   } else fail("mapCapabilities 未保留 id/detail：" + JSON.stringify(mappedCaps));
   if (B.mapCapabilities(null) === null && Array.isArray(B.mapCapabilities([])) && B.mapCapabilities([]).length === 0) {
-    pass("能力列表缺省或空数组时不编造 desktop_daemon");
+    pass("能力列表缺省或空数组时不编造检测项");
   } else fail("空能力列表映射错误");
-
-  const startFailModels = B.applyTaskToModels(
-    { status: "ready", sidecarRunning: false, message: "权重已在", action: "asr_start" },
-    { modelStatus: "ready", running: true },
-    { kind: "asr_start", state: "failed", message: "启动识别服务失败：未授权", task_id: "t-start-1", error: "unauthorized" }
-  );
-  if (
-    startFailModels.asr.status === "ready"
-    && startFailModels.asr.sidecarRunning === false
-    && startFailModels.asr.message.indexOf("未授权") >= 0
-    && startFailModels.asr.action === "asr_start"
-    && startFailModels.asr.taskId === "t-start-1"
-  ) {
-    pass("asr_start 失败不把 weights status 写成 failed，只叠加任务说明");
-  } else fail("applyTaskToModels asr_start 失败路径错误：" + JSON.stringify(startFailModels.asr));
-
-  const dlFail = B.applyTaskToModels(
-    { status: "downloading" },
-    {},
-    { kind: "asr_download", state: "failed", message: "下载中断", task_id: "t-dl" }
-  );
-  if (dlFail.asr.status === "failed" && dlFail.asr.message === "下载中断") pass("asr_download 失败仍写入 weights status=failed");
-  else fail("asr_download 失败路径被误改：" + JSON.stringify(dlFail.asr));
 
   const startReqWorld = createWorld();
   startReqWorld.check = setupCheckBody({
@@ -1578,15 +1551,11 @@ async function runUnit() {
       status: "ready",
       weights_present: true,
       sidecar_running: false,
-      message: "权重已就绪，识别服务未启动",
-      action: "asr_start",
-      task_id: null
+      message: "权重已就绪，识别服务未启动"
     })
   });
-  startReqWorld.failStart = "启动识别服务失败：端口被占用";
   startReqWorld.routes = [
     { path: "/api/setup/check", method: "GET", handler: function () { return jsonRes(200, startReqWorld.check); } },
-    { path: "/api/v1/status", method: "GET", handler: function () { return jsonRes(200, { ok: true, service: "ollama-voice-input", unmet_gates: [], injected: {} }); } },
     { path: "/api/v1/config", method: "GET", handler: function () { return jsonRes(200, { polish_enabled: false, custom_keywords: [], translate_target_lang: "zh", hotkey_voice: "ctrl+alt+z", hotkey_screenshot: "ctrl+alt+x", hotkey_repeat: "ctrl+alt+r", ollama_model: "qwen3.5:4b" }); } },
     { path: "/api/v1/config", method: "POST", handler: function (rec) {
       const body = JSON.parse(rec.body);
@@ -1596,41 +1565,7 @@ async function runUnit() {
       return jsonRes(200, Object.assign({ polish_enabled: false, custom_keywords: [], translate_target_lang: "zh", hotkey_voice: "ctrl+alt+z", hotkey_screenshot: "ctrl+alt+x", hotkey_repeat: "ctrl+alt+r", ollama_model: "qwen3.5:4b" }, body));
     } },
     { path: "/api/v1/history", method: "GET", handler: function () { return jsonRes(200, { records: [], total: 0, skipped_malformed: 0 }); } },
-    { path: "/api/v1/lan-access", method: "GET", handler: function () { return jsonRes(200, { port: 8443, token: "secret-lan-token-do-not-log", token_masked: "sec****log", entries: [], message: "" }); } },
-    { path: "/api/setup/tasks", method: "POST", handler: function (rec) {
-      const urlPath = rec.url.split("?")[0];
-      if (urlPath.indexOf("/api/setup/tasks/") >= 0 && urlPath !== "/api/setup/tasks") return null;
-      const body = JSON.parse(rec.body || "{}");
-      startReqWorld.started = (startReqWorld.started || []).concat([body.kind]);
-      if (startReqWorld.failStart) {
-        return jsonRes(500, { ok: false, error: "dependency_failed", message: startReqWorld.failStart });
-      }
-      startReqWorld.task = {
-        task_id: "task-start-1",
-        kind: body.kind,
-        state: "running",
-        progress: null,
-        message: "starting",
-        error: null,
-        started_at: "2026-11-11T00:00:00+00:00",
-        finished_at: null
-      };
-      startReqWorld.polls = 0;
-      return jsonRes(202, startReqWorld.task);
-    } },
-    { match: function (url, rec) {
-      return rec.method === "GET" && /\/api\/setup\/tasks\/[^/]+/.test(String(url).split("?")[0]);
-    }, handler: function () {
-      startReqWorld.polls = (startReqWorld.polls || 0) + 1;
-      if (typeof startReqWorld.onPoll === "function") return startReqWorld.onPoll(startReqWorld.polls);
-      const cur = Object.assign({}, startReqWorld.task || {});
-      cur.state = "failed";
-      cur.message = "sidecar 未能监听";
-      cur.error = "dependency_failed";
-      cur.finished_at = "2026-11-11T00:00:01+00:00";
-      startReqWorld.task = cur;
-      return jsonRes(200, cur);
-    } }
+    { path: "/api/v1/lan-access", method: "GET", handler: function () { return jsonRes(200, { port: 8443, token: "secret-lan-token-do-not-log", token_masked: "sec****log", entries: [], message: "" }); } }
   ];
   const startReqCtl = B.createHomeController({
     client: B.createHttp({ catalog: catalog, context: localCtx, fetch: startReqWorld.fetch, origin: "https://127.0.0.1:17945" }),
@@ -1652,19 +1587,6 @@ async function runUnit() {
   if (startReqView.getState().asr && startReqView.getState().asr.status === "ready" && startReqView.getState().asr.sidecarRunning === false) {
     pass("mapAsr 保留 sidecarRunning=false，不把缺运行当成已就绪");
   } else fail("sidecarRunning 映射错误：" + JSON.stringify(startReqView.getState().asr));
-  await startReqCtl.hooks.onStartAsr();
-  const afterReqFail = startReqView.getState();
-  if (afterReqFail.asr.status === "ready" && /端口被占用/.test((afterReqFail.asr.message || "") + " " + (afterReqFail.statusNotice || "")) && afterReqFail.asr.action === "asr_start") {
-    pass("启动请求失败不把 status 写成 failed，并展示后端说明");
-  } else fail("启动请求失败路径错误：" + JSON.stringify({ asr: afterReqFail.asr, notice: afterReqFail.statusNotice }));
-
-  startReqWorld.failStart = null;
-  await startReqCtl.hooks.onStartAsr();
-  const afterOverlay = startReqView.getState();
-  if (afterOverlay.asr.status === "ready" && /未能监听/.test((afterOverlay.asr.message || "") + " " + (afterOverlay.statusNotice || "")) && afterOverlay.asr.action === "asr_start") {
-    pass("asr_start 任务失败叠加路径不改 weights status，只保留任务说明");
-  } else fail("overlayTaskFailure asr_start 路径错误：" + JSON.stringify({ asr: afterOverlay.asr, notice: afterOverlay.statusNotice, polls: startReqWorld.polls }));
-
   try {
     await startReqCtl.hooks.onSaveHotkeys({ hotkey_voice: "ctrl+alt+z", hotkey_screenshot: "ctrl+alt+z", hotkey_repeat: "ctrl+alt+r" });
     fail("快捷键互相重复时不应保存成功");
@@ -1679,21 +1601,11 @@ async function runUnit() {
     } else fail("保存冲突后草稿或错误不正确：" + JSON.stringify({ drafts: st.hotkeyDrafts, err: st.hotkeySaveError, notice: st.statusNotice, saved: st.hotkeysSaved, thrown: err && err.message }));
   }
 
-  /* P1-5 回归：配置保存失败写入 statusNotice 后，再次保存成功立即恢复为无报错（或按 unmetGates 还原） */
-  startReqView.setState({ unmetGates: [] });
+  /* P1-5 回归：配置保存失败写入 statusNotice 后，再次保存成功立即恢复为无报错 */
   await startReqCtl.hooks.onSaveHotkeys({ hotkey_voice: "ctrl+alt+z", hotkey_screenshot: "ctrl+alt+x", hotkey_repeat: "ctrl+alt+r" });
   if (startReqView.getState().statusNotice === null && startReqView.getState().hotkeySaveError === "") {
-    pass("saveConfig 失败后再保存成功时（无 unmetGates）立即清空顶部 statusNotice");
+    pass("saveConfig 失败后再保存成功时立即清空顶部 statusNotice");
   } else fail("saveConfig 成功后未清空 statusNotice：" + JSON.stringify({ notice: startReqView.getState().statusNotice, err: startReqView.getState().hotkeySaveError }));
-
-  startReqView.setState({ unmetGates: ["v3 尚未切流"] });
-  try {
-    await startReqCtl.hooks.onSaveHotkeys({ hotkey_voice: "ctrl+alt+z", hotkey_screenshot: "ctrl+alt+z", hotkey_repeat: "ctrl+alt+r" });
-  } catch (err) {}
-  await startReqCtl.hooks.onSaveHotkeys({ hotkey_voice: "ctrl+alt+z", hotkey_screenshot: "ctrl+alt+x", hotkey_repeat: "ctrl+alt+r" });
-  if (startReqView.getState().statusNotice === "未达上线条件：v3 尚未切流") {
-    pass("saveConfig 失败后再保存成功时（存在 unmetGates）还原门闩提示，不残留旧报错");
-  } else fail("saveConfig 成功后未还原 unmetGates statusNotice：" + JSON.stringify(startReqView.getState().statusNotice));
 
   startReqCtl.destroy();
 
@@ -1720,8 +1632,7 @@ async function runUnit() {
     }
   };
   const bootFetch = async function (url) {
-    if (String(url).indexOf("/api/setup/check") >= 0) return jsonRes(200, { ok: true, asr: { status: "ready", sidecar_running: true }, ollama: { installed: true, running: true, model_status: "ready" }, capabilities: [], unmet_gates: [] });
-    if (String(url).indexOf("/api/v1/status") >= 0) return jsonRes(200, { ok: true, unmet_gates: [] });
+    if (String(url).indexOf("/api/setup/check") >= 0) return jsonRes(200, { ok: true, asr: { status: "ready", sidecar_running: true }, ollama: { installed: true, running: true, model_status: "ready" }, capabilities: [] });
     if (String(url).indexOf("/api/v1/config") >= 0) return jsonRes(200, { polish_enabled: true, custom_keywords: [], translate_target_lang: "zh", hotkey_voice: "ctrl+alt+z", hotkey_screenshot: "ctrl+alt+x", hotkey_ocr: "ctrl+alt+o", hotkey_repeat: "ctrl+alt+r" });
     if (String(url).indexOf("/api/v1/history") >= 0) return jsonRes(200, { records: [], total: 0, skipped_malformed: 0 });
     if (String(url).indexOf("/api/v1/lan-access") >= 0) return jsonRes(200, { port: 17945, token: "", token_masked: "", entries: [], message: "" });
@@ -1865,7 +1776,6 @@ async function runUnit() {
       }
       return Promise.resolve(jsonRes(200, setupCheckBody({ asr: Object.assign({}, setupCheckBody().asr, { message: "最新响应" }) })));
     }
-    if (u.indexOf("/api/v1/status") >= 0) return Promise.resolve(jsonRes(200, { ok: true, unmet_gates: [] }));
     if (u.indexOf("/api/v1/config") >= 0) {
       return Promise.resolve(jsonRes(200, {
         polish_enabled: true,
@@ -1945,6 +1855,12 @@ function runAsgi() {
       settled = true;
       if (errMsg) fail(errMsg + (stderr ? " / " + stderr.slice(0, 400) : ""));
       else pass(okMsg);
+      /* 成功与失败都经过这里：删掉本次创建的沙箱根目录（明确路径），不在 .pp/tmp 里逐次累积 */
+      try {
+        fs.rmSync(sandboxRoot, { recursive: true, force: true });
+      } catch (err) {
+        fail("清理 ASGI 沙箱目录失败：" + sandboxRoot + "：" + err.message);
+      }
       resolve();
     }
     function processGone() {
@@ -1988,7 +1904,6 @@ function runAsgi() {
       setTimeout(waitMeta, 50);
     }
     function probe(meta) {
-      if (meta.port === 17945 || meta.port === 11434) return finish(null, "沙箱误用保留端口 " + meta.port);
       const origin = "http://127.0.0.1:" + meta.port;
       const catalog = (function () {
         const ctx = loadBusiness();
@@ -2001,8 +1916,11 @@ function runAsgi() {
         const check = await client.call("setup_check_api_setup_check_get");
         if (!check || check.ok !== true || !check.asr || !check.ollama) throw new Error("setup_check 未返回真实 SetupCheckResponse");
         if (check.asr.status === "ready") throw new Error("沙箱默认不应把识别标为已就绪");
-        if (!Array.isArray(check.unmet_gates) || !check.unmet_gates.length) throw new Error("setup_check 应保留 unmet_gates，ok 只表示检查成功");
         if (!Array.isArray(check.capabilities)) throw new Error("setup_check 缺少 capabilities");
+        const idleSteps = (check.install_all && check.install_all.steps || []).map(function (x) { return x.kind + ":" + x.state; }).join(",");
+        if (!check.install_all || check.install_all.state !== "idle" || idleSteps !== "ollama_install:pending,wait_ollama:pending,ollama_pull:pending,asr_runtime_install:pending,asr_download:pending") {
+          throw new Error("setup_check.install_all 未从空闲五步开始：" + JSON.stringify(check.install_all));
+        }
         const snapRes = await fetch(origin + "/openapi.snapshot.json");
         if (!snapRes.ok) throw new Error("页面快照 /openapi.snapshot.json HTTP " + snapRes.status);
         const snapDoc = await snapRes.json();
@@ -2032,15 +1950,43 @@ function runAsgi() {
         if (!jsRes.ok) throw new Error("/js 资源 HTTP " + jsRes.status);
         const cssRes = await fetch(origin + "/css/theme.css");
         if (!cssRes.ok) throw new Error("/css 资源 HTTP " + cssRes.status);
-        const started = await client.call("setup_task_start_api_setup_tasks_post", { body: { kind: "asr_download" } });
-        if (!started || started.state !== "running" || !started.task_id) throw new Error("启动任务未返回 running");
-        const same = await client.call("setup_task_start_api_setup_tasks_post", { body: { kind: "asr_download" } });
-        if (!same || same.task_id !== started.task_id) throw new Error("同 kind 运行中任务应幂等返回");
-        const mid = await client.call("setup_task_get_api_setup_tasks__task_id__get", { pathParams: { task_id: started.task_id } });
-        if (!mid || (mid.state !== "running" && mid.state !== "succeeded")) throw new Error("任务查询状态异常");
-        if (mid.progress && mid.progress.percent != null && (mid.progress.percent < 0 || mid.progress.percent > 100)) {
-          throw new Error("任务进度超出范围");
+        /* 设置页业务层（home-controller + setup-actions）经真实路由驱动真实一键装齐顺序任务与组件登记表 */
+        const since = "2026-11-20T00:00:00+00:00";
+        const reported = await client.call("report_components_api_v1_components_post", { body: { components: [
+          { name: "ollama", state: "running", since: since },
+          { name: "asr", state: "stopped", reason: "沙箱：识别服务已停止", failures: 5, since: since },
+          { name: "server", state: "running", since: since }
+        ] } });
+        if (!reported || reported.ok !== true) throw new Error("组件上报未被接受");
+        const setupCtl = Bmod.window.V3Business.createHomeController({ client: client, context: context, catalog: catalog, pollInterval: 20 });
+        const setupView = fakeView();
+        setupCtl.bind(setupView);
+        await setupCtl.start();
+        const comps = setupView.getState().components || [];
+        if (setupView.getState().connection !== "connected" || comps.map(function (c) { return c.name + ":" + c.state; }).join(",") !== "ollama:running,asr:stopped,server:running") {
+          throw new Error("设置页未读到上报的组件状态：" + JSON.stringify(comps));
         }
+        await setupCtl.hooks.onInstallAll();
+        const installed = await waitFor(function () {
+          const ia = setupView.getState().installAll;
+          return ia && ia.state === "done" && setupCtl._debug.polling() === false;
+        }, 8000);
+        const firstRun = ((setupView.getState().installAll || {}).steps || []).map(function (x) { return x.state; }).join(",");
+        if (!installed || firstRun !== "done,done,done,done,done") throw new Error("一键装齐未经真实顺序任务完成：" + JSON.stringify(setupView.getState().installAll));
+        await setupCtl.hooks.onInstallAll();
+        const rerun = await waitFor(function () {
+          const ia = setupView.getState().installAll;
+          return ia.state === "done" && ia.steps[0].state === "skipped" && setupCtl._debug.polling() === false;
+        }, 8000);
+        const secondRun = setupView.getState().installAll.steps.map(function (x) { return x.state; }).join(",");
+        if (!rerun || secondRun !== "skipped,done,skipped,skipped,skipped") throw new Error("再次装齐应按事实跳过已具备的步：" + secondRun);
+        await setupCtl.hooks.onRetryComponent("asr");
+        if (!/已请求重试/.test(setupView.getState().statusNotice || "")) throw new Error("组件重试未被服务端接受：" + setupView.getState().statusNotice);
+        await setupCtl.hooks.onRetryComponent("nope");
+        if (!/未找到/.test(setupView.getState().statusNotice || "")) throw new Error("未知组件重试未呈现 404：" + setupView.getState().statusNotice);
+        await setupCtl.hooks.onToggleAutostart(false);
+        if (setupView.getState().autostart_enabled !== false) throw new Error("开机自启未经 config 回读为 false");
+        setupCtl.destroy();
         const lan = await client.call("lan_access_api_v1_lan_access_get");
         if (!lan || !lan.token_masked || !Array.isArray(lan.entries) || !lan.entries[0] || !lan.entries[0].url_masked) {
           throw new Error("lan-access 响应缺少遮罩字段");
@@ -2089,7 +2035,7 @@ function runAsgi() {
         if (claimed != null && claimed.job_id) {
           /* 沙箱若已有任务也只确认形状，不得把空队列编造成功 */
         } else if (claimed != null) throw new Error("claim 空响应不是 null");
-        finish("隔离 ASGI 集成：新路由/快照/check/tasks/lan-access/config/platform/claim/from-audio/history 对齐，已停止 PID " + meta.pid, null);
+        finish("隔离 ASGI 集成：新路由/快照/check/设置页一键装齐与组件重试/开机自启/lan-access/config/platform/claim/from-audio/history 对齐，已停止 PID " + meta.pid, null);
       }).catch(function (err) {
         finish(null, "ASGI 集成失败：" + err.message);
       });

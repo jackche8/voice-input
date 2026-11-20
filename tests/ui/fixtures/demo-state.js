@@ -30,6 +30,19 @@
     skipped_malformed: 0
   };
 
+  const STEP_KINDS = ["ollama_install", "wait_ollama", "ollama_pull", "asr_runtime_install", "asr_download"];
+
+  /* 视图状态里的一键装齐（已经业务层映射）：states 按固定五步顺序给出，extra 按 kind 覆盖 message / progress。 */
+  function installAll(state, current, states, extra) {
+    return {
+      state: state,
+      current: current,
+      steps: STEP_KINDS.map(function (kind, i) {
+        return Object.assign({ kind: kind, state: states[i] || "pending", message: "", progress: null }, (extra || {})[kind] || {});
+      })
+    };
+  }
+
   global.V3Fixtures = {
     RAW: RAW,
     POLISHED: POLISHED,
@@ -41,8 +54,7 @@
         status: "ready",
         sidecarRunning: true,
         sizeLabel: "3.5 GB",
-        deviceLabel: "GPU 加速",
-        action: null
+        deviceLabel: "GPU 加速"
       },
       ollama: {
         modelName: "qwen3.5:4b",
@@ -50,9 +62,15 @@
         running: true,
         version: "0.12.6",
         modelStatus: "ready",
-        sizeLabel: "3.4 GB",
-        action: null
+        sizeLabel: "3.4 GB"
       },
+      installAll: installAll("done", null, ["skipped", "done", "skipped", "skipped", "skipped"]),
+      components: [
+        { name: "ollama", state: "running", reason: "", failures: 0 },
+        { name: "asr", state: "running", reason: "", failures: 0 },
+        { name: "server", state: "running", reason: "", failures: 0 }
+      ],
+      autostart_enabled: true,
       polish_enabled: true,
       custom_keywords: ["Qwen", "Ollama"],
       translate_target_lang: "zh",
@@ -87,25 +105,34 @@
       connection: "connected",
       asr: {
         status: "downloading",
-        progress: { receivedLabel: "1.47 GB", totalLabel: "3.50 GB", percent: 42 },
-        action: "download"
+        progress: { receivedLabel: "1.47 GB", totalLabel: "3.50 GB", percent: 42 }
       },
-      ollama: { installed: true, running: true, modelStatus: "ready" }
+      ollama: { installed: true, running: true, modelStatus: "ready" },
+      installAll: installAll("running", "asr_download", ["skipped", "done", "skipped", "done", "running"], {
+        asr_download: { message: "下载识别模型", progress: { receivedLabel: "1.47 GB", totalLabel: "3.50 GB", percent: 42 } }
+      })
     },
     setupFailedDownload: {
       connection: "connected",
       asr: {
         status: "failed",
-        message: "下载中断：连接被重置（测试夹具，不是成功）",
-        action: "retry"
+        message: "下载中断：连接被重置（测试夹具，不是成功）"
       },
       ollama: {
         installed: true,
         running: false,
         modelStatus: "missing",
-        message: "Ollama 未运行",
-        action: "start"
-      }
+        message: "Ollama 未运行"
+      },
+      installAll: installAll("failed", "asr_download", ["skipped", "done", "skipped", "done", "failed"], {
+        asr_download: { message: "下载中断：连接被重置（测试夹具，不是成功）" }
+      }),
+      components: [
+        { name: "ollama", state: "stopped", reason: "连续失败 5 次：端口 11434 被占用（测试夹具）", failures: 5 },
+        { name: "asr", state: "backing_off", reason: "加载超时", failures: 2 },
+        { name: "server", state: "running", reason: "", failures: 0 }
+      ],
+      autostart_enabled: true
     },
     homeConnected: {
       connection: "connected",

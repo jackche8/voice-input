@@ -864,6 +864,61 @@ def test_tray_vector_icons_callbacks_and_safe_degradation(qapp: QApplication) ->
         tray_active.close()
 
 
+def test_tray_retry_server_item_only_while_server_stopped(qapp: QApplication) -> None:
+    """U15：「重试启动本地服务」只在应用告知本地服务已停止时可见（不从错误状态推断），点击回调一次。"""
+    retries: list[int] = []
+    tray = StudioTrayIcon(on_retry_server=lambda: retries.append(1), tray_available_fn=lambda: False)
+    try:
+        item = tray.retry_server_action
+        assert item.text() == "重试启动本地服务"
+        assert item.isVisible() is False
+
+        tray.set_state("error", tooltip="语音识别服务已停止：连续失败 5 次")
+        assert item.isVisible() is False
+
+        tray.set_server_stopped(True)
+        assert item.isVisible() is True
+        assert tray.menu.actions()[0] is item
+        item.trigger()
+        assert retries == [1]
+
+        tray.set_state("idle")
+        assert item.isVisible() is True
+        tray.set_server_stopped(False)
+        assert item.isVisible() is False
+    finally:
+        tray.close()
+
+
+def test_tray_icon_appears_when_host_registers_and_reregisters_after_host_restart(
+    qapp: QApplication, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """托盘宿主晚到（锁屏、开机早于宿主）：先写一行原因，宿主注册后图标出现；宿主重启后隐藏再显示以重新登记。"""
+    available = [False]
+    host_registered: list = []
+    tray = StudioTrayIcon(
+        tray_available_fn=lambda: available[0],
+        watch_host=lambda on_registered, _parent: host_registered.append(on_registered),
+    )
+    try:
+        assert tray.show() is False
+        assert tray.available is False
+        assert "将在宿主注册时自动显示" in capsys.readouterr().out
+
+        available[0] = True
+        host_registered[0]()
+        assert tray.available is True
+        assert tray._tray.isVisible() is True
+
+        calls: list[str] = []
+        tray._tray.hide = lambda: calls.append("hide")
+        tray._tray.show = lambda: calls.append("show")
+        host_registered[0]()
+        assert calls == ["hide", "show"]
+    finally:
+        tray.close()
+
+
 def test_selector_transparent_live_mode_and_no_flicker_hud_guards(qapp: QApplication) -> None:
     """根治回归：透明实时框选不需预抓全屏、选区内部完全透明透出桌面、HUD 关闭输入法且防闪烁。"""
     selected: list[tuple[int, int, int, int]] = []

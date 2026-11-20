@@ -2,7 +2,7 @@
  *
  * 配置字段与 AppConfig 对齐：
  *   polish_enabled, custom_keywords, translate_target_lang,
- *   hotkey_voice, hotkey_screenshot, hotkey_ocr, hotkey_repeat
+ *   hotkey_voice, hotkey_screenshot, hotkey_ocr, hotkey_repeat, autostart_enabled
  * 历史记录字段与 HistoryRecord / HistoryListResponse 对齐：
  *   timestamp, raw_text, final_text, language, mode, source, polish, job_id,
  *   records, total, skipped_malformed
@@ -10,7 +10,7 @@
  * 错误体与 ErrorBody 对齐：ok=false, error, message, details
  *
  * 下列为界面状态标记（apiPaths 由业务层从 OpenAPI 快照派生后注入，缺省为尚未读取）：
- *   connection, asr/ollama 就绪与进度、lanEntries、capabilities、apiPaths、aboutText 等。
+ *   connection, asr/ollama 就绪与进度、installAll（一键装齐）、components（看护组件）、lanEntries、capabilities、apiPaths、aboutText 等。
  * 缺省不得显示为已就绪或已下载成功。
  */
 (function (V3) {
@@ -24,7 +24,6 @@
       message: "",
       statusNotice: null,
       aboutText: "",
-      unmetGates: [],
       theme: "dark",
       activePanel: "translate",
       setupTab: "models",
@@ -35,9 +34,7 @@
         sizeLabel: null,
         deviceLabel: null,
         progress: null,
-        message: null,
-        action: null,
-        taskId: null
+        message: null
       },
       ollama: {
         modelName: V3.labels.FIXED_MODELS.ollama,
@@ -47,10 +44,11 @@
         modelStatus: "unknown",
         sizeLabel: null,
         progress: null,
-        message: null,
-        action: null,
-        taskId: null
+        message: null
       },
+      installAll: null,
+      components: null,
+      autostart_enabled: null,
       polish_enabled: null,
       custom_keywords: [],
       keywordsDraft: null,

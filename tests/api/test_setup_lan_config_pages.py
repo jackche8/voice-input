@@ -2,17 +2,17 @@
 from __future__ import annotations
 
 import json
-import time
 from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
 
-from _contracts import SetupTaskKind
+from _contracts import ComponentReport, ComponentStatus, SetupTaskKind
+from _v3.component_routes import ComponentRegistry
 from _v3.production import STATIC_V3
 from _v3_app import build_sandbox_runtime, create_app, export_openapi_document
 from tests.api.conftest import TEST_TOKEN, lan_client, lan_headers, local_client, local_headers
-from tests.api.setup_fixtures import FAKE_LAN_IPS, FakeWorld, GatedAction, build_setup
+from tests.api.setup_fixtures import FAKE_LAN_IPS, FakeWorld, build_setup, task
 
 LEGACY_PATHS = (
     ("POST", "/api/transcribe"),
@@ -40,24 +40,14 @@ LEGACY_PATHS = (
 )
 
 
-def _app(tmp_path: Path, *, world: FakeWorld | None = None, actions=None, lan=True, static=True):
+def _app(tmp_path: Path, *, world: FakeWorld | None = None, tasks=None, components=None, lan=True, static=True):
     runtime = build_sandbox_runtime(
         root=tmp_path / "sb",
         token=TEST_TOKEN,
-        setup=None if world is None else build_setup(world, actions),
+        setup=None if world is None else build_setup(world, tasks, components=components),
         lan_ips=(lambda: list(FAKE_LAN_IPS)) if lan else None,
     )
     return runtime, create_app(runtime, static_v3=STATIC_V3 if static else None)
-
-
-def _wait(predicate, timeout: float = 5.0):
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        value = predicate()
-        if value:
-            return value
-        time.sleep(0.02)
-    raise AssertionError("等待超时")
 
 
 # ---------------------------------------------------------------- setup/check
@@ -70,23 +60,22 @@ def test_setup_check_without_injection_is_visible_failure(tmp_path):
     assert res.json()["ok"] is False
 
 
-def test_setup_check_reports_missing_with_actions_and_wayland_portal(tmp_path):
+def test_setup_check_reports_missing_and_wayland_portal(tmp_path):
     world = FakeWorld()
     _rt, app = _app(tmp_path, world=world)
     body = local_client(app).get("/api/setup/check").json()
     assert body["session_type"] == "wayland"
     assert body["asr"]["status"] == "missing"
-    assert body["asr"]["action"] == "asr_download"
     assert "config.json" in body["asr"]["message"]
-    assert body["ollama"]["running"] is True and body["ollama"]["model_status"] == "missing"
-    assert body["ollama"]["action"] == "ollama_pull"
+    assert body["ollama"]["running"] is False and body["ollama"]["model_status"] == "missing"
+    assert body["ollama"]["message"].startswith("Ollama 纠错/翻译服务：尚未收到应用的组件状态")
+    assert body["components"] == []
     caps = {c["id"]: c for c in body["capabilities"]}
     assert caps["portal_screenshot"]["available"] and caps["portal_screenshot"]["required"]
     assert caps["portal_shortcuts"]["available"]
     assert "maim" not in caps
     assert caps["xclip"]["available"] and not caps["notify-send"]["available"]
     assert caps["ocr_chi_sim"]["available"] and not caps["ocr_jpn"]["available"] and not caps["ocr_jpn"]["required"]
-    assert body["unmet_gates"] == ["fixture gate"]
 
 
 def test_setup_check_x11_and_unknown_session(tmp_path):
@@ -107,73 +96,36 @@ def test_ollama_not_installed_then_not_running(tmp_path):
     world = FakeWorld(ollama=OllamaProbe(False, False, None, False, None, "Ollama 未响应: refused"))
     _rt, app = _app(tmp_path, world=world)
     client = local_client(app)
-    assert client.get("/api/setup/check").json()["ollama"]["action"] == "ollama_install"
+    body = client.get("/api/setup/check").json()["ollama"]
+    assert body["installed"] is False and body["message"] == "未安装用户级 Ollama"
     world.ollama = OllamaProbe(True, False, None, False, None, "Ollama 未响应: refused")
     body = client.get("/api/setup/check").json()["ollama"]
-    assert body["action"] == "ollama_start" and "refused" in body["message"]
+    assert body["installed"] is True and body["running"] is False and "尚未收到应用的组件状态" in body["message"]
 
 
-def test_download_task_progress_then_ready_never_fake(tmp_path):
-    from _v3.setup_probe import AsrWeightsProbe
+def test_check_shows_running_and_failed_task_state_never_fake(tmp_path):
+    from _contracts import SetupProgress, SetupTaskState
 
     world = FakeWorld()
-
-    def weights_arrive():
-        world.weights = AsrWeightsProbe(True, 4_400_000_000, ())
-
-    action = GatedAction(on_success=weights_arrive)
-    _rt, app = _app(tmp_path, world=world, actions={SetupTaskKind.asr_download: action})
-    client = local_client(app)
-    started = client.post("/api/setup/tasks", json={"kind": "asr_download"}, headers=local_headers())
-    assert started.status_code == 202, started.text
-    task = started.json()
-    assert task["state"] == "running"
-    assert action.reported.wait(5)
-    again = client.post("/api/setup/tasks", json={"kind": "asr_download"}, headers=local_headers()).json()
-    assert again["task_id"] == task["task_id"], "运行中的同类作业不得重复启动"
-    check = client.get("/api/setup/check").json()["asr"]
-    assert check["status"] == "downloading"
-    assert check["progress"]["percent"] == 25.0 and check["task_id"] == task["task_id"]
-    action.release.set()
-    done = _wait(lambda: (r := client.get(f"/api/setup/tasks/{task['task_id']}").json())["state"] != "running" and r)
-    assert done["state"] == "succeeded"
-    asr = client.get("/api/setup/check").json()["asr"]
-    assert asr["status"] == "ready" and asr["weights_present"] is True
-    assert asr["sidecar_running"] is False and asr["action"] == "asr_start"
-    assert action.calls == 1
-
-
-def test_failed_task_is_visible_with_retry_action(tmp_path):
-    action = GatedAction(fail="网络被拒绝: fixture")
-    world = FakeWorld()
-    _rt, app = _app(tmp_path, world=world, actions={SetupTaskKind.ollama_pull: action})
-    client = local_client(app)
-    task = client.post("/api/setup/tasks", json={"kind": "ollama_pull"}, headers=local_headers()).json()
-    assert client.get("/api/setup/check").json()["ollama"]["model_status"] == "downloading"
-    action.release.set()
-    done = _wait(lambda: (r := client.get(f"/api/setup/tasks/{task['task_id']}").json())["state"] != "running" and r)
-    assert done["state"] == "failed" and done["error"] == "dependency_failed"
-    assert "fixture" in done["message"]
-    ollama = client.get("/api/setup/check").json()["ollama"]
-    assert ollama["model_status"] == "failed" and ollama["action"] == "ollama_pull"
-    assert ollama["task_id"] == task["task_id"]
-
-
-def test_unprovided_action_and_unknown_task_are_not_success(tmp_path):
-    _rt, app = _app(tmp_path, world=FakeWorld())
-    client = local_client(app)
-    res = client.post("/api/setup/tasks", json={"kind": "ollama_install"}, headers=local_headers())
-    assert res.status_code == 503 and res.json()["ok"] is False
-    assert client.get("/api/setup/tasks/nope").status_code == 404
-    bad = client.post("/api/setup/tasks", json={"kind": "preload_whisper"}, headers=local_headers())
-    assert bad.status_code == 400
+    running = task(SetupTaskState.running, "fixture 下载中", kind=SetupTaskKind.asr_download,
+                   progress=SetupProgress(completed_bytes=50, total_bytes=200, percent=25.0, stage="fixture 下载中"))
+    failed = task(SetupTaskState.failed, "网络被拒绝: fixture", kind=SetupTaskKind.ollama_pull)
+    registry = ComponentRegistry()
+    registry.replace(ComponentReport(components=[ComponentStatus(name=n, state="running", since="2026-11-20T00:00:00+00:00")
+                                                 for n in ("ollama", "asr", "server")]))
+    _rt, app = _app(tmp_path, world=world, tasks={SetupTaskKind.asr_download: running, SetupTaskKind.ollama_pull: failed},
+                    components=registry)
+    body = local_client(app).get("/api/setup/check").json()
+    assert body["asr"]["status"] == "downloading" and body["asr"]["progress"]["percent"] == 25.0
+    assert body["ollama"]["model_status"] == "failed" and "fixture" in body["ollama"]["message"]
+    assert body["install_all"]["state"] == "idle"
 
 
 def test_setup_routes_are_local_only(tmp_path):
     _rt, app = _app(tmp_path, world=FakeWorld())
     remote = lan_client(app)
     assert remote.get("/api/setup/check", headers=lan_headers()).status_code == 403
-    assert remote.post("/api/setup/tasks", json={"kind": "asr_download"}, headers=lan_headers()).status_code == 403
+    assert remote.post("/api/setup/install-all", headers=lan_headers()).status_code == 403
 
 
 # ---------------------------------------------------------------- LAN access
@@ -295,7 +247,7 @@ def test_openapi_snapshot_is_the_generated_document(tmp_path):
     snapshot = json.loads((STATIC_V3 / "openapi.json").read_text(encoding="utf-8"))
     assert snapshot == generated, "static/v3/openapi.json 必须由 scripts/gate.py --write-openapi-snapshot 生成"
     assert "/api/v1/lan-access" in snapshot["paths"]
-    assert "/api/setup/tasks" in snapshot["paths"]
-    for schema in ("SetupCheckResponse", "SetupTask", "LanAccessResponse", "AppConfigView", "AppConfigUpdate"):
+    assert "/api/setup/install-all" in snapshot["paths"] and "/api/setup/tasks" not in snapshot["paths"]
+    for schema in ("SetupCheckResponse", "InstallAllStatus", "LanAccessResponse", "AppConfigView", "AppConfigUpdate"):
         assert schema in snapshot["components"]["schemas"]
     assert TEST_TOKEN not in json.dumps(snapshot)

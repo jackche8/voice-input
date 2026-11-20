@@ -1,0 +1,530 @@
+<!doctype html>
+<!--
+  v3.4 截屏标注 · 模板 A「一条迷你工具条」（最简设计）
+  只含 D1 的四种标注（矩形、箭头、文字、马赛克）+ 撤销 + 复制 / 保存 / 取消；颜色与粗细固定默认值。
+  显示的数据：冻结截图 cropped_png（框选后只截选区，与 capture_flow 现有抓屏同一路径）、选区 screen_rect、
+             虚拟桌面 virtual_geometry、可用屏 available_screen_rect；保存后由业务层回传的保存路径。
+  触发的动作：on_copy_image(png: bytes) -> bool；on_save_image(png: bytes) -> str（成功返回路径，失败抛错带原因）；
+             on_closed()（取消 / Esc / 复制保存后用户关闭）。
+  基于：_ui_desktop/region_selector.py（框选，mode_label「截屏标注」）、_ui_desktop/inplace_overlay.py（全屏透明窗 + 冻结图 + Esc 关闭的窗口形态）、
+       _ui_desktop/mini_menu.py（工具条样式 float_bar_stylesheet 与 place_menu 框下 → 框上 → 框内避让）、_ui_desktop/theme.py（全部颜色）。
+  本页用 <canvas> 画冻结图与标注（与 QPainter 一一对应），工具条是普通按钮（对应 QFrame + QPushButton）。
+-->
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>v3.4 截屏标注 · 模板 A「一条迷你工具条」（最简）</title>
+<style>
+:root {
+  --font-sans: "Noto Sans CJK SC", "PingFang SC", "Microsoft YaHei", "Segoe UI", sans-serif;
+  --font-mono: "JetBrains Mono", "Noto Sans Mono CJK SC", monospace;
+  --bg: #0d1117; --surface: #161b22; --surface-2: #1f2630; --border: #30363d;
+  --text: #e6edf3; --muted: #8b949e; --accent: #58a6ff; --accent-soft: rgba(56,139,253,.16); --ok: #3fb950; --warn: #d29922; --err: #f85149;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: #090c10; color: var(--text); font-family: var(--font-sans); font-size: 14px; line-height: 1.55; }
+header.top { position: sticky; top: 0; z-index: 50; background: #090c10; border-bottom: 1px solid var(--border); padding: 10px 18px; display: flex; flex-direction: column; gap: 7px; }
+.title { display: flex; gap: 12px; align-items: baseline; flex-wrap: wrap; }
+.title strong { color: var(--accent); font-size: 15px; }
+.title span { color: var(--muted); font-size: 12px; }
+.ctrl { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.ctrl button { font: inherit; font-size: 12px; padding: 4px 11px; border-radius: 999px; border: 1px solid var(--border); background: var(--surface); color: #c9d1d9; cursor: pointer; }
+.ctrl button:hover { border-color: var(--accent); color: var(--accent); }
+.ctrl button.on { background: var(--accent); border-color: var(--accent); color: #090c10; font-weight: 700; }
+.ctrl .sep { width: 1px; height: 18px; background: var(--border); margin: 0 4px; }
+.ctrl .lbl { font-size: 12px; color: var(--muted); }
+main { padding: 14px 18px 40px; display: flex; flex-direction: column; gap: 14px; }
+.vp { position: relative; overflow: hidden; border: 1px solid var(--border); border-radius: 10px; background: #000; height: 760px; }
+.vp .tag { position: absolute; right: 10px; top: 8px; z-index: 40; font-size: 11px; color: var(--muted); background: rgba(13,17,23,.85); border: 1px solid var(--border); border-radius: 6px; padding: 2px 8px; pointer-events: none; }
+.screen { position: absolute; left: 0; top: 0; width: 3440px; height: 1440px; transform-origin: 0 0; }
+.screen canvas { position: absolute; left: 0; top: 0; }
+/* ---- 工具条：与 overlay-a 迷你菜单同一样式（theme.float_bar_stylesheet），选中工具用 ACCENT_SOFT 底 ---- */
+.bar { position: absolute; display: flex; align-items: center; gap: 4px; padding: 3px; background: var(--surface); border: 1px solid var(--border); border-radius: 10px; font-size: 12px; white-space: nowrap; box-shadow: none; }
+.bar[hidden] { display: none; }
+.bar button { font: inherit; font-size: 12px; padding: 3px 10px; border-radius: 6px; border: 1px solid transparent; background: transparent; color: var(--text); cursor: pointer; }
+.bar button:hover { border-color: var(--accent); color: var(--accent); }
+.bar button.active { background: var(--accent-soft); color: var(--accent); }
+.bar button.press { border-color: var(--accent); color: var(--accent); }
+.bar button:disabled { color: var(--muted); cursor: default; border-color: transparent; }
+.bar button.ok { color: var(--ok); }
+.bar button.fail { color: var(--err); }
+.bar .div { width: 1px; height: 16px; background: var(--border); }
+.bar .kbd { color: var(--muted); padding: 0 8px 0 2px; font-size: 11px; }
+.bar .st { padding: 0 8px; font-weight: 600; }
+.bar .st.ok { color: var(--ok); } .bar .st.fail { color: var(--err); }
+.edit { position: absolute; z-index: 30; background: transparent; border: 1px dashed var(--accent); outline: none; padding: 0 2px; font-family: var(--font-sans); font-weight: 600; caret-color: var(--accent); }
+.closed-tip { position: absolute; left: 0; right: 0; top: 46%; text-align: center; color: var(--muted); font-size: 13px; z-index: 35; pointer-events: none; }
+.notes { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 12px; }
+.card { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 12px 16px; font-size: 13px; }
+.card h3 { margin: 0 0 8px; font-size: 14px; }
+.card ul { margin: 0; padding-left: 18px; color: #c9d1d9; }
+.card li { margin: 3px 0; }
+.card code { font-family: var(--font-mono); font-size: 12px; color: #79c0ff; }
+.new { color: var(--warn); font-weight: 700; }
+.log { font-family: var(--font-mono); font-size: 12px; color: #c9d1d9; background: #0b0f14; border: 1px solid var(--border); border-radius: 8px; padding: 8px 12px; height: 120px; overflow: hidden; white-space: pre; }
+.log b { color: var(--accent); font-weight: 600; }
+</style>
+</head>
+<body>
+<header class="top">
+  <div class="title">
+    <strong>模板 A「一条迷你工具条」</strong>
+    <span>最简设计 · 选区冻结后框下出现一条文字按钮工具条：矩形 · 箭头 · 文字 · 马赛克 │ 撤销 │ 复制 · 保存 │ 取消 · 颜色固定红色、粗细固定 3px</span>
+  </div>
+  <div class="ctrl">
+    <button id="btn-auto" class="on">▶ 自动循环</button>
+    <span class="sep"></span><span class="lbl">单步</span>
+    <span id="steps" style="display:contents"></span>
+    <span class="sep"></span><span class="lbl">选区位置</span>
+    <button data-box="mid" class="on">中部（框下）</button>
+    <button data-box="bottom">贴底（框上）</button>
+    <button data-box="tall">全高（框内）</button>
+    <span class="sep"></span>
+    <button id="btn-view">视图：1:1 局部</button>
+  </div>
+</header>
+
+<main>
+  <div class="vp" id="vp">
+    <div class="tag" id="vp-tag"></div>
+    <div class="screen" id="screen">
+      <canvas id="desk" width="3440" height="1440"></canvas>
+      <canvas id="ov" width="3440" height="1440"></canvas>
+      <div class="bar" id="bar" hidden></div>
+    </div>
+    <div class="closed-tip" id="closed-tip" hidden>已关闭 · 点上方「框选」或「▶ 自动循环」重新开始</div>
+  </div>
+
+  <div class="card">
+    <h3>浮窗回调（业务层收到的调用）</h3>
+    <div class="log" id="log"></div>
+  </div>
+
+  <div class="notes">
+    <div class="card">
+      <h3>显示的数据</h3>
+      <ul>
+        <li>冻结截图 <code>cropped_png</code>：框选后只截选区（与截屏翻译同一抓屏路径），画在选区原位</li>
+        <li>选区 <code>screen_rect</code>、虚拟桌面 <code>virtual_geometry</code>、可用屏 <code>available_screen_rect</code>（工具条避让用）</li>
+        <li>保存成功后业务层回传的路径（默认系统「图片」目录下子文件夹，文件名含时间）</li>
+        <li>标注本身只存在于浮窗内（操作列表），不需要业务数据</li>
+      </ul>
+    </div>
+    <div class="card">
+      <h3>触发的动作</h3>
+      <ul>
+        <li><b>复制</b> → <code>on_copy_image(png) -> bool</code>，按返回值显示「✓ 已复制」或「复制失败」1.5s，不关窗</li>
+        <li><b>保存</b> → <code>on_save_image(png) -> str</code>，成功显示「✓ 已保存 路径」2.5s；失败（抛错）显示「保存失败：原因」</li>
+        <li><b>取消</b> / <b>Esc</b> → <code>close()</code> → <code>on_closed()</code>；正在输入文字时第一次 Esc 只结束输入</li>
+        <li>点框外不关闭（防误触丢失标注）；导出图 = 冻结图 + 全部标注，分辨率同冻结图</li>
+      </ul>
+    </div>
+    <div class="card">
+      <h3>基于哪些现有组件改造</h3>
+      <ul>
+        <li><code>_ui_desktop/region_selector.py</code>：原样复用框选（<code>mode_label="截屏标注"</code>），选完回调 rect</li>
+        <li><code>_ui_desktop/inplace_overlay.py</code>：同一窗口形态（全屏透明窗、选区画冻结图、Esc 关、关闭回调）；框外改画 <code>DIM_MASK_RGBA</code> 暗罩表示「已冻结」</li>
+        <li><code>_ui_desktop/mini_menu.py</code>：工具条沿用 <code>float_bar_stylesheet()</code> 与 <code>place_menu()</code>（框下 → 框上 → 框内），新增选中态样式</li>
+        <li><code>_ui_desktop/theme.py</code>：标注色用 <code>CROSSHAIR_HEX</code>，新增令牌 <code>ANNOTATE_STROKE_PX = 3</code>、<code>ANNOTATE_TEXT_PX = 20</code>、<code>ANNOTATE_MOSAIC_BLOCK_PX = 10</code></li>
+      </ul>
+    </div>
+    <div class="card">
+      <h3>QPainter 实现要点</h3>
+      <ul>
+        <li>标注 = 操作列表 <code>[{type, 点, 色, 粗细, 文字}]</code>；撤销 = 删最后一个后从冻结图<b>重放</b>全部操作（马赛克依赖它之前的结果，不能单独擦除）</li>
+        <li>矩形 <code>drawRect</code>（RoundJoin）；箭头 = <code>drawLine</code> 到箭头底 + <code>drawPolygon</code> 三角（长 4w+8、半角 25°）</li>
+        <li><b>文字输入</b>：点击处放一个无边框 <code>QLineEdit</code>（透明底、字色与导出字体相同，<code>WA_InputMethodEnabled=True</code> 支持中文输入法），自动聚焦；Enter 或点别处提交为文字操作并销毁编辑框，Esc 取消本次输入。浮窗本体仍关闭输入法</li>
+        <li><b>马赛克</b>：取当前合成图该矩形 <code>QImage.copy(rect)</code> → <code>scaled(w/b, h/b, SmoothTransformation)</code>（块内求平均）→ <code>scaled(w, h, FastTransformation)</code>（最近邻放大成色块）→ 画回原位；按图像像素计算，HiDPI 用 devicePixelRatio 换算</li>
+        <li>导出：合成图 QImage（冻结图原分辨率）→ PNG bytes → 回调；剪贴板写图片由业务层做</li>
+        <li>光标：矩形 / 箭头 / 马赛克用十字，文字用 I 形；框外普通箭头</li>
+      </ul>
+    </div>
+  </div>
+</main>
+
+<script>
+'use strict';
+/* ================= 1. 令牌（_ui_desktop/theme.py） ================= */
+const T = {
+  accent: '#58a6ff', ok: '#3fb950', err: '#f85149', cross: '#ff2d2d', border: '#30363d', text: '#e6edf3', muted: '#8b949e',
+  dim: 'rgba(0,0,0,0.424)', tagBg: 'rgba(13,17,23,0.92)', tagText: '#ff6b6b', hintBg: 'rgba(13,17,23,0.9)', hintText: '#f0f6fc',
+};
+const SANS = '"Noto Sans CJK SC","PingFang SC","Microsoft YaHei","Segoe UI",sans-serif';
+const MONO = '"DejaVu Sans Mono","Noto Sans Mono CJK SC",monospace';
+const SCREEN = { w: 3440, h: 1440 };
+const AVAIL = { x: 0, y: 32, w: 3440, h: 1408 };
+const MENU_GAP = 8, MENU_INSIDE_PAD = 6;
+/* 模板 A：颜色与粗细固定（ANNOTATE_* 令牌） */
+const STYLE = { color: T.cross, width: 3, textPx: 20, block: 10 };
+const style = () => STYLE;
+const BOXES = { mid: { x: 1200, y: 260, w: 1040, h: 640 }, bottom: { x: 1200, y: 560, w: 1040, h: 860 }, tall: { x: 1200, y: 40, w: 1040, h: 1392 } };
+
+/* ================= 2. 模拟桌面（冻结前的屏幕） ================= */
+const desk = document.getElementById('desk'), dctx = desk.getContext('2d');
+function txt(ctx, s, x, y, font, color) { ctx.font = font; ctx.fillStyle = color; ctx.textBaseline = 'alphabetic'; ctx.fillText(s, x, y); }
+function drawDesk() {
+  const g = dctx.createLinearGradient(0, 0, 3440, 1440); g.addColorStop(0, '#1b2433'); g.addColorStop(1, '#2d2240');
+  dctx.fillStyle = g; dctx.fillRect(0, 0, 3440, 1440);
+  dctx.fillStyle = '#000'; dctx.fillRect(0, 0, 3440, 32);
+  txt(dctx, '活动', 16, 22, `14px ${SANS}`, '#ddd'); txt(dctx, '11月20日 10:45', 1668, 22, `14px ${SANS}`, '#ddd');
+  // 左：文件管理器
+  dctx.fillStyle = '#1e1e1e'; dctx.fillRect(60, 90, 640, 1200); dctx.fillStyle = '#2a2a2a'; dctx.fillRect(60, 90, 640, 44);
+  txt(dctx, '文件', 80, 118, `600 15px ${SANS}`, '#c9d1d9');
+  ['📁 文档', '📁 图片', '📁 下载', '📄 报价单.pdf', '📄 会议纪要.md'].forEach((s, i) => txt(dctx, s, 84, 172 + i * 40, `15px ${SANS}`, '#c9d1d9'));
+  // 中：浏览器 · 账户与账单
+  dctx.fillStyle = '#ffffff'; dctx.fillRect(760, 70, 1920, 1280);
+  dctx.fillStyle = '#dee1e6'; dctx.fillRect(760, 70, 1920, 40); dctx.fillStyle = '#ffffff'; dctx.fillRect(780, 76, 220, 34);
+  txt(dctx, '账户与账单 – 控制台', 796, 98, `13px ${SANS}`, '#1f2328');
+  dctx.fillStyle = '#f1f3f4'; dctx.fillRect(760, 110, 1920, 44); dctx.fillStyle = '#fff'; dctx.fillRect(860, 117, 1200, 30);
+  txt(dctx, 'console.example.com/account/billing', 876, 137, `13px ${SANS}`, '#5f6368');
+  dctx.fillStyle = '#f6f8fa'; dctx.fillRect(760, 154, 300, 1196);
+  ['概览', '账户与账单', '用量', 'API 密钥', '团队成员', '设置'].forEach((s, i) => {
+    if (i === 1) { dctx.fillStyle = '#ddf4ff'; dctx.fillRect(772, 182 + i * 44, 276, 34); }
+    txt(dctx, s, 796, 205 + i * 44, `15px ${SANS}`, i === 1 ? '#0969da' : '#57606a');
+  });
+  txt(dctx, '账户与账单', 1120, 222, `700 28px ${SANS}`, '#1f2328');
+  const card = (x, y, w, h, title) => { dctx.fillStyle = '#fff'; dctx.fillRect(x, y, w, h); dctx.strokeStyle = '#d0d7de'; dctx.lineWidth = 1; dctx.strokeRect(x + .5, y + .5, w - 1, h - 1); txt(dctx, title, x + 24, y + 36, `700 20px ${SANS}`, '#1f2328'); };
+  card(1240, 290, 560, 260, '个人资料');
+  [['姓名', '张伟'], ['邮箱', 'zhang.wei@example.com'], ['手机', '138 0013 8000']].forEach(([k, v], i) => { txt(dctx, k, 1264, 380 + i * 40, `16px ${SANS}`, '#57606a'); txt(dctx, v, 1380, 380 + i * 40, `17px ${SANS}`, '#1f2328'); });
+  txt(dctx, 'API Key', 1264, 500, `16px ${SANS}`, '#57606a'); txt(dctx, 'sk-live-4f9a2c71e8b3d5a6', 1380, 500, `16px ${MONO}`, '#1f2328');
+  card(1830, 290, 400, 260, '近 7 天用量');
+  [60, 90, 75, 120, 150, 110, 170].forEach((h, i) => { dctx.fillStyle = i >= 4 ? '#0969da' : '#54aeff'; dctx.fillRect(1862 + i * 48, 520 - h, 30, h); txt(dctx, '一二三四五六日'[i], 1870 + i * 48, 542, `13px ${SANS}`, '#57606a'); });
+  card(1240, 580, 990, 300, '最近账单');
+  ['日期', '项目', '金额', '状态'].forEach((s, i) => txt(dctx, s, [1264, 1450, 1820, 2060][i], 660, `600 15px ${SANS}`, '#57606a'));
+  [['2026-11-18', '语音识别 · 月度', '¥128.00', '已支付'], ['2026-11-12', '翻译模型 · 加量包', '¥49.00', '待支付'], ['2026-11-02', '存储扩容', '¥19.00', '已支付'], ['2026-10-18', '语音识别 · 月度', '¥128.00', '已支付']]
+    .forEach((row, r) => row.forEach((s, i) => txt(dctx, s, [1264, 1450, 1820, 2060][i], 704 + r * 44, `16px ${SANS}`, i === 3 && s === '待支付' ? '#cf222e' : '#1f2328')));
+  // 右：聊天窗口
+  dctx.fillStyle = '#1e1e1e'; dctx.fillRect(2740, 90, 640, 1200); dctx.fillStyle = '#2a2a2a'; dctx.fillRect(2740, 90, 640, 44);
+  txt(dctx, '团队群聊', 2760, 118, `600 15px ${SANS}`, '#c9d1d9');
+  ['账单那张图发我一下', '密钥记得打码', '好，马上截'].forEach((s, i) => { dctx.fillStyle = i === 2 ? '#1f6feb' : '#2d333b'; dctx.fillRect(i === 2 ? 3160 : 2764, 170 + i * 60, 190, 40); txt(dctx, s, (i === 2 ? 3176 : 2780), 196 + i * 60, `15px ${SANS}`, '#e6edf3'); });
+}
+
+/* ================= 3. 状态与标注操作（对应浮窗内的操作列表） ================= */
+const S = { phase: 'closed', box: { ...BOXES.mid }, boxKey: 'mid', tool: null, ops: [], draft: null, selDraft: null, cursor: null, editing: null, copyFb: null, saveFb: null };
+const work = document.createElement('canvas'), wctx = work.getContext('2d', { willReadFrequently: true });
+function norm(a, b) { return { x: Math.min(a.x, b.x), y: Math.min(a.y, b.y), w: Math.abs(b.x - a.x), h: Math.abs(b.y - a.y) }; }
+function clampToBox(p) { const b = S.box; return { x: Math.max(b.x, Math.min(b.x + b.w, p.x)), y: Math.max(b.y, Math.min(b.y + b.h, p.y)) }; }
+/* 合成图 = 冻结图 + 按顺序重放的全部操作（撤销后同样重放） */
+function renderWork() {
+  const b = S.box; work.width = b.w; work.height = b.h;
+  wctx.drawImage(desk, b.x, b.y, b.w, b.h, 0, 0, b.w, b.h);
+  for (const op of S.ops) drawOp(wctx, op, b.x, b.y, wctx);
+}
+function drawOp(ctx, op, ox, oy, src) {
+  ctx.save(); ctx.translate(-ox, -oy);
+  ctx.strokeStyle = ctx.fillStyle = op.color; ctx.lineWidth = op.width; ctx.lineJoin = 'round'; ctx.lineCap = 'round';
+  if (op.type === 'rect') { const r = norm(op.a, op.b); ctx.strokeRect(r.x, r.y, r.w, r.h); }
+  if (op.type === 'arrow') drawArrow(ctx, op.a, op.b, op.width);
+  if (op.type === 'text') { ctx.font = `600 ${op.size}px ${SANS}`; ctx.textBaseline = 'top'; ctx.fillText(op.text, op.a.x, op.a.y); }
+  ctx.restore();
+  if (op.type === 'mosaic') pixelate(ctx, src, norm(op.a, op.b), op.block, ox, oy);
+}
+function drawArrow(ctx, a, b, w) {
+  const dx = b.x - a.x, dy = b.y - a.y, len = Math.hypot(dx, dy); if (len < 2) return;
+  const ux = dx / len, uy = dy / len, head = Math.min(len, 4 * w + 8), half = Math.tan(25 * Math.PI / 180) * head;
+  const bx = b.x - ux * head, by = b.y - uy * head;
+  ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(bx, by); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(b.x, b.y); ctx.lineTo(bx - uy * half, by + ux * half); ctx.lineTo(bx + uy * half, by - ux * half); ctx.closePath(); ctx.fill();
+}
+/* 马赛克：取当前合成图该区域，按块求平均色再填回（= QImage 缩小 Smooth + 放大 Fast） */
+function pixelate(ctx, srcCtx, r, block, ox, oy) {
+  const b = S.box, left = Math.max(r.x, b.x), top = Math.max(r.y, b.y);   // 先裁到选区内
+  const x0 = Math.round(left - b.x), y0 = Math.round(top - b.y);
+  const w = Math.round(Math.min(r.x + r.w, b.x + b.w) - left), h = Math.round(Math.min(r.y + r.h, b.y + b.h) - top);
+  if (w < 2 || h < 2) return;
+  const data = srcCtx.getImageData(x0, y0, w, h).data;
+  for (let by = 0; by < h; by += block) for (let bx = 0; bx < w; bx += block) {
+    let rs = 0, gs = 0, bs = 0, n = 0;
+    for (let y = by; y < Math.min(h, by + block); y++) for (let x = bx; x < Math.min(w, bx + block); x++) { const i = (y * w + x) * 4; rs += data[i]; gs += data[i + 1]; bs += data[i + 2]; n++; }
+    ctx.fillStyle = `rgb(${rs / n | 0},${gs / n | 0},${bs / n | 0})`;
+    ctx.fillRect(S.box.x + x0 + bx - ox, S.box.y + y0 + by - oy, Math.min(block, w - bx), Math.min(block, h - by));
+  }
+}
+function opFor(type, a, b, text) {
+  const st = style();
+  return { type, a, b, text, color: st.color, width: st.width, size: st.textPx, block: st.block };
+}
+function commit(op) { S.ops.push(op); renderWork(); syncBar(); log(`标注 +${({ rect: '矩形', arrow: '箭头', text: '文字', mosaic: '马赛克' })[op.type]}（共 ${S.ops.length} 个）`); }
+function undo() { if (!S.ops.length) return; S.ops.pop(); renderWork(); syncBar(); log(`撤销（剩 ${S.ops.length} 个）`); }
+
+/* ================= 4. 浮窗绘制（框选器阶段 / 冻结标注阶段） ================= */
+const ov = document.getElementById('ov'), octx = ov.getContext('2d', { willReadFrequently: true });
+function drawOverlay() {
+  octx.clearRect(0, 0, SCREEN.w, SCREEN.h);
+  if (S.phase === 'select') return drawSelector();
+  if (S.phase !== 'annotate') return;
+  const b = S.box;
+  octx.fillStyle = T.dim;   // 框外暗罩（与框选器同色 DIM_MASK_RGBA），表示画面已冻结
+  octx.fillRect(0, 0, SCREEN.w, b.y); octx.fillRect(0, b.y + b.h, SCREEN.w, SCREEN.h - b.y - b.h);
+  octx.fillRect(0, b.y, b.x, b.h); octx.fillRect(b.x + b.w, b.y, SCREEN.w - b.x - b.w, b.h);
+  octx.drawImage(work, b.x, b.y);
+  if (S.draft) {
+    octx.save(); octx.beginPath(); octx.rect(b.x, b.y, b.w, b.h); octx.clip();
+    if (S.draft.type === 'mosaic') { drawOp(octx, S.draft, 0, 0, wctx); octx.setLineDash([4, 3]); octx.strokeStyle = T.accent; octx.lineWidth = 1; const r = norm(S.draft.a, S.draft.b); octx.strokeRect(r.x + .5, r.y + .5, r.w, r.h); }
+    else drawOp(octx, S.draft, 0, 0, wctx);
+    octx.restore();
+  }
+  octx.setLineDash([]); octx.strokeStyle = T.accent; octx.lineWidth = 1.5; octx.strokeRect(b.x - .75, b.y - .75, b.w + 1.5, b.h + 1.5);
+  if (S.cursor) drawCursor(S.cursor);
+}
+function drawSelector() {
+  const c = S.cursor || { x: 1200, y: 260 };
+  octx.fillStyle = T.dim;
+  if (!S.selDraft) octx.fillRect(0, 0, SCREEN.w, SCREEN.h);
+  else {
+    const r = S.selDraft;
+    octx.fillRect(0, 0, SCREEN.w, r.y); octx.fillRect(0, r.y + r.h, SCREEN.w, SCREEN.h - r.y - r.h);
+    octx.fillRect(0, r.y, r.x, r.h); octx.fillRect(r.x + r.w, r.y, SCREEN.w - r.x - r.w, r.h);
+    octx.strokeStyle = T.cross; octx.lineWidth = 1; octx.strokeRect(r.x + .5, r.y + .5, r.w - 1, r.h - 1);
+  }
+  const hint = '截屏标注 · 移动鼠标红色十字线定位 · 左键拖拽框选 · 右键 / Esc 取消';
+  if (!S.selDraft) { octx.font = `600 12px ${SANS}`; const w = octx.measureText(hint).width + 32; octx.fillStyle = T.hintBg; octx.beginPath(); octx.roundRect(1720 - w / 2, 46, w, 28, 14); octx.fill(); octx.fillStyle = T.hintText; octx.textAlign = 'center'; octx.textBaseline = 'middle'; octx.fillText(hint, 1720, 60); octx.textAlign = 'left'; }
+  octx.strokeStyle = T.cross; octx.lineWidth = 1;
+  octx.beginPath(); octx.moveTo(0, c.y + .5); octx.lineTo(SCREEN.w, c.y + .5); octx.moveTo(c.x + .5, 0); octx.lineTo(c.x + .5, SCREEN.h); octx.stroke();
+  octx.beginPath(); octx.arc(c.x + .5, c.y + .5, 5, 0, Math.PI * 2); octx.stroke();
+  const tag = S.selDraft ? `${S.selDraft.w} × ${S.selDraft.h} px  (${S.selDraft.x}, ${S.selDraft.y})` : `X: ${c.x}, Y: ${c.y}`;
+  octx.font = `11px ${MONO}`; const tw = octx.measureText(tag).width + 16;
+  octx.fillStyle = T.tagBg; octx.beginPath(); octx.roundRect(c.x + 14, c.y + 14, tw, 21, 4); octx.fill(); octx.strokeStyle = T.cross; octx.stroke();
+  octx.fillStyle = T.tagText; octx.textBaseline = 'middle'; octx.fillText(tag, c.x + 22, c.y + 25);
+}
+function drawCursor(c) {
+  octx.save(); octx.strokeStyle = '#000'; octx.lineWidth = 3;
+  const cross = () => { octx.beginPath(); octx.moveTo(c.x - 9, c.y); octx.lineTo(c.x + 9, c.y); octx.moveTo(c.x, c.y - 9); octx.lineTo(c.x, c.y + 9); octx.stroke(); };
+  cross(); octx.strokeStyle = '#fff'; octx.lineWidth = 1.2; cross(); octx.restore();
+}
+
+/* ================= 5. 工具条（mini_menu 样式 + place_menu 避让） ================= */
+const bar = document.getElementById('bar');
+const TOOLS = [['rect', '矩形'], ['arrow', '箭头'], ['text', '文字'], ['mosaic', '马赛克']];
+function buildBar() {
+  bar.innerHTML = '';
+  TOOLS.forEach(([k, label]) => bar.appendChild(btn(label, () => { stopAuto(); pickTool(k); }, `tool-${k}`)));
+  bar.appendChild(div());
+  bar.appendChild(btn('撤销', () => { stopAuto(); undo(); }, 'undo'));
+  bar.appendChild(div());
+  bar.appendChild(btn('复制', () => { stopAuto(); copyImage(); }, 'copy'));
+  bar.appendChild(btn('保存', () => { stopAuto(); saveImage(); }, 'save'));
+  bar.appendChild(div());
+  bar.appendChild(btn('取消', () => { stopAuto(); closeOverlay('点了「取消」'); }, 'cancel'));
+  const k = document.createElement('span'); k.className = 'kbd'; k.textContent = 'Esc'; bar.appendChild(k);
+  const st = document.createElement('span'); st.className = 'st'; st.id = 'status'; bar.appendChild(st);
+}
+function btn(label, fn, id) { const b = document.createElement('button'); b.textContent = label; b.id = id; b.onclick = e => { e.stopPropagation(); fn(); }; return b; }
+function div() { const d = document.createElement('span'); d.className = 'div'; return d; }
+function syncBar() {
+  bar.hidden = S.phase !== 'annotate';
+  if (bar.hidden) return;
+  TOOLS.forEach(([k]) => bar.querySelector(`#tool-${k}`).classList.toggle('active', S.tool === k));
+  bar.querySelector('#undo').disabled = !S.ops.length;
+  const copy = bar.querySelector('#copy'), now = performance.now();
+  const cfb = S.copyFb && now < S.copyFb.until ? S.copyFb : null;
+  copy.textContent = cfb ? (cfb.ok ? '✓ 已复制' : '复制失败') : '复制'; copy.className = cfb ? (cfb.ok ? 'ok' : 'fail') : '';
+  const st = bar.querySelector('#status'), sfb = S.saveFb && now < S.saveFb.until ? S.saveFb : null;
+  st.textContent = sfb ? sfb.text : ''; st.className = 'st' + (sfb ? (sfb.ok ? ' ok' : ' fail') : ''); st.hidden = !sfb;
+  placeBar();
+}
+/* 与 mini_menu.place_menu 相同：框下 → 放不下翻到框上 → 再放不下放框内底部；水平不出屏 */
+function placeBar() {
+  const b = S.box, w = bar.offsetWidth, h = bar.offsetHeight;
+  const x = Math.max(AVAIL.x, Math.min(b.x, AVAIL.x + AVAIL.w - w));
+  let y = b.y + b.h + MENU_GAP, where = '框下';
+  if (y + h > AVAIL.y + AVAIL.h) { y = b.y - MENU_GAP - h; where = '框上'; if (y < AVAIL.y) { y = Math.max(b.y, b.y + b.h - h - MENU_INSIDE_PAD); where = '框内'; } }
+  bar.style.left = x + 'px'; bar.style.top = y + 'px'; S.placement = where;
+}
+
+/* ================= 6. 动作：工具、文字输入、复制 / 保存 / 关闭 ================= */
+const logEl = document.getElementById('log'); const logLines = [];
+function log(s) { logLines.unshift(s); logLines.length = Math.min(logLines.length, 6); logEl.innerHTML = logLines.join('\n'); }
+function pickTool(k) { if (S.editing) commitText(); S.tool = k; syncBar(); }
+let failCopy = false, failSave = false;
+function copyImage() {
+  if (S.editing) commitText();
+  const ok = !failCopy; failCopy = false;
+  log(`<b>on_copy_image</b>(png ${S.box.w}×${S.box.h}, ${S.ops.length} 个标注) → ${ok ? 'True' : 'False'}`);
+  S.copyFb = { ok, until: performance.now() + 1500 }; syncBar(); setTimeout(syncBar, 1550);
+}
+function saveImage() {
+  if (S.editing) commitText();
+  const path = '~/图片/截图/截图 2026-11-20 10-45-12.png';
+  const ok = !failSave; failSave = false;
+  log(ok ? `<b>on_save_image</b>(png) → "${path}"` : `<b>on_save_image</b>(png) → 抛出 PermissionError：~/图片/截图 不可写`);
+  S.saveFb = { ok, text: ok ? `✓ 已保存 ${path}` : '保存失败：~/图片/截图 不可写', until: performance.now() + 2500 }; syncBar(); setTimeout(syncBar, 2550);
+}
+function openAnnotate() {
+  Object.assign(S, { phase: 'annotate', tool: null, ops: [], draft: null, selDraft: null, cursor: null, copyFb: null, saveFb: null });
+  cancelText(); renderWork(); buildBar(); syncBar(); document.getElementById('closed-tip').hidden = true;
+}
+function closeOverlay(reason) {
+  cancelText(); Object.assign(S, { phase: 'closed', draft: null, cursor: null });
+  syncBar(); document.getElementById('closed-tip').hidden = false; log(`<b>on_closed</b>()  ← ${reason}`);
+}
+/* 文字：点击处放一个无边框输入框（Qt：QLineEdit，透明底、开启输入法），Enter / 点别处提交，Esc 取消本次输入 */
+const screenEl = document.getElementById('screen');
+function openText(p) {
+  cancelText();
+  const el = document.createElement('input'); el.className = 'edit'; el.style.left = p.x + 'px'; el.style.top = p.y - 2 + 'px';
+  const st = style();
+  el.style.font = `600 ${st.textPx}px ${SANS}`; el.style.color = st.color; el.style.height = st.textPx + 8 + 'px';
+  const fit = () => { octx.font = `600 ${st.textPx}px ${SANS}`; el.style.width = Math.max(48, octx.measureText(el.value).width + 14) + 'px'; };
+  el.oninput = fit; fit();
+  el.onkeydown = e => { if (e.key === 'Enter') { commitText(); e.preventDefault(); } if (e.key === 'Escape') { cancelText(); e.stopPropagation(); e.preventDefault(); } };
+  el.onblur = () => setTimeout(() => { if (S.editing === el) commitText(); }, 0);
+  screenEl.appendChild(el); S.editing = el; S.editAt = p; el._fit = fit;
+  if (!auto) el.focus();
+}
+function commitText() { const el = S.editing; if (!el) return; S.editing = null; const v = el.value.trim(); el.remove(); if (v) commit(opFor('text', S.editAt, S.editAt, v)); }
+function cancelText() { if (S.editing) { S.editing.remove(); S.editing = null; } }
+
+/* 鼠标：框内拖拽画矩形 / 箭头 / 马赛克，点击放文字；框外不关闭 */
+function toScreen(e) { const r = ov.getBoundingClientRect(); return { x: Math.round((e.clientX - r.left) * SCREEN.w / r.width), y: Math.round((e.clientY - r.top) * SCREEN.h / r.height) }; }
+function inBox(p) { const b = S.box; return p.x >= b.x && p.x <= b.x + b.w && p.y >= b.y && p.y <= b.y + b.h; }
+ov.addEventListener('mousedown', e => {
+  if (S.phase !== 'annotate' || !S.tool) return;
+  const p = toScreen(e); if (!inBox(p)) return;
+  stopAuto();
+  if (S.tool === 'text') { if (S.editing) commitText(); else openText(p); e.preventDefault(); return; }
+  S.draft = opFor(S.tool, p, p);
+});
+window.addEventListener('mousemove', e => {
+  if (S.phase !== 'annotate') return;
+  const p = toScreen(e);
+  ov.style.cursor = !inBox(p) ? 'default' : S.tool === 'text' ? 'text' : S.tool ? 'crosshair' : 'default';
+  if (S.draft) S.draft.b = clampToBox(p);
+});
+window.addEventListener('mouseup', () => {
+  if (!S.draft) return;
+  const r = norm(S.draft.a, S.draft.b); if (r.w + r.h > 6) commit(S.draft); S.draft = null;
+});
+document.addEventListener('keydown', e => { if (e.key === 'Escape' && S.phase !== 'closed' && !S.editing) { stopAuto(); closeOverlay('按了 Esc'); } });
+
+/* ================= 7. 演示脚本（自动循环）与单步 ================= */
+const P = {  // 演示里画在模拟页面上的位置（屏幕坐标）
+  rect: [{ x: 2036, y: 340 }, { x: 2214, y: 530 }],
+  arrow: [{ x: 1900, y: 800 }, { x: 2050, y: 738 }],
+  text: { x: 1856, y: 553 }, textValue: '周日峰值，下周扩容',
+  mosaic: [{ x: 1374, y: 480 }, { x: 1700, y: 508 }],
+};
+const lerp = (a, b, p) => ({ x: Math.round(a.x + (b.x - a.x) * p), y: Math.round(a.y + (b.y - a.y) * p) });
+const shiftP = p => p;   // 演示点固定在页面内容上；选区换位置后落在框外的标注被裁掉
+const press = id => { const b = bar.querySelector('#' + id); if (!b) return; b.classList.add('press'); setTimeout(() => b.classList.remove('press'), 220); };
+function dragStep(type) {
+  const [a0, b0] = P[type].map(shiftP);
+  return [
+    [0, 0, () => { pickTool(type); press(`tool-${type}`); }],
+    [300, 700, p => { S.cursor = lerp(a0, b0, p); S.draft = opFor(type, a0, S.cursor); if (p === 1) { commit(S.draft); S.draft = null; } }],
+  ];
+}
+function textSteps() {
+  const at = shiftP(P.text), v = P.textValue;
+  return [
+    [0, 0, () => { pickTool('text'); press('tool-text'); }],
+    [300, 0, () => { S.cursor = at; openText(at); }],
+    [500, 1200, p => { if (S.editing) { S.editing.value = v.slice(0, Math.ceil(p * v.length)); S.editing._fit(); } }],
+    [1900, 0, () => commitText()],
+  ];
+}
+function selectSteps() {
+  const b = BOXES[S.boxKey];
+  return [
+    [0, 500, p => { Object.assign(S, { phase: 'select', selDraft: null, cursor: lerp({ x: 1500, y: 520 }, { x: b.x, y: b.y }, p) }); bar.hidden = true; document.getElementById('closed-tip').hidden = true; }],
+    [600, 900, p => { S.cursor = lerp({ x: b.x, y: b.y }, { x: b.x + b.w, y: b.y + b.h }, p); S.selDraft = norm({ x: b.x, y: b.y }, S.cursor); if (p === 1) { S.box = { ...b }; openAnnotate(); } }],
+  ];
+}
+function seq(groups) { const out = []; let t = 0; for (const [gap, steps] of groups) { t += gap; for (const [dt, dur, fn] of steps) out.push({ at: t + dt, dur, fn }); t += Math.max(...steps.map(([dt, dur]) => dt + dur)); } return out; }
+function buildScript() {
+  return seq([
+    [400, selectSteps()],
+    [700, dragStep('rect')],
+    [600, dragStep('arrow')],
+    [600, textSteps()],
+    [600, dragStep('mosaic')],
+    [900, [[0, 0, () => { press('undo'); undo(); }]]],
+    [700, dragStep('mosaic')],
+    [900, [[0, 0, () => { press('copy'); copyImage(); S.cursor = null; }]]],
+    [1800, [[0, 0, () => { press('save'); saveImage(); }]]],
+    [2900, [[0, 0, () => { press('cancel'); closeOverlay('点了「取消」'); }]]],
+    [1500, [[0, 0, () => {}]]],
+  ]);
+}
+let SCRIPT = buildScript(), auto = true, vt = 0, last = performance.now();
+const done = new Set();
+function stopAuto() { if (!auto) return; auto = false; S.cursor = null; syncCtrl(); }
+function startAuto() { auto = true; vt = 0; done.clear(); SCRIPT = buildScript(); cancelText(); S.phase = 'closed'; syncBar(); syncCtrl(); }
+const STEPS = [
+  ['框选完成', () => { S.box = { ...BOXES[S.boxKey] }; openAnnotate(); }],
+  ['矩形', () => instant('rect')], ['箭头', () => instant('arrow')], ['文字', () => { pickTool('text'); commit(opFor('text', shiftP(P.text), shiftP(P.text), P.textValue)); }],
+  ['马赛克', () => instant('mosaic')], ['撤销', () => undo()], ['复制', () => copyImage()], ['保存', () => saveImage()],
+  ['复制失败', () => { failCopy = true; copyImage(); }], ['保存失败', () => { failSave = true; saveImage(); }], ['关闭', () => closeOverlay('点了「取消」')],
+];
+function instant(type) { if (S.phase !== 'annotate') { S.box = { ...BOXES[S.boxKey] }; openAnnotate(); } pickTool(type); const [a, b] = P[type].map(shiftP); commit(opFor(type, a, b)); }
+const stepBox = document.getElementById('steps');
+STEPS.forEach(([label, fn]) => { const b = document.createElement('button'); b.textContent = label; b.onclick = () => { stopAuto(); if (S.phase !== 'annotate' && label !== '框选完成') { S.box = { ...BOXES[S.boxKey] }; openAnnotate(); } fn(); }; stepBox.appendChild(b); });
+document.getElementById('btn-auto').onclick = startAuto;
+document.querySelectorAll('[data-box]').forEach(b => b.onclick = () => {
+  S.boxKey = b.dataset.box; document.querySelectorAll('[data-box]').forEach(x => x.classList.toggle('on', x === b));
+  stopAuto(); S.box = { ...BOXES[S.boxKey] }; openAnnotate(); FOCUS.y = focusY(S.boxKey); layoutView();
+});
+function syncCtrl() { document.getElementById('btn-auto').classList.toggle('on', auto); }
+
+/* ================= 8. 视口：1:1 局部 / 3440×1440 全屏缩略 ================= */
+const vp = document.getElementById('vp');
+const FOCUS = { x: 1720, y: 600 };
+/* 1:1 视图对准选区与工具条：框下 / 框上看选区中部，框内（全高选区）看选区底部的工具条 */
+function focusY(key) { const b = BOXES[key]; return { mid: b.y + 360, bottom: b.y + 300, tall: b.y + b.h - 330 }[key]; }
+let fit = false;
+function layoutView() {
+  const W = vp.clientWidth;
+  if (fit) { const k = W / SCREEN.w; vp.style.height = Math.round(SCREEN.h * k) + 'px'; screenEl.style.transform = `scale(${k})`; }
+  else {
+    vp.style.height = '760px'; const H = 760;
+    const tx = Math.min(0, Math.max(W - SCREEN.w, W / 2 - FOCUS.x)), ty = Math.min(0, Math.max(H - SCREEN.h, H / 2 - FOCUS.y));
+    screenEl.style.transform = `translate(${tx}px,${ty}px)`;
+  }
+  document.getElementById('vp-tag').textContent = fit ? '3440×1440 超宽屏 · 全屏缩略（等比）' : '3440×1440 超宽屏 · 1:1 局部（选区附近）';
+  document.getElementById('btn-view').textContent = fit ? '视图：全屏缩略' : '视图：1:1 局部';
+}
+document.getElementById('btn-view').onclick = () => { fit = !fit; layoutView(); };
+window.addEventListener('resize', layoutView);
+
+function frame(now) {
+  const dt = Math.min(100, now - last); last = now;
+  if (auto) {
+    vt += dt;
+    SCRIPT.forEach((s, i) => {
+      if (done.has(i) || vt < s.at) return;
+      const p = s.dur ? Math.min(1, (vt - s.at) / s.dur) : 1;
+      s.fn(p); if (p >= 1) done.add(i);
+    });
+    if (done.size === SCRIPT.length) startAuto();
+  }
+  drawOverlay();
+  requestAnimationFrame(frame);
+}
+/* URL 参数 ?state=…：定格到某一状态（截图对比用）：select / bar / annotated / copied / saved / failed / closed；&box=bottom|tall；&view=fit */
+(function init() {
+  drawDesk();
+  const q = new URLSearchParams(location.search);
+  if (q.get('view') === 'fit') fit = true;
+  if (q.get('box')) { S.boxKey = q.get('box'); document.querySelectorAll('[data-box]').forEach(x => x.classList.toggle('on', x.dataset.box === S.boxKey)); }
+  FOCUS.y = focusY(S.boxKey);
+  layoutView();
+  const st = q.get('state');
+  if (st) {
+    auto = false; syncCtrl(); S.box = { ...BOXES[S.boxKey] };
+    if (st === 'select') { Object.assign(S, { phase: 'select', cursor: { x: S.box.x + 700, y: S.box.y + 420 } }); S.selDraft = norm({ x: S.box.x, y: S.box.y }, S.cursor); }
+    else if (st === 'closed') { S.phase = 'closed'; }
+    else {
+      openAnnotate();
+      if (st !== 'bar') { ['rect', 'arrow'].forEach(instant); commit(opFor('text', shiftP(P.text), shiftP(P.text), P.textValue)); instant('mosaic'); S.tool = 'mosaic'; syncBar(); }
+      if (st === 'editing') { S.ops.splice(2, 1); renderWork(); pickTool('text'); openText(shiftP(P.text)); S.editing.value = '周日峰值'; S.editing._fit(); }
+      if (st === 'copied') copyImage();
+      if (st === 'saved') saveImage();
+      if (st === 'failed') { failCopy = true; copyImage(); failSave = true; saveImage(); }
+    }
+  } else startAuto();
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>

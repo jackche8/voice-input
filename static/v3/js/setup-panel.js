@@ -1,6 +1,6 @@
 /* 方案 C 内置设置面板纯 UI（6 个子标签：模型与服务 / 语音与润色 / 截图翻译 / 快捷键 / 开放接口 / 系统检测）。
  * 严守纯展示边界：不发起网络请求、不读写剪贴板或存储、不硬编码后端路径，所有动作经 hooks 回调通知业务层。
- * 子标签栏及语音/快捷键表单采用持久 DOM 原地更新，确保轮询或 blur 绝不吞点击、绝不丢输入草稿与焦点。
+ * 子标签栏、「模型与服务」（setup-models.js）及语音/快捷键表单采用持久 DOM 原地更新，确保轮询或 blur 绝不吞点击、绝不丢输入草稿与焦点。
  */
 (function (V3) {
   "use strict";
@@ -50,19 +50,6 @@
     return state[name] || "";
   }
 
-  function desktopDaemonDetail(state) {
-    var list = state.capabilities;
-    if (!Array.isArray(list)) return "尚未读取守护进程状态";
-    for (var i = 0; i < list.length; i++) {
-      var item = list[i];
-      if (item && item.id === "desktop_daemon") {
-        var detail = item.detail != null && String(item.detail) !== "" ? item.detail : item.message;
-        return detail ? String(detail) : "尚未读取守护进程状态";
-      }
-    }
-    return "尚未读取守护进程状态";
-  }
-
   function headerNotice(state) {
     state = state || {};
     if (state.connection === "disconnected") {
@@ -89,10 +76,6 @@
     ) {
       return { tone: "warn", text: "有事项需要处理，完成前部分功能不可用" };
     }
-    var gates = state.unmetGates || state.unmet_gates || [];
-    if (gates.length) {
-      return { tone: "warn", text: "有事项需要处理，完成前部分功能不可用" };
-    }
     if (modelReady(asr) && ollamaReady(ollama)) {
       var voice = state.hotkey_voice;
       var shot = state.hotkey_screenshot;
@@ -114,8 +97,7 @@
     if (state.connection === "disconnected" || state.connection === "loading") return "";
     var asr = state.asr || {};
     var ollama = state.ollama || {};
-    var gates = state.unmetGates || state.unmet_gates || [];
-    if (modelReady(asr) && ollamaReady(ollama) && !gates.length) return "ok";
+    if (modelReady(asr) && ollamaReady(ollama)) return "ok";
     if (
       asr.status === "failed" ||
       ollama.modelStatus === "failed" ||
@@ -129,137 +111,11 @@
       asr.status === "missing" ||
       ollama.modelStatus === "missing" ||
       asr.status === "downloading" ||
-      ollama.modelStatus === "downloading" ||
-      gates.length
+      ollama.modelStatus === "downloading"
     ) {
       return "warn";
     }
     return "";
-  }
-
-  function progressNode(progress) {
-    if (!progress) return null;
-    var percent = typeof progress.percent === "number" ? progress.percent : null;
-    var received = progress.receivedLabel || "";
-    var total = progress.totalLabel || "";
-    var bits = [];
-    if (received || total) bits.push((received || "?") + " / " + (total || "?"));
-    if (percent != null) bits.push(Math.round(percent) + "%");
-    var label = bits.length ? "下载中 " + bits.join(" · ") : "下载中…";
-    var bar = V3.dom.el("div", { className: "progress", role: "progressbar", "aria-label": label });
-    if (percent != null) {
-      bar.setAttribute("aria-valuemin", "0");
-      bar.setAttribute("aria-valuemax", "100");
-      bar.setAttribute("aria-valuenow", String(Math.round(percent)));
-      bar.appendChild(V3.dom.el("i", { style: "width:" + Math.max(0, Math.min(100, percent)) + "%" }));
-    } else {
-      bar.setAttribute("aria-valuetext", "进度未知");
-      bar.appendChild(V3.dom.el("i", { style: "width:0" }));
-    }
-    return V3.dom.el("div", {}, [
-      V3.dom.el("div", { className: "row-sub", text: label }),
-      bar
-    ]);
-  }
-
-  function actionLabel(action, model) {
-    var failed = !!(model && (model.status === "failed" || model.modelStatus === "failed"));
-    return ({
-      download: "下载",
-      retry: "重试",
-      install: "安装 Ollama",
-      start: "启动 Ollama",
-      asr_download: failed ? "重试" : "下载",
-      asr_start: failed ? "重试" : "启动识别服务",
-      ollama_install: failed ? "重试" : "安装 Ollama",
-      ollama_start: failed ? "重试" : "启动 Ollama",
-      ollama_pull: failed ? "重试" : "下载模型"
-    })[action] || null;
-  }
-
-  function actionHook(kind, action) {
-    if (kind === "asr") {
-      if (action === "download" || action === "retry" || action === "asr_download") return "onDownloadAsr";
-      if (action === "asr_start") return "onStartAsr";
-    }
-    if (kind === "ollama") {
-      if (action === "install" || action === "ollama_install") return "onInstallOllama";
-      if (action === "start" || action === "ollama_start") return "onStartOllama";
-      if (action === "download" || action === "retry" || action === "ollama_pull") return "onDownloadOllamaModel";
-    }
-    return null;
-  }
-
-  function modelBadge(status) {
-    if (status === "ready") return V3.dom.el("span", { className: "badge ok", text: "已就绪" });
-    if (status === "downloading") return V3.dom.el("span", { className: "badge warn", text: "下载中" });
-    if (status === "failed") return V3.dom.el("span", { className: "badge danger", text: "失败" });
-    if (status === "missing") return V3.dom.el("span", { className: "badge warn", text: "未就绪" });
-    return V3.dom.el("span", { className: "badge", text: "未读取" });
-  }
-
-  function asrBadge(asr, connected) {
-    if (!connected) return modelBadge("unknown");
-    if (asr && asr.status === "ready" && asr.sidecarRunning === true) return modelBadge("ready");
-    if (asr && asr.status === "ready") return V3.dom.el("span", { className: "badge warn", text: "未启动" });
-    return modelBadge(asr && asr.status);
-  }
-
-  function ollamaBadge(ollama, connected) {
-    if (!connected) return modelBadge("unknown");
-    if (ollama && ollama.modelStatus === "downloading") return modelBadge("downloading");
-    if (ollama && ollama.modelStatus === "failed") return modelBadge("failed");
-    if (ollama && ollama.installed === false) return modelBadge("missing");
-    if (ollama && ollama.running === false) return V3.dom.el("span", { className: "badge warn", text: "未运行" });
-    if (ollama && ollama.modelStatus === "ready" && ollama.running === true) return modelBadge("ready");
-    return modelBadge(ollama && ollama.modelStatus);
-  }
-
-  function asrSub(asr, connected) {
-    if (!connected) return V3.dom.el("div", { className: "row-sub", text: "尚未读取状态" });
-    if (asr.status === "downloading") {
-      return progressNode(asr.progress) || V3.dom.el("div", { className: "row-sub", text: "下载中…" });
-    }
-    if (asr.status === "failed") {
-      return V3.dom.el("div", { className: "row-sub err", text: asr.message || "下载或加载失败" });
-    }
-    if (asr.status === "missing") {
-      return V3.dom.el("div", { className: "row-sub", text: asr.message || "尚未下载" });
-    }
-    if (asr.status === "ready") {
-      var bits = [];
-      if (asr.sidecarRunning === true) bits.push("已下载");
-      else bits.push(asr.message || "识别服务未启动");
-      if (asr.sizeLabel) bits.push(asr.sizeLabel);
-      if (asr.deviceLabel) bits.push(asr.deviceLabel);
-      return V3.dom.el("div", { className: "row-sub", text: bits.join(" · ") });
-    }
-    return V3.dom.el("div", { className: "row-sub", text: "检测中…" });
-  }
-
-  function ollamaSub(ollama, connected) {
-    if (!connected) return V3.dom.el("div", { className: "row-sub", text: "尚未读取状态" });
-    if (ollama.modelStatus === "downloading") {
-      return progressNode(ollama.progress) || V3.dom.el("div", { className: "row-sub", text: "下载中…" });
-    }
-    if (ollama.installed === false) {
-      return V3.dom.el("div", { className: "row-sub err", text: ollama.message || "未安装 Ollama，纠错与翻译不可用" });
-    }
-    if (ollama.running === false) {
-      return V3.dom.el("div", { className: "row-sub err", text: ollama.message || "Ollama 已安装但未运行，润色与截图翻译不可用" });
-    }
-    if (ollama.modelStatus === "failed") {
-      return V3.dom.el("div", { className: "row-sub err", text: ollama.message || "模型不可用" });
-    }
-    if (ollama.modelStatus === "missing") {
-      return V3.dom.el("div", { className: "row-sub", text: ollama.message || "模型尚未下载" });
-    }
-    if (ollama.modelStatus === "ready" && ollama.running === true) {
-      var bits = [ollama.version ? ("Ollama " + ollama.version + " 运行中") : "Ollama 运行中"];
-      bits.push(ollama.sizeLabel ? ("模型已下载 " + ollama.sizeLabel) : "模型已就绪");
-      return V3.dom.el("div", { className: "row-sub", text: bits.join(" · ") });
-    }
-    return V3.dom.el("div", { className: "row-sub", text: "检测中…" });
   }
 
   function createSetupPanel(container, options) {
@@ -319,6 +175,11 @@
     V3.dom.empty(container);
     container.appendChild(tabsEl);
     container.appendChild(paneEl);
+
+    /* ---------- 持久「模型与服务」视图（一键装齐进行中重读状态时不重建按钮） ---------- */
+    var modelsView = V3.setupModels.create({
+      invoke: function (name, payload) { return call(hooks, name, payload); }
+    });
 
     /* ---------- 持久「语音与润色」视图（保护未保存关键词草稿与焦点） ---------- */
     var polishSwitch = V3.dom.el("button", {
@@ -555,7 +416,7 @@
       keysMessagesEl.hidden = msgCount === 0;
 
       var hintBits = [
-        desktopDaemonDetail(state),
+        "修改快捷键后需重启应用生效。",
         "点选输入框后按下修饰键加主键录入。Esc 恢复原值，离开输入框结束录入且不自动保存。单独 Tab 用于移出焦点；Ctrl+Tab 等带修饰键的组合会被录入。部分系统或浏览器保留的组合不会送达此页，无法在这里录入，也不会被保存为已成功。"
       ];
       if (state.hotkeyCaptureHint) hintBits.push(state.hotkeyCaptureHint);
@@ -579,64 +440,7 @@
       }
     }
 
-    /* ---------- 其余子标签视图（模型 / 截图 / 接口 / 系统） ---------- */
-    function actionButton(state, kind, model, primary) {
-      var action = model && model.action;
-      var label = actionLabel(action, model);
-      var hook = actionHook(kind, action);
-      if (!label || !hook) return null;
-      var busy = model.status === "downloading" || model.modelStatus === "downloading";
-      return V3.dom.el("button", {
-        type: "button",
-        className: "btn" + (primary ? " primary" : ""),
-        disabled: busy || !isConnected(state),
-        text: busy ? "进行中…" : label,
-        onClick: function () { call(hooks, hook); }
-      });
-    }
-
-    function renderModels(state) {
-      var connected = isConnected(state);
-      var asr = state.asr || {};
-      var ollama = state.ollama || {};
-      var asrPrimary = asr.action === "download" || asr.action === "retry" || asr.action === "asr_download" || asr.action === "asr_start";
-      var nodes = [
-        V3.dom.el("h2", { text: "两个本地模型与服务" }),
-        V3.dom.el("div", { className: "rows" }, [
-          V3.dom.el("div", { className: "row" }, [
-            V3.dom.el("div", { className: "row-main" }, [
-              V3.dom.el("div", { className: "row-title" }, [
-                document.createTextNode("语音识别 "),
-                V3.dom.el("span", { className: "mono muted", text: V3.labels.FIXED_MODELS.asr })
-              ]),
-              asrSub(asr, connected)
-            ]),
-            asrBadge(asr, connected),
-            actionButton(state, "asr", asr, asrPrimary)
-          ]),
-          V3.dom.el("div", { className: "row" }, [
-            V3.dom.el("div", { className: "row-main" }, [
-              V3.dom.el("div", { className: "row-title" }, [
-                document.createTextNode("纠错与翻译 "),
-                V3.dom.el("span", { className: "mono muted", text: V3.labels.FIXED_MODELS.ollama })
-              ]),
-              ollamaSub(ollama, connected)
-            ]),
-            ollamaBadge(ollama, connected),
-            actionButton(state, "ollama", ollama, true)
-          ])
-        ]),
-        V3.dom.el("p", {
-          className: "hint",
-          text: "模型固定，不提供切换。缺什么只出现对应按钮。失败时在该行显示原因和「重试」。没有进度数据时不会显示百分比。"
-        })
-      ];
-      if (state.aboutText) {
-        nodes.push(V3.dom.el("p", { className: "setup-about", text: state.aboutText }));
-      }
-      return [V3.dom.el("div", { className: "setup-section" }, nodes)];
-    }
-
+    /* ---------- 其余子标签视图（截图 / 接口 / 系统） ---------- */
     function renderShot(state) {
       var optionsList = state.targetLangOptions && state.targetLangOptions.length
         ? state.targetLangOptions
@@ -799,6 +603,17 @@
 
     function renderPane(state) {
       var isSetupVisible = state.activePanel === "setup" && !container.hidden;
+      if (tab === "models") {
+        if (mountedTab !== "models") {
+          ignoreHotkeyBlur = true;
+          V3.dom.empty(paneEl);
+          modelsView.sections.forEach(function (node) { paneEl.appendChild(node); });
+          mountedTab = "models";
+          ignoreHotkeyBlur = false;
+        }
+        modelsView.update(state);
+        return;
+      }
       if (tab === "voice") {
         if (mountedTab !== "voice") {
           V3.dom.empty(paneEl);
@@ -829,12 +644,11 @@
       V3.dom.empty(paneEl);
       mountedTab = tab;
       var map = {
-        models: renderModels,
         shot: renderShot,
         api: renderApi,
         sys: renderSys
       };
-      (map[tab] || renderModels)(state).forEach(function (node) {
+      map[tab](state).forEach(function (node) {
         if (node) paneEl.appendChild(node);
       });
       ignoreHotkeyBlur = false;

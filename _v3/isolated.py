@@ -1,8 +1,7 @@
 """显式隔离候选组合入口。复用 build_sandbox_runtime + create_app，不另建业务栈。
 
 调用方必须传入隔离 root、测试 token，以及（可选）证书、回环服务地址、已构造的能力。
-不读取 live 配置/队列/历史/token，不绑定 17945/17946/17947/11434，不把夹具当成生产。
-compose_production_runtime 仍保持未达标门闩，本入口不得绕过或宣称生产就绪。
+不读取 live 配置/队列/历史/token，不绑定本应用三个组件端口与 Ollama 官方默认端口，不把夹具当成生产。
 """
 from __future__ import annotations
 
@@ -20,27 +19,23 @@ from _asr_provider import SidecarStreamProvider
 from _contracts import PolishRequest, PolishResponse, TranslateRequest, TranslateResponse
 from _jobs_client import JobsClient
 from _ollama import OllamaClient
+from _paths import STATIC_V3
+from _ports import DEFAULT_ASR_PORT, DEFAULT_OLLAMA_PORT, DEFAULT_SERVER_PORT
 from _polish import polish_text
 from _translate import translate_text
 from _v3.runtime import (
-    PRODUCTION_UNMET_GATES,
     Runtime,
     StreamingAsrProvider,
     TranscribeFn,
-    UnmetRuntimeGates,
     assert_sandbox_path,
     build_sandbox_runtime,
-    production_unmet_gates,
 )
-from _v3.production import STATIC_V3, compose_production_runtime
+from _v3.production import compose_production_runtime
 from _v3.setup_service import SetupService
 from _v3_app import create_app
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-FORBIDDEN_PORTS = frozenset({17945, 17946, 17947, 11434})
-ISOLATED_UNMET_GATES: tuple[str, ...] = (
-    "isolated candidate composition: 非生产，未切流，夹具不得当成官方引擎。",
-) + PRODUCTION_UNMET_GATES
+OLLAMA_OFFICIAL_PORT = 11434  # 用户自装的 Ollama 默认端口：隔离组合同样不得碰
+FORBIDDEN_PORTS = frozenset({DEFAULT_SERVER_PORT, DEFAULT_ASR_PORT, DEFAULT_OLLAMA_PORT, OLLAMA_OFFICIAL_PORT})
 
 
 def allocate_loopback_port(*, host: str = "127.0.0.1") -> int:
@@ -90,7 +85,6 @@ class IsolatedComposition:
     key: Path | None
     sidecar_base_url: str | None
     ollama_base_url: str | None
-    unmet_gates: tuple[str, ...]
     static_mounted: bool
     fixture_notes: tuple[str, ...]
     jobs_client: JobsClient
@@ -183,7 +177,6 @@ def compose_isolated_candidate(
     mount_static: bool = True,
     setup: SetupService | None = None,
     lan_ips: Callable[[], list[str]] | None = None,
-    unmet_gates: tuple[str, ...] | None = None,
     fixture_notes: tuple[str, ...] = (),
 ) -> IsolatedComposition:
     """组装隔离候选。必须由调用方显式传入隔离根与 token；不回落 live，不启 GPU。"""
@@ -221,7 +214,7 @@ def compose_isolated_candidate(
 
     if polish is None and (ollama_base_url is not None or ollama_client is not None):
         if ollama_client is None and ollama_base_url is None:
-            raise ValueError("不允许默认落到 11434")
+            raise ValueError(f"不允许默认落到 {OLLAMA_OFFICIAL_PORT}")
         base = ollama_base_url
 
         def polish(request: PolishRequest, _base=base, _client=ollama_client, _model=ollama_model) -> PolishResponse:
@@ -236,14 +229,6 @@ def compose_isolated_candidate(
 
         notes.append("translate 复用 _translate.translate_text，地址由调用方显式提供")
 
-    gates = tuple(unmet_gates or ISOLATED_UNMET_GATES)
-    if not any("未切流" in item or "尚未挂入生产" in item for item in gates):
-        gates = gates + PRODUCTION_UNMET_GATES
-    # 始终附上生产门闩，避免候选入口假装生产就绪
-    for item in production_unmet_gates():
-        if item not in gates:
-            gates = gates + (item,)
-
     runtime = build_sandbox_runtime(
         root=assert_sandbox_path(Path(root)),
         token=token,
@@ -254,7 +239,6 @@ def compose_isolated_candidate(
         stream_provider=stream_provider,
         setup=setup,
         lan_ips=lan_ips,
-        unmet_gates=gates,
         port=bind_port,
     )
     static_mounted = bool(mount_static)
@@ -275,7 +259,6 @@ def compose_isolated_candidate(
         key=key,
         sidecar_base_url=sidecar_base_url,
         ollama_base_url=ollama_base_url,
-        unmet_gates=runtime.unmet_gates,
         static_mounted=static_mounted,
         fixture_notes=tuple(notes),
         jobs_client=jobs,
@@ -286,11 +269,8 @@ def compose_isolated_candidate(
 # 再导出生产入口，便于测试证明候选没有替换它
 __all__ = [
     "FORBIDDEN_PORTS",
-    "ISOLATED_UNMET_GATES",
     "IsolatedComposition",
     "allocate_loopback_port",
     "compose_isolated_candidate",
     "compose_production_runtime",
-    "production_unmet_gates",
-    "UnmetRuntimeGates",
 ]

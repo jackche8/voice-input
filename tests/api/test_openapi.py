@@ -1,18 +1,18 @@
 from __future__ import annotations
 
 import copy
+import os
 from pathlib import Path
 
 import pytest
 
+from _paths import default_app_paths
 from _v3.runtime import assert_sandbox_path
 from _v3_app import (
-    UnmetRuntimeGates,
     build_sandbox_runtime,
     compose_production_runtime,
     create_app,
     export_openapi_document,
-    production_unmet_gates,
 )
 from tests.api.conftest import TEST_TOKEN, local_client
 
@@ -39,8 +39,9 @@ REQUIRED_PATHS = {
     "/api/v1/config",
     "/api/v1/status",
     "/api/setup/check",
-    "/api/setup/tasks",
-    "/api/setup/tasks/{task_id}",
+    "/api/setup/install-all",
+    "/api/v1/components",
+    "/api/v1/components/{name}/retry",
     "/api/v1/lan-access",
 }
 
@@ -79,9 +80,10 @@ def test_generated_openapi_has_real_paths_and_sse_schemas(tmp_path: Path):
 def test_create_app_requires_runtime_and_refuses_live_paths(tmp_path: Path):
     with pytest.raises(TypeError):
         create_app()  # type: ignore[call-arg]
-    live = Path("/opt/ollama-voice-input/.config.json")
-    with pytest.raises(RuntimeError):
-        assert_sandbox_path(live)
+    live = default_app_paths(os.environ)
+    for path in (live.config, live.key, live.data_root / "jobs.json", live.data_root):
+        with pytest.raises(RuntimeError):
+            assert_sandbox_path(path)
     runtime = build_sandbox_runtime(root=tmp_path / "ok", token=TEST_TOKEN)
     app = create_app(runtime)
     client = local_client(app)
@@ -93,13 +95,6 @@ def test_create_app_requires_runtime_and_refuses_live_paths(tmp_path: Path):
 def test_production_compose_requires_explicit_paths_and_token():
     with pytest.raises(TypeError):
         compose_production_runtime()  # type: ignore[call-arg]
-    gates = production_unmet_gates()
-    # 生产入口已一次切流（app.py/daemon/启动链走 v1），切流门闩关闭；官方/真机门闩仍在
-    assert not any("一次切流" in item for item in gates)
-    assert any("真机" in item for item in gates)
-    assert not any("P2" in item for item in gates), "P2 已由 r9 证据关闭，不应残留旧阻塞"
-    assert any("qwen3.5:4b" in item for item in gates), "官方 4b 门闩不得被软件接线抹掉"
-    assert UnmetRuntimeGates(gates).gates == gates
 
 
 def test_openapi_security_and_errors_are_derived(tmp_path: Path):
@@ -109,7 +104,7 @@ def test_openapi_security_and_errors_are_derived(tmp_path: Path):
     assert "RFC1918" in matrix["lan_peer"]
     assert "198.18" in matrix["lan_peer"]
     assert "testserver" in matrix["host"]
-    assert "不是可上线" in matrix["status_ok"]
+    assert "只表示本接口响应成功" in matrix["status_ok"]
     lan = spec["paths"]["/api/v1/stt"]["post"]
     local = spec["paths"]["/api/v1/status"]["get"]
     claim = spec["paths"]["/api/v1/jobs/claim"]["post"]
@@ -122,7 +117,7 @@ def test_openapi_security_and_errors_are_derived(tmp_path: Path):
     assert "403" in lan["responses"] and "413" in lan["responses"]
     assert "403" in local["responses"]
     assert "413" not in local["responses"]
-    assert "不是可上线" in (local.get("description") or "")
+    assert "只表示本接口响应成功" in (local.get("description") or "")
     chunks = spec["paths"]["/api/v1/recognize/sessions/{session_id}/chunks"]["post"]
     assert "413" in chunks["responses"]
     assert "s16le" in (chunks.get("description") or "")

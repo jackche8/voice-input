@@ -58,10 +58,6 @@ def _parse_iso(value: str) -> datetime | None:
         return None
 
 
-def default_jobs_path() -> Path:
-    return Path(__file__).resolve().parent / ".cache" / "jobs.json"
-
-
 def _prune_terminal_jobs(doc: JobStoreDocument, max_terminal: int = MAX_TERMINAL_JOBS) -> None:
     """保留全部活动态任务（queued/claimed），并将终态记录裁剪至最近 max_terminal 条。"""
     if max_terminal < 0:
@@ -428,5 +424,4 @@ __all__ = [
     "MAX_TERMINAL_JOBS",
     "TERMINAL_JOB_STATES",
     "JobStore",
-    "default_jobs_path",
 ]

@@ -21,9 +21,21 @@ def dispatch_product_event(
     hud: Any,
     tray: Any = None,
     on_confirm_resend: Callable[[str, str, bool], None] | None = None,
+    on_component_command: Callable[[str, str], None] | None = None,
+    on_config_changed: Callable[[], None] | None = None,
 ) -> None:
-    """将单条产品 SSE 事件字典映射到 `VoiceHudOverlay` 与 `StudioTrayIcon`（应在 UI 线程调用）。"""
+    """将单条产品 SSE 事件字典映射到 `VoiceHudOverlay` 与 `StudioTrayIcon`（应在 UI 线程调用）；
+    component_command / config_changed 是给应用自身的命令，交给对应回调（看护层重试、重读配置）。"""
     kind = str(event.get("event") or "").strip().lower()
+    if kind == "component_command":
+        if on_component_command is not None:
+            on_component_command(str(event.get("action") or ""), str(event.get("component") or ""))
+        return
+
+    if kind == "config_changed":
+        if on_config_changed is not None:
+            on_config_changed()
+        return
     if kind == "idle":
         if getattr(hud, "mode", None) != "toast":
             hud.set_idle()

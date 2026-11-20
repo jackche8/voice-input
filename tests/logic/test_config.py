@@ -5,14 +5,8 @@ from pathlib import Path
 
 import pytest
 
-from _config import ConfigStore, default_config_path
-from _contracts import LogicError
-
-
-def test_default_path_is_project_config_but_tests_do_not_write_it():
-    path = default_config_path()
-    assert path.name == ".config.json"
-    assert path.parent == Path(__file__).resolve().parents[2]
+from _config import ConfigStore, apply_config_update, config_view
+from _contracts import AppConfigUpdate, LogicError
 
 
 def test_missing_file_returns_defaults_without_creating(tmp_path: Path):
@@ -99,3 +93,14 @@ def test_concurrent_updates_do_not_drop_fields(tmp_path: Path):
     assert data["ollama_model"] == "kept-model"
     assert data["translate_target_lang"] == "en"
     assert data["custom_keywords"] == ["Foo"]
+
+
+def test_annotate_hotkey_and_autostart_are_product_fields(tmp_path: Path):
+    store = ConfigStore(tmp_path / "config.json")
+    view = config_view(store.load())
+    assert view.hotkey_annotate == "ctrl+alt+a" and view.autostart_enabled is True  # 缺省值
+    out = apply_config_update(store, AppConfigUpdate(hotkey_annotate="Control+Shift+A", autostart_enabled=False))
+    assert out.hotkey_annotate == "ctrl+shift+a" and out.autostart_enabled is False
+    with pytest.raises(LogicError) as err:  # 第五键与其它四键一起查重
+        apply_config_update(store, AppConfigUpdate(hotkey_annotate="ctrl+alt+z"))
+    assert err.value.code.value == "invalid_request"

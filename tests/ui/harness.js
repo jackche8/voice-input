@@ -18,6 +18,7 @@
     const polishToggles = [];
     const keywordSaves = [];
     const targetLangChanges = [];
+    const setupActions = [];
     const hooks = {
       onCopy: function (payload) { copies.push(payload); },
       onConfirmResendChoice: function (payload) { confirms.push(payload); },
@@ -30,7 +31,10 @@
       onSelectPanel: function (payload) { panels.push(payload); },
       onTogglePolish: function (enabled) { polishToggles.push(enabled); },
       onSaveKeywords: function (val) { keywordSaves.push(val); },
-      onChangeTargetLang: function (val) { targetLangChanges.push(val); }
+      onChangeTargetLang: function (val) { targetLangChanges.push(val); },
+      onInstallAll: function () { setupActions.push("install-all"); },
+      onRetryComponent: function (name) { setupActions.push("retry:" + name); },
+      onToggleAutostart: function (enabled) { setupActions.push("autostart:" + enabled); }
     };
 
     /* ---------- 1. 方案 C 统一工作台 (#home-root：5 面板 + 内置 6 标签设置) ---------- */
@@ -183,15 +187,43 @@
     const setupPane = homeRoot.querySelector('[data-panel-view="setup"]');
     const failText = setupPane.innerText;
     assert(failText.indexOf("下载中断") !== -1, "下载失败显示后端原因");
-    assert(failText.indexOf("重试") !== -1, "失败时出现重试");
-    assert(failText.indexOf("启动 Ollama") !== -1, "Ollama 未运行时出现启动按钮");
     assert(failText.indexOf("已就绪") === -1 || (failText.indexOf("语音识别") !== -1 && failText.indexOf("失败") !== -1), "失败不得显示成成功进度");
+    const stepRows = Array.prototype.slice.call(setupPane.querySelectorAll("[data-step]"));
+    assert(
+      stepRows.map(function (r) { return r.dataset.step; }).join(",") === "ollama_install,wait_ollama,ollama_pull,asr_runtime_install,asr_download"
+        && stepRows[0].innerText.indexOf("安装 Ollama 程序") !== -1 && stepRows[3].innerText.indexOf("安装语音识别运行环境") !== -1
+        && stepRows[4].innerText.indexOf("失败") !== -1 && stepRows[4].innerText.indexOf("下载中断") !== -1,
+      "一键装齐按固定顺序显示五步，失败步显示原因"
+    );
+    const installBtn = setupPane.querySelector('button[data-role="install-all"]');
+    assert(!!installBtn && installBtn.textContent === "从此步重试" && !installBtn.disabled, "失败时同一按钮显示「从此步重试」");
+    const visibleButtons = Array.prototype.slice.call(setupPane.querySelectorAll("button.btn:not([hidden])")).map(function (b) { return b.textContent; });
+    assert(visibleButtons.join(",") === "从此步重试,重试", "模型页只有一键装齐与已停止服务的重试两个按钮，无逐项下载/安装/启动按钮：" + visibleButtons.join(","));
+    installBtn.click();
+    assert(setupActions.join(",") === "install-all", "点「从此步重试」走 onInstallAll 回调");
+    const ollamaRow = setupPane.querySelector('[data-component="ollama"]');
+    const asrRow = setupPane.querySelector('[data-component="asr"]');
+    assert(
+      ollamaRow.innerText.indexOf("已停止") !== -1 && ollamaRow.innerText.indexOf("端口 11434 被占用") !== -1
+        && asrRow.innerText.indexOf("等待重启") !== -1 && !asrRow.querySelector("button:not([hidden])"),
+      "组件显示状态与原因；只有已停止的组件出现重试"
+    );
+    ollamaRow.querySelector("button").click();
+    assert(setupActions[1] === "retry:ollama", "组件「重试」走 onRetryComponent(name)");
+    const autostart = setupPane.querySelector('button[role="switch"][aria-label="开机自启"]');
+    assert(!!autostart && autostart.getAttribute("aria-checked") === "true", "开机自启开关显示配置值");
+    autostart.click();
+    assert(setupActions[2] === "autostart:false", "开机自启开关走 onToggleAutostart 回调");
     const primaryBtnDark = setupPane.querySelector("button.btn.primary");
     assert(!!primaryBtnDark && wcagRatio(primaryBtnDark) >= 4.5, "暗色主题主按钮 .btn.primary 运行时 WCAG 对比度 ≥ 4.5:1");
 
     home.setState(V3Fixtures.setupDownloading);
     const dlText = setupPane.innerText;
     assert(dlText.indexOf("42%") !== -1 && dlText.indexOf("下载中") !== -1, "仅在注入进度时显示百分比");
+    assert(
+      setupPane.querySelector('button[data-role="install-all"]') === installBtn && installBtn.disabled && installBtn.textContent === "安装中…",
+      "装齐进行中重读状态不重建按钮（点击不被吞），按钮禁用并显示安装中"
+    );
 
     home.setState(Object.assign({}, V3Fixtures.setupConnected, {
       apiPaths: [
@@ -425,13 +457,7 @@
 
     assert(keySetupPane.innerText.indexOf("以后端返回的提示为准") === -1, "已删除空承诺提示");
     assert(keySetupPane.innerText.indexOf("已生效") === -1, "保存文案不含已生效");
-    assert(keySetupPane.innerText.indexOf("尚未读取守护进程状态") !== -1, "未读到 desktop_daemon 时显示未知");
-    keyHome.setState({
-      capabilities: [
-        { id: "desktop_daemon", label: "桌面守护进程", available: true, required: true, detail: "守护进程已加载当前快捷键，无需重启。" }
-      ]
-    });
-    assert(keySetupPane.innerText.indexOf("守护进程已加载当前快捷键，无需重启。") !== -1, "快捷键区只展示 desktop_daemon.detail");
+    assert(keySetupPane.innerText.indexOf("修改快捷键后需重启应用生效") !== -1, "快捷键页如实提示修改后需重启应用生效");
     assert(keySetupPane.innerText.indexOf("systemctl") === -1 && keySetupPane.innerText.indexOf("restart.sh") === -1, "前端不自行推荐重启命令");
 
     rejectSave = false;

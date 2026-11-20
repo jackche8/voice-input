@@ -1,13 +1,14 @@
 """隔离候选组合：复用 create_app(runtime) 走会话→入队→claim/ack。不是真实端到端验收。"""
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 from _contracts import SIDECAR_CHUNK_HEADER
 from _inject import FocusBoundInjector, RecordingBackend
 from _jobs_client import JobsClient
-from _v3.isolated import FORBIDDEN_PORTS, compose_isolated_candidate, compose_production_runtime, production_unmet_gates
-from _v3.runtime import UnmetRuntimeGates
+from _paths import default_app_paths
+from _v3.isolated import FORBIDDEN_PORTS, compose_isolated_candidate, compose_production_runtime
 from tests.api.providers import make_text_wav
 from tests.integration.fixtures import FixtureStreamProvider, fixture_transcribe
 
@@ -18,15 +19,13 @@ def _pcm(n: int = 16) -> bytes:
     return b"\x01\x00" * n
 
 
-def test_production_compose_still_blocked():
+def test_production_compose_requires_explicit_inputs():
     try:
         compose_production_runtime()  # type: ignore[call-arg]
     except TypeError:
         pass
     else:
         raise AssertionError("compose_production_runtime 必须显式给出路径、令牌与系统适配器")
-    assert production_unmet_gates(), "官方/真机门闩未关闭前不得清空"
-    assert issubclass(UnmetRuntimeGates, RuntimeError)
 
 
 def test_candidate_does_not_claim_production_ready(composition):
@@ -35,10 +34,7 @@ def test_candidate_does_not_claim_production_ready(composition):
     status = client.get("/api/v1/status", headers=composition.local_headers())
     assert status.status_code == 200, status.text
     body = status.json()
-    assert body["ok"] is True
-    gates = body["unmet_gates"]
-    assert any("切流" in item for item in gates)
-    assert any("isolated candidate" in item for item in gates)
+    assert body["ok"] is True and set(body) == {"ok", "service", "injected"}
     check = client.get("/api/setup/check", headers=composition.local_headers())
     assert check.status_code == 503, "未注入设置探测时不得返回假就绪"
     assert check.json()["ok"] is False
@@ -179,8 +175,9 @@ def test_legacy_setup_and_token_paths_removed(composition):
     ):
         res = client.post(path, json={}, headers=headers)
         assert res.status_code in {404, 405}, (path, res.text)
-    res = client.post("/api/setup/tasks", json={"kind": "ollama_pull"}, headers=headers)
-    assert res.status_code == 503 and res.json()["ok"] is False, "未注入真实动作时不得假成功"
+    for path in ("/api/setup/tasks", "/api/setup/install-all"):  # 逐项任务入口已退役；未注入安装动作时一键装齐不得假成功
+        res = client.post(path, json={"kind": "ollama_pull"}, headers=headers)
+        assert (res.status_code, res.json()["ok"]) == ((404, False) if path.endswith("tasks") else (503, False)), path
 
 
 def test_platform_adapter_does_not_touch_user_input(composition):
@@ -221,10 +218,9 @@ def test_reserved_ports_and_live_paths_rejected(tmp_path: Path):
         raise AssertionError("11434 must be rejected")
     except ValueError as exc:
         assert "11434" in str(exc) or "保留端口" in str(exc)
-    live_history_parent = PROJECT_ROOT / ".cache"
     try:
         compose_isolated_candidate(
-            root=live_history_parent,
+            root=default_app_paths(os.environ).data_root,
             token="test-isolated-composition-token",
             stream_provider=FixtureStreamProvider(),
         )

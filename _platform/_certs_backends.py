@@ -3,10 +3,7 @@ from __future__ import annotations
 
 import datetime as dt
 import ipaddress
-import os
-import tempfile
 from dataclasses import dataclass
-from pathlib import Path
 
 CA_COMMON_NAME = "Ollama Voice Input Local Root CA"
 SERVER_COMMON_NAME = "ollama-voice-input"
@@ -39,25 +36,6 @@ def normalize_ip_str(addr: str) -> str | None:
         return str(ip)
     except ValueError:
         return None
-
-
-def atomic_write_bytes(path: Path, data: bytes, mode: int) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent))
-    tmp = Path(tmp_name)
-    try:
-        with os.fdopen(fd, "wb") as fh:
-            fh.write(data)
-            fh.flush()
-            os.fsync(fh.fileno())
-        try:
-            os.chmod(tmp, mode)
-        except OSError:
-            pass
-        os.replace(tmp, path)
-    except Exception:
-        tmp.unlink(missing_ok=True)
-        raise
 
 
 def has_cryptography() -> bool:

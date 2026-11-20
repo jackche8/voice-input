@@ -5,7 +5,7 @@ import subprocess
 
 from _hotkey import HotkeyBindings
 from _linux.conflicts import ConflictScan, parse_global_shortcuts, scan_hotkey_conflicts
-from _linux.portal_dbus import DAEMON_APP_ID, FALLBACK_APP_ID
+from _linux.portal_dbus import DAEMON_APP_ID, LEGACY_APP_ID
 from _linux.startup_check import startup_issues
 
 GS = "org.gnome.settings-daemon.global-shortcuts"
@@ -39,19 +39,19 @@ def base_table(apps: str) -> dict:
         ("get", GS, "applications"): (0, apps),
         ("get", f"{APP_PATH}/com.pylogmon.Manggo/", "shortcuts"): (0, MANGGO),
         ("get", f"{APP_PATH}/{DAEMON_APP_ID}/", "shortcuts"): (0, OWN),
-        ("get", f"{APP_PATH}/{FALLBACK_APP_ID}/", "shortcuts"): (0, OWN),
+        ("get", f"{APP_PATH}/{LEGACY_APP_ID}/", "shortcuts"): (0, OWN),
         ("get", f"{APP_PATH}/wechat/", "shortcuts"): (0, NO_SHORTCUTS),
     }
 
 
 def test_global_shortcuts_conflict_reported_and_own_app_excluded():
     calls: list = []
-    apps = f"['{DAEMON_APP_ID}', '{FALLBACK_APP_ID}', 'wechat', 'com.pylogmon.Manggo']"
+    apps = f"['{DAEMON_APP_ID}', '{LEGACY_APP_ID}', 'wechat', 'com.pylogmon.Manggo']"
     scan = scan_hotkey_conflicts(BINDINGS, run=fake_run(base_table(apps), calls), which=lambda n: "/usr/bin/gsettings")
     assert scan.unread == ()
     assert scan.conflicts == ("screenshot alt+x 与 应用 com.pylogmon.Manggo 的全局快捷键 screenshot-recognition 的 <Alt>x 冲突",)
     read_apps = [c[2] for c in calls if c[1] == "get" and c[2].startswith(APP_PATH)]
-    assert all(DAEMON_APP_ID not in a and not a.endswith(f"/{FALLBACK_APP_ID}/") for a in read_apps), read_apps
+    assert all(DAEMON_APP_ID not in a and not a.endswith(f"/{LEGACY_APP_ID}/") for a in read_apps), read_apps
 
 
 def test_fourth_hotkey_ocr_conflict_and_duplicate_startup_check():

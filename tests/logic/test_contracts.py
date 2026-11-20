@@ -7,6 +7,10 @@ from _contracts import (
     ASR_STREAMING_BLOCKERS,
     AckResult,
     AppConfig,
+    ComponentName,
+    ComponentReport,
+    ComponentState,
+    ComponentStatus,
     ErrorBody,
     ErrorCode,
     HistoryPolish,
@@ -19,6 +23,8 @@ from _contracts import (
     JobState,
     PolishResponse,
     ProductBusyEvent,
+    ProductComponentCommandEvent,
+    ProductConfigChangedEvent,
     ProductDeliveryUnknownEvent,
     ProductErrorEvent,
     ProductEventType,
@@ -233,6 +239,8 @@ def test_product_events_are_typed_not_style_text():
         ProductBusyEvent(),
         ProductHistoryWriteFailedEvent(job_id="j", message="disk", error=ErrorCode.history_io),
         ProductDeliveryUnknownEvent(job_id="j", text="maybe"),
+        ProductComponentCommandEvent(action="retry", component=ComponentName.asr),
+        ProductConfigChangedEvent(),
     ]
     seen: set[str] = set()
     for ev in cases:
@@ -249,6 +257,22 @@ def test_product_events_are_typed_not_style_text():
         ProductSSEEventEnvelope.model_validate({"event": "status", "text": "idle", "style": "normal"})
     with pytest.raises(ValidationError):
         ProductPartialEvent.model_validate({"event": "partial", "text": "甚至", "stable": "", "tail": "甚至"})
+
+
+def test_component_report_carries_each_component_exactly_once():
+    def status(name: ComponentName) -> ComponentStatus:
+        return ComponentStatus(name=name, state=ComponentState.running, since="2026-11-20T10:00:00+00:00")
+
+    report = ComponentReport(components=[status(n) for n in ComponentName])
+    assert [c.name for c in report.components] == [ComponentName.ollama, ComponentName.asr, ComponentName.server]
+    for broken in (
+        [status(ComponentName.ollama), status(ComponentName.asr)],  # 少一项
+        [status(n) for n in ComponentName] + [status(ComponentName.asr)],  # 重复
+    ):
+        with pytest.raises(ValidationError):
+            ComponentReport(components=broken)
+    with pytest.raises(ValidationError):  # 命令只有 retry；「已安装」由看护层按文件发现，不经事件
+        ProductSSEEventEnvelope.model_validate({"event": "component_command", "action": "installed", "component": "asr"})
 
 
 def test_openapi_skeleton_includes_both_sse_families_and_no_fake_paths():

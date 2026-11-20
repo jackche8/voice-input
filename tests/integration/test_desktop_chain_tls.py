@@ -116,7 +116,7 @@ def test_tls_verification_is_on(chain, tmp_path):
 
 def test_voice_to_delivery_complete_with_product_events(chain):
     comp, api, bus = chain
-    status = PlatformStatus(api.post_platform_event)
+    status = PlatformStatus(api.post_platform_event, post_components=api.post_components)
     job_id = _speak(api, status, focus=7)
 
     backend = RecordingBackend()
@@ -137,7 +137,7 @@ def test_voice_to_delivery_complete_with_product_events(chain):
 
 def test_focus_mismatch_acks_none_and_shows_delivery_failed(chain):
     comp, api, bus = chain
-    status = PlatformStatus(api.post_platform_event)
+    status = PlatformStatus(api.post_platform_event, post_components=api.post_components)
     job_id = _speak(api, status, focus=7)
     backend = RecordingBackend()
     loop = DeliveryLoop(jobs=api.jobs, injector=FocusBoundInjector(StaticFocusProbe(9), backend), last=LastDelivered(), claim_timeout_s=3)
@@ -151,7 +151,7 @@ def test_focus_mismatch_acks_none_and_shows_delivery_failed(chain):
 
 def test_repeat_resends_to_current_focus(chain):
     comp, api, bus = chain
-    status = PlatformStatus(api.post_platform_event)
+    status = PlatformStatus(api.post_platform_event, post_components=api.post_components)
     first = _speak(api, status, focus=7)
     last = LastDelivered()
     backend = RecordingBackend()
@@ -174,7 +174,7 @@ def test_repeat_resends_to_current_focus(chain):
 
 def test_platform_status_reaches_product_stream(chain):
     comp, api, bus = chain
-    status = PlatformStatus(api.post_platform_event)
+    status = PlatformStatus(api.post_platform_event, post_components=api.post_components)
     from _contracts import ErrorCode
 
     status.error(ErrorCode.dependency_failed, "麦克风打开失败：fake")
@@ -185,7 +185,7 @@ def test_platform_status_reaches_product_stream(chain):
 
 def test_too_short_cancels_session_without_job(chain):
     comp, api, bus = chain
-    status = PlatformStatus(api.post_platform_event)
+    status = PlatformStatus(api.post_platform_event, post_components=api.post_components)
     source = FakeAudioSource(b"\x00\x00" * 800)
     flow = VoiceFlow(api=api, status=status, probe=StaticFocusProbe(7), source_factory=lambda: source)
     flow.start()

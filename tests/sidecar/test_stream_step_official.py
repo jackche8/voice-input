@@ -8,6 +8,8 @@
 """
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 np = pytest.importorskip("numpy")
@@ -61,7 +63,7 @@ class FakeOfficialAsr:
 
 
 def _engine(llm) -> tuple[OfficialEngine, FakeOfficialAsr]:
-    eng = OfficialEngine()
+    eng = OfficialEngine(model_path=Path("unused-model"))
     fake = FakeOfficialAsr(llm)
     eng._asr = fake
     eng.loaded = True
@@ -163,7 +165,7 @@ def test_stream_and_transcribe_share_kernel_construction():
 
 
 def test_default_engine_stream_and_transcribe_use_0_4_5_5_and_state_budget():
-    # 真实默认构造路径（OfficialEngine() 无参数），不是测试注入覆盖。
+    # 真实默认构造参数（只给必填的模型目录），不是测试注入覆盖。
     pieces = [f"第{i}段，" for i in range(12)]
     step = int(round(0.4 * SR))
     llm = _Budget(lambda n: "".join(pieces[: -(-n // step)]))
@@ -225,7 +227,7 @@ def test_official_engine_transformers_backend_stream_and_transcribe_and_auto_lan
 
     pieces = [f"段落{i}。" for i in range(6)]
     step = int(round(0.4 * SR))
-    eng = OfficialEngine(backend="transformers")
+    eng = OfficialEngine(model_path=Path("unused-model"), backend="transformers")
     fake_tf = FakeTfOfficialAsr(lambda n: f"language Chinese<asr_text>{''.join(pieces[: -(-n // step)])}")
     eng._asr = fake_tf
     eng.loaded = True

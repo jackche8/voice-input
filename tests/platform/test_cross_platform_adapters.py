@@ -125,7 +125,7 @@ def test_detect_os_and_factory_protocol():
 # ---------------------------------------------------------------------------
 
 
-def test_linux_adapter_capture_focus_inject_and_hotkeys():
+def test_linux_adapter_capture_focus_inject_and_hotkeys(tmp_path):
     from PIL import Image
 
     buf = io.BytesIO()
@@ -241,6 +241,12 @@ def test_linux_adapter_capture_focus_inject_and_hotkeys():
     assert any(c.id == "ocr_chi_sim" and c.available for c in caps)
     desktop_entry = adapter_inj.render_autostart_desktop(["/opt/ovi/daemon"], workdir=Path("/opt/ovi"))
     assert "Exec=/opt/ovi/daemon" in desktop_entry
+    adapter_inj.configure_autostart(enabled=True, command=["/opt/ovi/py", "/opt/ovi/daemon.py", "--background"],
+                                    config_home=tmp_path / "cfg")
+    entry = tmp_path / "cfg" / "autostart" / "ollama-voice-input.desktop"
+    assert "Exec=/opt/ovi/py /opt/ovi/daemon.py --background" in entry.read_text(encoding="utf-8")
+    adapter_inj.configure_autostart(enabled=False, command=[], config_home=tmp_path / "cfg")
+    assert not entry.exists()
 
 
 # ---------------------------------------------------------------------------
@@ -440,8 +446,9 @@ def test_windows_adapter_focus_terminals_sendinput_clipboard_hotkeys_and_autosta
     assert lst.stopped is True
 
     # 8. 开机自启注册表 & VBS 脚本 & capabilities
-    spec = adapter.configure_autostart(enabled=True, command=[r"C:\Program Files\Python\pythonw.exe", "daemon.py"])
-    assert reg_store["OllamaVoiceInput"] == spec["value"]
+    command = [r"C:\Program Files\Python\pythonw.exe", "daemon.py"]
+    assert adapter.configure_autostart(enabled=True, command=command) is None
+    assert reg_store["OllamaVoiceInput"] == adapter.autostart_registry_entry(command)["value"]
     adapter.configure_autostart(enabled=False, command=["pythonw.exe", "daemon.py"])
     assert "OllamaVoiceInput" not in reg_store
     vbs = adapter.render_startup_script(["pythonw.exe", "daemon.py"], workdir=tmp_path)
@@ -609,13 +616,14 @@ def test_macos_adapter_bundles_paste_hotkeys_plist_and_permissions(tmp_path: Pat
     rig.stop()
 
     # 6. LaunchAgents plist 生成与写入/移除 & 权限自检
-    plist_file = adapter.configure_autostart(
+    adapter.configure_autostart(
         enabled=True,
         command=["/opt/ovi/.venv/bin/python", "/opt/ovi/daemon.py"],
         workdir=Path("/opt/ovi"),
         log_dir=tmp_path / "logs",
         home=tmp_path,
     )
+    plist_file = adapter.launch_agent_path(home=tmp_path)
     assert plist_file.is_file()
     parsed_plist = plistlib.loads(plist_file.read_bytes())
     assert parsed_plist["Label"] == "com.ollama-voice-input.daemon"
@@ -1340,3 +1348,40 @@ def test_portal_screenshot_sync_uses_thread_local_main_context(monkeypatch, tmp_
     # 验证顺序：new_ctx -> push -> subscribe -> call_sync -> iter -> unsubscribe -> pop
     assert trace.index("new_ctx") < trace.index("push") < trace.index("subscribe") < trace.index("call_sync")
     assert trace.index("iter") < trace.index("unsubscribe") < trace.index("pop")
+
+
+# ---------------------------------------------------------------------------
+# 桌面集成：自启命令与门户 app id 条目（_desktop.desktop_integration）
+# ---------------------------------------------------------------------------
+def test_autostart_uses_background_app_command_and_portal_entry_follows_xdg_order(tmp_path):
+    import shlex
+
+    from _desktop.desktop_integration import apply_autostart, ensure_portal_app_entry
+    from _paths import AppPaths, app_command
+
+    paths = AppPaths.for_roots(config_root=tmp_path / "c", data_root=tmp_path / "d", runtime_dir=tmp_path / "r")
+    calls: list[dict] = []
+
+    class Adapter:
+        def configure_autostart(self, *, enabled, command):
+            calls.append({"enabled": enabled, "command": list(command)})
+
+    apply_autostart(Adapter(), paths, False)
+    assert calls == [{"enabled": False, "command": app_command(paths, background=True)}]
+    assert calls[0]["command"][-1] == "--background"
+
+    env = {"HOME": str(tmp_path / "home"), "XDG_DATA_HOME": str(tmp_path / "user"),
+           "XDG_DATA_DIRS": f"{tmp_path / 'sys1'}:{tmp_path / 'sys2'}"}
+    system_entry = tmp_path / "sys2" / "applications" / "ollama-voice-input-daemon.desktop"
+    system_entry.parent.mkdir(parents=True)
+    system_entry.write_text("[Desktop Entry]\n", encoding="utf-8")
+    assert ensure_portal_app_entry(paths, env) == system_entry  # 已有条目（如安装包放的）就用它，不另写
+    assert not (tmp_path / "user" / "applications").exists()
+
+    system_entry.unlink()
+    written = ensure_portal_app_entry(paths, env)
+    assert written == tmp_path / "user" / "applications" / "ollama-voice-input-daemon.desktop"
+    text = written.read_text(encoding="utf-8")
+    assert "NoDisplay=true" in text and f"Exec={shlex.join(app_command(paths, background=True))}" in text
+    written.write_text("[Desktop Entry]\nExec=user-edited\n", encoding="utf-8")
+    assert ensure_portal_app_entry(paths, env) == written and "user-edited" in written.read_text(encoding="utf-8")

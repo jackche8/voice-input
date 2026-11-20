@@ -4,6 +4,7 @@
 """
 from __future__ import annotations
 
+import os
 import plistlib
 import threading
 import time
@@ -18,6 +19,7 @@ from _hotkey import (
     canonical_key,
     parse_hotkey_macos,
 )
+from _paths import default_app_paths
 from _platform._common import (
     always_false,
     check_focus_and_self_guard,
@@ -43,7 +45,6 @@ from _platform.protocol import (
 
 PASTE_RESTORE_DELAY_S = 0.55
 DEFAULT_LAUNCH_AGENT_LABEL = "com.ollama-voice-input.daemon"
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 MACOS_TERMINAL_BUNDLES = frozenset(
     {
@@ -172,7 +173,9 @@ class MacOSPlatformAdapter:
         self._mss_factory = mss_factory
         self._listener_factory = listener_factory
         self._sleep = sleep
-        self._temp_dir = Path(temp_dir) if temp_dir is not None else (PROJECT_ROOT / ".pp" / "tmp" / "macos")
+        if temp_dir is None:
+            temp_dir = default_app_paths(os.environ, os_name="macos").temp_dir
+        self._temp_dir = Path(temp_dir)
         self._ocr_languages = ocr_languages
         self._inject_lock = threading.Lock()
 
@@ -335,17 +338,16 @@ class MacOSPlatformAdapter:
         workdir: Path | None = None,
         log_dir: Path | None = None,
         home: Path | None = None,
-    ) -> Path:
+    ) -> None:
         plist_path = self.launch_agent_path(label, home=home)
         if not enabled:
             plist_path.unlink(missing_ok=True)
-            return plist_path
+            return
         plist_path.parent.mkdir(parents=True, exist_ok=True)
         xml_text = self.render_launch_agent_plist(
             command, label=label, workdir=workdir, log_dir=log_dir
         )
         plist_path.write_text(xml_text, encoding="utf-8")
-        return plist_path
 
     def capabilities(self) -> list[SetupCapability]:
         api = self._api()

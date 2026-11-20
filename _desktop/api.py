@@ -12,7 +12,6 @@ import httpx
 from _contracts import SIDECAR_CHUNK_HEADER, ErrorCode
 from _jobs_client import (
     DEFAULT_BASE_URL,
-    DEFAULT_CERT,
     JobsClient,
     build_tls_context,
     resolve_verify_ca,
@@ -60,7 +59,7 @@ class DesktopApi:
         self,
         base_url: str = DEFAULT_BASE_URL,
         *,
-        cert: Path | None = DEFAULT_CERT,
+        cert: Path | None = None,
         transport: httpx.BaseTransport | None = None,
     ) -> None:
         if not (base_url.startswith("https://127.0.0.1") or base_url.startswith("https://localhost")):
@@ -235,6 +234,9 @@ class DesktopApi:
     # ---- 平台状态 & 配置 ------------------------------------------------
     def post_platform_event(self, event: dict) -> None:
         _check(self._client.post("/api/v1/events/platform", json=event))
+
+    def post_components(self, report: dict) -> None:
+        _check(self._client.post("/api/v1/components", json=report))
 
     def get_config(self) -> dict:
         return _check(self._client.get("/api/v1/config"))

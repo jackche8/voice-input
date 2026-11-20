@@ -30,10 +30,6 @@ def _lock_for(path: Path) -> threading.RLock:
         return lock
 
 
-def default_config_path() -> Path:
-    return Path(__file__).resolve().parent / ".config.json"
-
-
 class ConfigStore:
     """对指定路径做读写。测试必须传入临时路径，禁止用默认 live 路径做试验。
 
@@ -104,20 +100,8 @@ class ConfigStore:
             return updated
 
 
-def load_config(path: Path | None = None) -> AppConfig:
-    if path is None:
-        path = default_config_path()
-    return ConfigStore(path).load()
-
-
-def save_config(config: AppConfig, path: Path | None = None) -> None:
-    if path is None:
-        path = default_config_path()
-    ConfigStore(path).save(config)
-
-
 LEGACY_OLLAMA_MODEL_KEY = "legacy_ollama_model"
-_HOTKEY_FIELDS = ("hotkey_voice", "hotkey_screenshot", "hotkey_ocr", "hotkey_repeat")
+_HOTKEY_FIELDS = ("hotkey_voice", "hotkey_screenshot", "hotkey_ocr", "hotkey_repeat", "hotkey_annotate")
 
 
 def config_view(config: AppConfig) -> AppConfigView:
@@ -130,6 +114,8 @@ def config_view(config: AppConfig) -> AppConfigView:
         hotkey_screenshot=config.hotkey_screenshot,
         hotkey_ocr=config.hotkey_ocr,
         hotkey_repeat=config.hotkey_repeat,
+        hotkey_annotate=config.hotkey_annotate,
+        autostart_enabled=config.autostart_enabled,
         ollama_model=config.ollama_model,
     )
 
