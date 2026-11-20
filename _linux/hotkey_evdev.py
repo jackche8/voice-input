@@ -1,250 +1,255 @@
-"""evdev 内核级全局快捷键，适用于 X11 和 Wayland（观察器/回退 + 物理修饰键探针）。"""
+"""evdev 读线程：按设备记录物理按下集合，把组合的按下区间（开始 s / 结束 e，单调毫秒）上报给 sink。
+
+一次按下 = 组合由不满足变满足（s）到由满足变不满足（e，任一键松开、设备断开都算）。门户模式只报区间，
+开始由 GNOME `Activated` 放行；回退模式（门户不可用）在 trigger 最后按下时另报放行。组合定义由 manager 经
+`set_combos` 下发（门户模式 = GNOME 实际绑定，回退模式 = 配置）。规则见 8.6-F。
+
+读线程每轮 select 先读完全部就绪设备、按事件时间合并后处理（跨设备节点的组合按真实先后判定），
+本轮结束投递一次读线程进度；线程意外退出时经 sink.source_failed 上报，不静默消失。
+"""
 from __future__ import annotations
 
+import select
 import threading
 import time
+import traceback
+from collections.abc import Callable, Collection, Mapping
+from typing import Any
 
-from _hotkey import parse_hotkey_evdev
-from _linux.hotkey_actions import GLib, HotkeyActionMixin, HotkeyContext
-from _linux.uinput_device import UINPUT_DEVICE_NAME
-
-# Linux input-event-codes.h 标准修饰键码（供无 evdev 包环境下的单测也能安全判定）
-_LINUX_MOD_KEYCODES = frozenset(
-    {
-        29,   # KEY_LEFTCTRL
-        97,   # KEY_RIGHTCTRL
-        42,   # KEY_LEFTSHIFT
-        54,   # KEY_RIGHTSHIFT
-        56,   # KEY_LEFTALT
-        100,  # KEY_RIGHTALT
-        125,  # KEY_LEFTMETA
-        126,  # KEY_RIGHTMETA
-    }
+from _hotkey import EVDEV_MODIFIER_CODES
+from _linux.evdev_keyboards import (
+    EV_KEY,
+    EV_SYN,
+    KEY_ESC,
+    KEYBOARD_CODE_LIMIT,
+    SYN_DROPPED,
+    open_keyboards,
 )
+from _linux.hotkey_actions import GLib, HotkeyContext, HotkeySink, end_interval_and_release
+from _linux.hotkey_state import Action
+
+_LINUX_MOD_KEYCODES = frozenset().union(*EVDEV_MODIFIER_CODES.values())
+_MASK = 0xFFFFFFFF
+RESCAN_INTERVAL_S = 30.0
+
+Combo = Mapping[str, Any]  # parse_hotkey_evdev 的结果：{"trigger": int, "modifiers": [set[int], ...]}
 
 
-class EvdevHotkeyGrabber(HotkeyActionMixin):
-    """evdev 内核级全局快捷键，适用于 X11 和 Wayland（支持 voice / screenshot / ocr / repeat 四键）。"""
+def _now_ms() -> int:
+    return int(time.monotonic() * 1000) & _MASK
 
-    def __init__(self, ctx: HotkeyContext, *, devices: list | None = None, combo_parser=parse_hotkey_evdev) -> None:
-        self._init_hotkey_actions(ctx)
-        self.actions_enabled = True  # portal 接管时作为活动观察器，不触发动作
+
+def _event_ms(event: Any) -> int:
+    return (int(event.sec) * 1000 + int(event.usec) // 1000) & _MASK
+
+
+def _satisfied(combo: Combo, keys: set[int]) -> bool:
+    return combo["trigger"] in keys and all(mods & keys for mods in combo["modifiers"])
+
+
+class EvdevHotkeyGrabber:
+    """全部本机键盘类设备的读线程：上报按下区间、回退模式下的放行与 Esc。"""
+
+    def __init__(
+        self,
+        ctx: HotkeyContext,
+        sink: HotkeySink,
+        *,
+        open_devices: Callable[[Collection[str]], list[Any]] = open_keyboards,
+    ) -> None:
+        self.ctx = ctx
+        self.sink = sink
+        self.activations_enabled = False  # 回退模式（门户不可用）由 manager 打开
+        self._open_devices = open_devices
+        self._lock = threading.Lock()
+        self._devices: dict[str, Any] = {}
+        self._pressed: dict[str, set[int]] = {}
+        self._combos: dict[Action, Combo] = {}
+        self._held: set[Action] = set()
         self._running = False
-        self._thread = None
-        self._pressed_keys: set[int] = set()
+        self._thread: threading.Thread | None = None
 
-        self._voice_combo = combo_parser(self.ctx.bindings.voice)
-        self._screen_combo = combo_parser(self.ctx.bindings.screenshot)
-        self._ocr_combo = combo_parser(self.ctx.bindings.ocr) if self.ctx.bindings.ocr else None
-        self._repeat_combo = combo_parser(self.ctx.bindings.repeat)
-        print(f"  evdev: 语音快捷键 {self.ctx.bindings.voice} → trigger={self._voice_combo['trigger']} mods={self._voice_combo['modifiers']}")
-        print(f"  evdev: 截图快捷键 {self.ctx.bindings.screenshot} → trigger={self._screen_combo['trigger']} mods={self._screen_combo['modifiers']}")
-        if self._ocr_combo is not None:
-            print(f"  evdev: OCR 快捷键 {self.ctx.bindings.ocr} → trigger={self._ocr_combo['trigger']} mods={self._ocr_combo['modifiers']}")
-        print(f"  evdev: 重复快捷键 {self.ctx.bindings.repeat} → trigger={self._repeat_combo['trigger']} mods={self._repeat_combo['modifiers']}")
-
-        if devices is not None:
-            self._devices = list(devices)
-        else:
-            from evdev import InputDevice, list_devices
-
-            self._devices = []
-            for path in list_devices():
-                try:
-                    dev = InputDevice(path)
-                    if dev.name == UINPUT_DEVICE_NAME:
-                        dev.close()
-                        continue
-                    if self._is_real_keyboard(dev.capabilities()):
-                        self._devices.append(dev)
-                        print(f"  evdev: 监控键盘 {dev.name} ({dev.path})")
-                    else:
-                        dev.close()
-                except Exception:
-                    pass
-
-        if not self._devices:
+        devices = open_devices(())
+        if not devices:
             raise RuntimeError(
-                "未找到键盘设备。请确保用户属于 input 组: "
-                "sudo usermod -aG input $USER 然后重新登录"
+                "未找到可读的键盘设备。请确保用户属于 input 组: sudo usermod -aG input $USER 然后重新登录"
             )
+        with self._lock:
+            for dev in devices:
+                self._add_device_locked(dev)
+
+    # ---- manager 调用 ----------------------------------------------------
+    def set_combos(self, combos: Mapping[Action, Combo]) -> None:
+        """替换组合定义并按当前按下集合重算：替换引起的按住变化照常上报区间起止。"""
+        t_ms = _now_ms()
+        with self._lock:
+            for action in sorted(self._held - set(combos)):
+                self._held.discard(action)
+                self._post_end_locked(action, t_ms)
+            self._combos = dict(combos)
+            self._recompute_locked(t_ms)
+        for action, combo in combos.items():
+            print(f"  evdev: {action} → trigger={combo['trigger']} mods={combo['modifiers']}", flush=True)
 
     def any_modifier_down(self) -> bool:
         """当前是否有任意物理修饰键处于按下态（供 Wayland 下 ModifierJanitor 查询）。"""
-        return bool(self._pressed_keys & _LINUX_MOD_KEYCODES)
-
-    def grab(self) -> None:
-        pass
-
-    def ungrab(self) -> None:
-        pass
-
-    @staticmethod
-    def _is_real_keyboard(caps) -> bool:
-        """判定一个 evdev 设备是否为真键盘 (排除游戏鼠标宏键、特殊功能键等)."""
-        from evdev import ecodes
-
-        if ecodes.EV_KEY not in caps:
-            return False
-        keys = caps[ecodes.EV_KEY]
-        if ecodes.BTN_LEFT in keys:
-            return False
-        if ecodes.KEY_SPACE not in keys:
-            return False
-        letter_codes = [getattr(ecodes, f"KEY_{c}") for c in "ABCDEFGHIJKLM"]
-        return sum(1 for c in letter_codes if c in keys) >= 5
-
-    def _rescan_devices(self) -> None:
-        """重新扫描键盘设备（USB 热插拔恢复）。"""
-        from evdev import InputDevice, list_devices
-
-        existing_paths = {d.path for d in self._devices}
-        for path in list_devices():
-            if path in existing_paths:
-                continue
-            try:
-                dev = InputDevice(path)
-                if dev.name == UINPUT_DEVICE_NAME:
-                    dev.close()
-                    continue
-                if self._is_real_keyboard(dev.capabilities()):
-                    self._devices.append(dev)
-                    print(f"  evdev: 重新发现键盘 {dev.name} ({dev.path})", flush=True)
-                else:
-                    dev.close()
-            except Exception:
-                pass
+        with self._lock:
+            return bool(self._union_locked() & _LINUX_MOD_KEYCODES)
 
     def start(self) -> None:
         self._running = True
-        self._thread = threading.Thread(target=self._monitor, daemon=True)
+        self._thread = threading.Thread(target=self._monitor, name="evdev-hotkeys", daemon=True)
         self._thread.start()
-
-    def _monitor(self) -> None:
-        import select
-
-        from evdev import ecodes
-
-        print("  evdev: 监控线程已启动", flush=True)
-        print(f"  evdev: 监控 {len(self._devices)} 个设备, fds={[d.fd for d in self._devices]}", flush=True)
-
-        rescan_interval = 30.0
-        last_rescan = time.time()
-        while self._running:
-            now = time.time()
-            if now - last_rescan >= rescan_interval:
-                self._rescan_devices()
-                last_rescan = now
-
-            fds = {}
-            for dev in list(self._devices):
-                try:
-                    fds[dev.fd] = dev
-                except Exception as e:
-                    print(f"  evdev: [ERROR] 获取fd失败 {dev.name}: {e}", flush=True)
-
-            if not fds:
-                print("  evdev: [WARN] 无可用设备, 尝试重新扫描...", flush=True)
-                self._rescan_devices()
-                last_rescan = time.time()
-                time.sleep(3)
-                continue
-
-            try:
-                r, _, _ = select.select(list(fds.keys()), [], [], 1.0)
-            except Exception as e:
-                print(f"  evdev: [ERROR] select 异常: {type(e).__name__}: {e}, 重建设备", flush=True)
-                for d in list(self._devices):
-                    try:
-                        d.close()
-                    except Exception:
-                        pass
-                self._devices.clear()
-                self._pressed_keys.clear()
-                self._rescan_devices()
-                last_rescan = time.time()
-                time.sleep(0.5)
-                continue
-
-            for fd in r:
-                dev = fds.get(fd)
-                if not dev:
-                    continue
-                try:
-                    for event in dev.read():
-                        if event.type != ecodes.EV_KEY:
-                            continue
-                        self._handle_key_event(event.code, event.value)
-                except OSError as e:
-                    print(f"  evdev: [ERROR] 设备断开 {dev.name}: {e}", flush=True)
-                    try:
-                        dev.close()
-                    except Exception:
-                        pass
-                    try:
-                        self._devices.remove(dev)
-                    except ValueError:
-                        pass
-                    self._pressed_keys.clear()
-                except Exception as e:
-                    print(f"  evdev: [ERROR] 事件读取异常: {type(e).__name__}: {e}", flush=True)
-
-    def _matches_any_binding(self, code: int) -> bool:
-        combos = [self._voice_combo, self._screen_combo, self._repeat_combo]
-        if self._ocr_combo is not None:
-            combos.append(self._ocr_combo)
-        return any(self._match_combo(combo, code) for combo in combos)
-
-    def _handle_key_event(self, code: int, value: int) -> None:
-        """处理按键事件。value: 0=释放, 1=按下, 2=自动重复"""
-        if value == 1:
-            self._pressed_keys.add(code)
-            # 修饰键与本应用快捷键组合自身不得误关刚打开的框选器/浮窗；Esc 或其他普通键仍可关闭。
-            if code not in _LINUX_MOD_KEYCODES and not self._matches_any_binding(code):
-                self._close_overlay_on_key()
-            self._check_press(code)
-        elif value == 0:
-            self._pressed_keys.discard(code)
-            if code == self._voice_combo["trigger"] and self.actions_enabled:
-                print("  evdev: 语音触发键释放, 调度停止", flush=True)
-                GLib.idle_add(self._schedule_release)
-
-    def _match_combo(self, combo: dict, pressed_kc: int | None = None) -> bool:
-        """只有刚才按下的键是 trigger 才可能命中，避免陈 trigger 配后续任意键。"""
-        if pressed_kc is not None and pressed_kc != combo["trigger"]:
-            return False
-        if combo["trigger"] not in self._pressed_keys:
-            return False
-        for mod_keys in combo["modifiers"]:
-            if not (mod_keys & self._pressed_keys):
-                return False
-        return True
-
-    def _check_press(self, pressed_kc: int) -> None:
-        if not self.actions_enabled:
-            return
-        if self._match_combo(self._voice_combo, pressed_kc):
-            print("  evdev: ★ 语音快捷键匹配！调度录音", flush=True)
-            GLib.idle_add(self._on_voice_press)
-        elif self._match_combo(self._screen_combo, pressed_kc):
-            print("  evdev: ★ 截图快捷键匹配！调度截图", flush=True)
-            GLib.idle_add(self._on_screenshot)
-        elif self._ocr_combo is not None and self._match_combo(self._ocr_combo, pressed_kc):
-            print("  evdev: ★ OCR 快捷键匹配！调度纯 OCR", flush=True)
-            GLib.idle_add(self._on_ocr)
-        elif self._match_combo(self._repeat_combo, pressed_kc):
-            print("  evdev: ★ 重复快捷键匹配！调度重复", flush=True)
-            GLib.idle_add(self._on_repeat)
 
     def cleanup(self) -> None:
         self._running = False
-        if self._pending_release_id:
-            GLib.source_remove(self._pending_release_id)
-            self._pending_release_id = 0
-        if self._thread:
+        if self._thread is not None:
             self._thread.join(timeout=2)
-        for dev in self._devices:
-            try:
+        with self._lock:
+            for dev in self._devices.values():
                 dev.close()
-            except Exception:
-                pass
+            self._devices.clear()
+            self._pressed.clear()
+
+    # ---- 读线程 ----------------------------------------------------------
+    def _monitor(self) -> None:
+        print(f"  evdev: 监控 {len(self._devices)} 个设备 {sorted(self._devices)}", flush=True)
+        try:
+            self._run()
+        except Exception as exc:
+            # 意外异常：读线程结束，经失败通道上报（manager 转到底栏与日志），不静默退出
+            traceback.print_exc()
+            self._running = False
+            GLib.idle_add(self.sink.source_failed, f"evdev 读线程意外退出：{type(exc).__name__}: {exc}")
+
+    def _run(self) -> None:
+        last_rescan = time.monotonic()
+        while self._running:
+            if time.monotonic() - last_rescan >= RESCAN_INTERVAL_S or not self._devices:
+                self._rescan()
+                last_rescan = time.monotonic()
+            if not self._devices:
+                time.sleep(3)  # 没有设备时等热插拔，下一轮重扫
+                continue
+            self._poll_once()
+
+    def _poll_once(self) -> None:
+        """一轮：select → 读完全部就绪设备 → 按事件时间合并处理 → 投递一次进度。
+
+        进度取本轮 select 之前的单调时间：内核在入队时打时间戳，凡时间戳早于它的事件在 select 前已在
+        设备缓冲里，select 会报就绪、本轮读到；所以进度不会越过任何尚未读到的事件。
+        """
+        progress_ms = _now_ms()
+        with self._lock:
+            by_fd = {dev.fd: path for path, dev in self._devices.items()}
+        try:
+            ready, _, _ = select.select(list(by_fd), [], [], 1.0)
+        except (OSError, ValueError) as exc:
+            print(f"  evdev: [ERROR] select 异常 {type(exc).__name__}: {exc}，重建设备", flush=True)
+            self._drop_all()
+            return
+        batch: list[tuple[str, Any]] = []
+        lost: list[str] = []
+        for fd in ready:
+            path = by_fd[fd]
+            with self._lock:
+                dev = self._devices.get(path)
+            if dev is None:
+                continue
+            try:
+                batch.extend((path, event) for event in dev.read())
+            except OSError as exc:
+                print(f"  evdev: 设备断开 {dev.name} ({path}): {exc}", flush=True)
+                lost.append(path)
+        batch.sort(key=lambda item: (item[1].sec, item[1].usec))  # 稳定排序：同一时刻保持各设备内顺序
+        for path, event in batch:
+            self._handle_event(path, event)
+        for path in lost:
+            self._drop_device(path)
+        with self._lock:
+            # 同一队列、排在本轮全部区间投递之后：主线程处理到它时，早于进度的区间都已记入状态
+            GLib.idle_add(self.sink.reader_progress, progress_ms)
+
+    def _handle_event(self, path: str, event: Any) -> None:
+        if event.type == EV_SYN and event.code == SYN_DROPPED:
+            with self._lock:
+                dev = self._devices.get(path)
+                if dev is not None:
+                    self._pressed[path] = {c for c in dev.active_keys() if c < KEYBOARD_CODE_LIMIT}
+                    self._recompute_locked(_event_ms(event))
+            return
+        if event.type != EV_KEY or event.code >= KEYBOARD_CODE_LIMIT or event.value == 2:
+            return
+        t_ms = _event_ms(event)
+        with self._lock:
+            keys = self._pressed.setdefault(path, set())
+            if event.value == 1:
+                keys.add(event.code)
+            else:
+                keys.discard(event.code)
+            self._recompute_locked(t_ms)
+            if event.value == 1 and self.activations_enabled:
+                for action, combo in self._combos.items():
+                    if combo["trigger"] == event.code and action in self._held:
+                        GLib.idle_add(self.sink.activated, action, t_ms)
+        if event.value == 1 and event.code == KEY_ESC:
+            self.sink.escape_pressed()
+
+    def _rescan(self) -> None:
+        with self._lock:
+            known = set(self._devices)
+        new_devices = self._open_devices(known)
+        if not new_devices:
+            return
+        with self._lock:
+            for dev in new_devices:
+                self._add_device_locked(dev)
+                print(f"  evdev: 发现键盘 {dev.name} ({dev.path})", flush=True)
+            self._recompute_locked(_now_ms())
+
+    def _drop_device(self, path: str) -> None:
+        with self._lock:
+            dev = self._devices.pop(path, None)
+            self._pressed.pop(path, None)
+            self._recompute_locked(_now_ms())
+        if dev is not None:
+            dev.close()
+
+    def _drop_all(self) -> None:
+        with self._lock:
+            devices = list(self._devices.values())
+            self._devices.clear()
+            self._pressed.clear()
+            self._recompute_locked(_now_ms())
+        for dev in devices:
+            dev.close()
+
+    # ---- 锁内辅助 --------------------------------------------------------
+    def _add_device_locked(self, dev: Any) -> None:
+        self._devices[dev.path] = dev
+        self._pressed[dev.path] = {c for c in dev.active_keys() if c < KEYBOARD_CODE_LIMIT}
+
+    def _union_locked(self) -> set[int]:
+        union: set[int] = set()
+        for keys in self._pressed.values():
+            union |= keys
+        return union
+
+    def _recompute_locked(self, t_ms: int) -> None:
+        """按并集重算每个组合是否按住；变化即投递区间起止（锁内投递，保证与其它线程的投递顺序一致）。"""
+        union = self._union_locked()
+        for action, combo in self._combos.items():
+            held = _satisfied(combo, union)
+            if held and action not in self._held:
+                self._held.add(action)
+                GLib.idle_add(self.sink.interval_started, action, t_ms)
+            elif not held and action in self._held:
+                self._held.discard(action)
+                self._post_end_locked(action, t_ms)
+
+    def _post_end_locked(self, action: Action, t_ms: int) -> None:
+        # 回退模式由本后端判定开始，停录后补发修饰键抬起（现状语义）；门户模式只报结束
+        if self.activations_enabled:
+            GLib.idle_add(end_interval_and_release, self.sink, self.ctx, action, t_ms)
+        else:
+            GLib.idle_add(self.sink.interval_ended, action, t_ms)

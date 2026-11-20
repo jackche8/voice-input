@@ -19,7 +19,6 @@ STATE_BADGE_HEX: dict[str, str] = {
     "ready": theme.STATE_OK_HEX,
     "recording": theme.STATE_RECORDING_HEX,
     "polishing": theme.STATE_POLISHING_HEX,
-    "busy": theme.STATE_BUSY_HEX,
     "error": theme.STATE_ERROR_HEX,
     "disabled": theme.STATE_IDLE_HEX,
 }

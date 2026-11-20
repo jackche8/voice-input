@@ -24,6 +24,7 @@ class FakeWorld:
         "org.freedesktop.portal.GlobalShortcuts": 1,
     })
     langs: list[str] = field(default_factory=lambda: ["eng", "chi_sim", "osd"])
+    keyboards: list[str] | Exception = field(default_factory=lambda: ["/dev/input/event5"])
 
     def capabilities(self, session: str) -> list[SetupCapability]:
         return probe_capabilities(
@@ -31,7 +32,13 @@ class FakeWorld:
             which=self.tools.get,
             portal_version=lambda iface: (self.portals.get(iface), None if iface in self.portals else "fixture: 无此接口"),
             ocr_languages=lambda: list(self.langs),
+            keyboard_devices=self._keyboards,
         )
+
+    def _keyboards(self) -> list[str]:
+        if isinstance(self.keyboards, Exception):
+            raise self.keyboards
+        return list(self.keyboards)
 
     def probes(self) -> SetupProbes:
         return SetupProbes(

@@ -186,8 +186,9 @@ def test_linux_adapter_capture_focus_inject_and_hotkeys():
     class _FakeMgr:
         backend_name = "portal"
 
-        def __init__(self, ctx):
+        def __init__(self, ctx, *, on_error):
             self.ctx = ctx
+            self.on_error = on_error
             self.started = False
             self.cleaned = False
 
@@ -229,6 +230,7 @@ def test_linux_adapter_capture_focus_inject_and_hotkeys():
         on_voice_stop=lambda: None,
         on_screenshot=lambda: None,
         on_ocr=lambda: ocr_triggered.append(True),
+        on_error=lambda _reason: None,
     )
     assert isinstance(rig, HotkeyRig)
     rig.start()
@@ -409,6 +411,7 @@ def test_windows_adapter_focus_terminals_sendinput_clipboard_hotkeys_and_autosta
         on_repeat=lambda: events.append("repeat"),
         overlay_active=lambda: overlay_open["v"],
         close_overlay=lambda: (overlay_open.__setitem__("v", False) or events.append("close_ov") or True),
+        on_error=lambda _reason: None,
     )
     rig.start()
     lst = listeners[-1]
@@ -575,6 +578,7 @@ def test_macos_adapter_bundles_paste_hotkeys_plist_and_permissions(tmp_path: Pat
         on_screenshot=lambda: events.append("shot"),
         on_ocr=lambda: events.append("ocr"),
         on_repeat=lambda: events.append("repeat"),
+        on_error=lambda _reason: None,
     )
     rig.start()
     lst = listeners[-1]
@@ -1171,7 +1175,7 @@ def test_capture_region_mss_hidpi_scaling_and_monitor_bounds_clamping(tmp_path: 
 
 
 def test_pynput_hotkeys_modifier_and_own_binding_do_not_close_overlay():
-    """P1-5 回归：Windows/macOS pynput 热键状态机修饰键不关浮窗、自身四键不预关浮窗、普通键/Esc 关闭浮窗。"""
+    """Windows/macOS pynput：修饰键、自身四键与普通键都不关浮窗，只有 Esc 关闭（与 Linux evdev 一致）。"""
     listeners: list[_FakeListener] = []
     events: list[str] = []
     overlay_open = {"v": True}
@@ -1226,15 +1230,14 @@ def test_pynput_hotkeys_modifier_and_own_binding_do_not_close_overlay():
     assert events == ["shot", "ocr", "repeat", "v_start", "v_stop"]
     assert overlay_open["v"] is True
 
-    # 未命中自身热键的普通键（如 'a' 或 Esc）正常关闭浮窗
+    # 普通键（如 'a'）不再关闭浮窗，只有 Esc 关闭
     lst.on_press(_FakeKey(char="a", vk=0x00))
     lst.on_release(_FakeKey(char="a", vk=0x00))
-    assert overlay_open["v"] is False and events[-1] == "close_ov"
+    assert overlay_open["v"] is True and "close_ov" not in events
 
-    overlay_open["v"] = True
     lst.on_press(_FakeKey(name="esc", vk=0x35))
     lst.on_release(_FakeKey(name="esc", vk=0x35))
-    assert overlay_open["v"] is False and events[-2:] == ["close_ov", "close_ov"]
+    assert overlay_open["v"] is False and events[-1] == "close_ov"
     rig.stop()
 
 

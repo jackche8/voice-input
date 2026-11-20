@@ -1,0 +1,692 @@
+<!doctype html>
+<!--
+  v3.3 语音输入悬浮窗 · 模板 A「一体底栏」（最简设计 · 只用现有数据）
+  显示的数据：recording / partial(stable_text, tail_text) / polishing / typed(text) / error(message)
+             / history_write_failed(message) / delivery_unknown(job_id, text)，全部是现有事件，无新增数据。
+             （按方案，桌面端 busy 映射与 set_busy 删除，生产中已无发送方，本模板不再演示“处理中”。）
+  触发的动作：只有「投递未确认」卡片可点击：重新输入 → on_decision(job_id, True)；忽略 → on_decision(job_id, False)。
+  基于：_ui_desktop/voice_hud.py（公共方法不变）、_ui_desktop/caption_bar.py（断行与两行截取复用）、
+       _ui_desktop/theme.py（全部颜色字号）、_desktop/event_stream.py（事件映射不变）。
+  形态变化：左下角胶囊窗口并入底部居中条，屏幕上只剩一个悬浮窗。
+  附加提示行：只承接警告类提示（history_write_failed，warn「历史记录写入失败」）。录音中到来时画在底栏上沿外侧，约 3 秒后淡出，
+             不切换状态、不停秒表、不顶掉字幕；不在录音中时仍是单行警告胶囊。
+  本页用 <canvas> 绘制悬浮窗，只用 QPainter 有对应的操作（圆角矩形、rgba 填充、文字、弧线、虚线描边）。
+-->
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>v3.3 语音悬浮窗 · 模板 A「一体底栏」（最简 · 只用现有数据）</title>
+<style>
+:root {
+  --font-sans: "Noto Sans CJK SC", "PingFang SC", "Microsoft YaHei", "Segoe UI", sans-serif;
+  --font-mono: "JetBrains Mono", "Noto Sans Mono CJK SC", monospace;
+  --bg: #0d1117; --rail: #131820; --surface: #161b22; --surface-2: #1f2630; --border: #30363d;
+  --text: #e6edf3; --muted: #8b949e; --accent: #58a6ff; --ok: #3fb950; --warn: #d29922; --err: #f85149;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: #090c10; color: var(--text); font-family: var(--font-sans); font-size: 14px; line-height: 1.55; }
+header.bar { position: sticky; top: 0; z-index: 10; background: #090c10; border-bottom: 1px solid var(--border); padding: 10px 18px; display: flex; flex-direction: column; gap: 8px; }
+.title { display: flex; gap: 12px; align-items: baseline; flex-wrap: wrap; }
+.title strong { color: var(--accent); font-size: 15px; }
+.title span { color: var(--muted); font-size: 12px; }
+.ctrl { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.ctrl button { font: inherit; font-size: 12px; padding: 4px 11px; border-radius: 999px; border: 1px solid var(--border); background: var(--surface); color: #c9d1d9; cursor: pointer; }
+.ctrl button:hover { border-color: var(--accent); color: var(--accent); }
+.ctrl button.on { background: var(--accent); border-color: var(--accent); color: #090c10; font-weight: 700; }
+.ctrl .sep { width: 1px; height: 18px; background: var(--border); margin: 0 4px; }
+main { padding: 14px 18px 40px; display: flex; flex-direction: column; gap: 14px; }
+.vp { position: relative; overflow: hidden; border: 1px solid var(--border); border-radius: 10px; background: #000; height: 460px; }
+.vp .tag { position: absolute; right: 10px; top: 8px; z-index: 5; font-size: 11px; color: var(--muted); background: rgba(13,17,23,.85); border: 1px solid var(--border); border-radius: 6px; padding: 2px 8px; }
+.screen { position: absolute; left: 0; top: 0; width: 3440px; height: 1440px; transform-origin: 0 0; }
+.screen canvas { position: absolute; left: 0; top: 0; }
+/* ---- 模拟桌面（3440×1440，GNOME 顶栏 32px）。桌面本身不是模板的一部分，可用 CSS 随意画 ---- */
+.wall { position: absolute; inset: 0; background: linear-gradient(135deg, #1b2433 0%, #232a3d 45%, #2d2240 100%); }
+.topbar { position: absolute; left: 0; top: 0; right: 0; height: 32px; background: #000; color: #ddd; font-size: 14px; display: flex; align-items: center; justify-content: space-between; padding: 0 16px; }
+.win { position: absolute; border-radius: 12px; overflow: hidden; box-shadow: 0 10px 40px rgba(0,0,0,.45); }
+.win .tb { height: 44px; display: flex; align-items: center; padding: 0 18px; font-size: 15px; font-weight: 600; }
+.win.dark { background: #1e1e1e; color: #c9d1d9; } .win.dark .tb { background: #2a2a2a; }
+.win.light { background: #ffffff; color: #1f2328; } .win.light .tb { background: #ebedf0; }
+.msg { margin: 18px 28px; max-width: 900px; padding: 12px 16px; border-radius: 12px; background: #f2f4f7; font-size: 17px; }
+.msg.me { margin-left: auto; background: #dbeafe; }
+.inputbox { position: absolute; left: 28px; right: 28px; bottom: 26px; height: 92px; border: 2px solid #3b82f6; border-radius: 12px; padding: 14px 16px; font-size: 17px; color: #1f2328; }
+.inputbox .caret { display: inline-block; width: 2px; height: 22px; background: #1f2328; vertical-align: -4px; animation: blink 1s steps(1) infinite; }
+@keyframes blink { 50% { opacity: 0; } }
+.filelist div { padding: 9px 20px; font-size: 15px; border-bottom: 1px solid #2c2c2c; }
+/* ---- 说明区 ---- */
+.notes { display: grid; grid-template-columns: repeat(auto-fit, minmax(330px, 1fr)); gap: 12px; }
+.card { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 12px 16px; font-size: 13px; }
+.card h3 { margin: 0 0 8px; font-size: 14px; color: var(--text); }
+.card ul { margin: 0; padding-left: 18px; color: #c9d1d9; }
+.card li { margin: 3px 0; }
+.card code { font-family: var(--font-mono); font-size: 12px; color: #79c0ff; }
+.new { color: var(--warn); font-weight: 700; }
+table.spec { width: 100%; border-collapse: collapse; font-size: 12px; }
+table.spec td, table.spec th { border-bottom: 1px solid var(--border); padding: 4px 6px; text-align: left; vertical-align: top; }
+table.spec th { color: var(--muted); font-weight: 600; }
+.log { font-family: var(--font-mono); font-size: 12px; color: #c9d1d9; background: #0b0f14; border: 1px solid var(--border); border-radius: 8px; padding: 8px 12px; height: 168px; overflow: hidden; white-space: pre; }
+.log b { color: var(--accent); font-weight: 600; }
+</style>
+</head>
+<body>
+<header class="bar">
+  <div class="title">
+    <strong>模板 A「一体底栏」</strong>
+    <span>最简设计 · 只用现有数据 · 状态与字幕合成一个底部居中悬浮条（去掉左下角胶囊窗口） · 动效克制：淡入、形变、上卷、颜色过渡 · 录音中的提示走底栏上沿的附加提示行</span>
+  </div>
+  <div class="ctrl" id="ctrl">
+    <button id="btn-auto" class="on">▶ 自动循环</button>
+    <span class="sep"></span>
+    <span id="phase-btns" style="display:contents"></span>
+    <span class="sep"></span>
+    <button id="btn-view">视图：1:1 实际像素</button>
+  </div>
+</header>
+
+<main>
+  <div class="vp" id="vp">
+    <div class="tag" id="vp-tag">3440×1440 屏幕 · 1:1 局部</div>
+    <div class="screen" id="screen">
+      <div class="wall"></div>
+      <div class="topbar"><span>活动</span><span>11月19日 14:32</span><span>⚡ 🔊 ⏻</span></div>
+      <div class="win dark" style="left:60px;top:90px;width:640px;height:1200px">
+        <div class="tb">文件</div>
+        <div class="filelist"><div>📁 docs</div><div>📁 _ui_desktop</div><div>📄 voice_hud.py</div><div>📄 caption_bar.py</div><div>📄 theme.py</div></div>
+      </div>
+      <div class="win light" style="left:780px;top:90px;width:1880px;height:1200px">
+        <div class="tb">设计组 · 聊天（输入焦点在下方输入框）</div>
+        <div class="msg">下午把语音悬浮窗的三套动效发群里，大家投票。</div>
+        <div class="msg me">好的，我先把热键冲突的问题整理一下。</div>
+        <div class="inputbox"><span id="deliver"></span><span class="caret"></span></div>
+      </div>
+      <div class="win dark" style="left:2740px;top:90px;width:640px;height:1200px">
+        <div class="tb">浏览器</div>
+        <div style="padding:20px;font-size:15px;color:#8b949e">GNOME Wayland · XWayland 输入法与热键文档…</div>
+      </div>
+      <canvas id="hud" width="3440" height="1440"></canvas>
+    </div>
+  </div>
+
+  <div class="notes">
+    <div class="card">
+      <h3>显示的数据（全部为现有事件，无新增数据）</h3>
+      <ul>
+        <li><code>recording</code>：进入录音，前端本地秒表计时（与现有 <code>_record_tick_timer</code> 相同）</li>
+        <li><code>partial.stable_text</code> 白色 <code>#f8fafc</code>；<code>partial.tail_text</code> 灰色 <code>#94a3b8</code> + 虚线下划线</li>
+        <li><code>polishing</code>：状态列转为蓝色旋转弧 + “润色”</li>
+        <li><code>typed.text</code>：最终文字替换字幕，状态列绿色 ✓ “已输入”</li>
+        <li><code>error.message</code>：单行胶囊（录音中也一样，出错即结束本次录音）</li>
+        <li><code>history_write_failed.message</code>（警告）：不在录音中 → 单行警告胶囊；录音中 → 底栏上沿的附加提示行（见下方规格）</li>
+        <li><code>delivery_unknown.job_id / text</code>：可点击确认卡片</li>
+      </ul>
+    </div>
+    <div class="card">
+      <h3>触发的动作</h3>
+      <ul>
+        <li>只有「投递未确认」卡片可点击：<b>重新输入</b> → <code>on_decision(job_id, True)</code>；<b>忽略</b> → <code>on_decision(job_id, False)</code>（与现有 <code>show_delivery_confirmation</code> 相同）</li>
+        <li>其余所有状态：鼠标穿透、不抢焦点（<code>passive_overlay_flags()</code> 不变）</li>
+        <li>托盘「桌面状态提示」开关照旧控制整个悬浮条</li>
+      </ul>
+    </div>
+    <div class="card">
+      <h3>基于哪些现有文件改造</h3>
+      <ul>
+        <li><code>_ui_desktop/voice_hud.py</code>：<code>VoiceHudOverlay</code> 公共方法（set_recording / set_partial / set_polishing / set_typed / set_error / show_toast / show_delivery_confirmation / set_idle）签名不变；<code>set_busy</code> 按方案随桌面端 busy 映射一起删除</li>
+        <li><code>_ui_desktop/caption_bar.py</code>：<code>compute_trailing_two_lines</code> 断行与最新两行截取原样复用；左下角胶囊窗口删除，并入本条</li>
+        <li><code>_ui_desktop/theme.py</code>：全部颜色、字号（字幕 19px，状态 12px）、圆角 14px</li>
+        <li><code>_desktop/event_stream.py</code>：事件到方法的映射不变</li>
+      </ul>
+    </div>
+    <div class="card">
+      <h3>QPainter 实现要点</h3>
+      <ul>
+        <li>窗口按最大尺寸（838 × (24 提示行 + 86 两行字幕)）固定创建、透明穿透；动画只改 paintEvent 里的绘制矩形，<b>不逐帧 setGeometry</b>（XWayland 下逐帧改几何会抖）</li>
+        <li>一个 <code>QVariantAnimation</code> 驱动 QRectF（胶囊 ↔ 字幕条形变），一个驱动整体透明度（<code>painter.setOpacity</code>，不用 windowOpacity）</li>
+        <li>新确认的字：记录 [旧 stable 长度, 新 stable 长度) 区间与开始时间，按进度在 tail 色和 stable 色之间插值，分三段 drawText</li>
+        <li>上卷：行数增加时，所有行 y 偏移从一行高度动画到 0，裁剪到文字区；被顶出的行同时淡出</li>
+        <li>录音点呼吸、润色弧旋转：一个 16ms QTimer 只在可见且有动画时运行，空闲即停</li>
+        <li>✓ 用 QPainterPath + 虚线偏移（<code>QPen.setDashOffset</code>）做描边出现</li>
+      </ul>
+    </div>
+    <div class="card">
+      <h3>动效参数</h3>
+      <table class="spec">
+        <tr><th>动作</th><th>时长</th><th>曲线</th></tr>
+        <tr><td>出现：透明 0→1 + 上移 8px</td><td>180ms</td><td>OutCubic</td></tr>
+        <tr><td>胶囊 ↔ 字幕条形变（宽高）</td><td>200ms</td><td>OutCubic</td></tr>
+        <tr><td>新行上卷 + 顶行淡出</td><td>200ms</td><td>OutCubic</td></tr>
+        <tr><td>tail → stable 颜色过渡</td><td>220ms</td><td>OutCubic</td></tr>
+        <tr><td>润色边框呼吸 / 录音点呼吸</td><td>1.2s 周期</td><td>正弦</td></tr>
+        <tr><td>已输入：旧字淡出 → 最终文字淡入</td><td>130 + 130ms</td><td>OutCubic</td></tr>
+        <tr><td>已输入保持后淡出 + 下沉 6px</td><td>1.5s 后 260ms</td><td>OutCubic</td></tr>
+        <tr><td>错误保持</td><td>3.5s 后淡出</td><td>同上</td></tr>
+        <tr><td>附加提示行：淡入 + 从底栏里升起 4px</td><td>160ms</td><td>OutCubic</td></tr>
+        <tr><td>附加提示行：保持后淡出</td><td>到 3000ms 后 260ms</td><td>OutCubic</td></tr>
+      </table>
+    </div>
+    <div class="card">
+      <h3>附加提示行（录音中到来的提示）</h3>
+      <table class="spec">
+        <tr><th>项</th><th>规格</th></tr>
+        <tr><td>触发</td><td>只承接警告类提示：状态为录音中（<code>mode == "recording"</code>）时收到 <code>history_write_failed</code>（<code>show_toast(kind="warn")</code>）；不切换状态、不停秒表、不动字幕和底栏几何</td></tr>
+        <tr><td>位置</td><td>底栏上沿外侧；左缘 = 底栏左边 + 16px（底栏变宽变窄时跟随）；比底栏窄 32px 以上放不下时水平居中；下边与底栏上沿相接</td></tr>
+        <tr><td>尺寸 / 形状</td><td>高 24px，左右内边距 10px，上两角圆角 8px，下边不画边线</td></tr>
+        <tr><td>字号 / 文字色</td><td><code>FS_XS</code> 12px Medium，<code>CAPSULE_TEXT_HEX</code> #e6edf3</td></tr>
+        <tr><td>底色</td><td><code>CAPTION_BG_RGBA</code> (13,17,23,240)，与底栏同色</td></tr>
+        <tr><td>颜色（warn）</td><td>7px 圆点与 1px 描边用 <code>STATE_WARN_HEX</code> #d29922（描边透明度 60%）</td></tr>
+        <tr><td>时长</td><td>淡入 160ms（同时升起 4px）→ 从出现算起 3000ms 开始淡出 → 淡出 260ms</td></tr>
+        <tr><td>多条 / 结束</td><td>新提示替换旧提示并重新计时；新一次录音开始时清空；底栏整体淡出时随之消失</td></tr>
+        <tr><td>不在录音中</td><td>警告 toast 保持原表现：切换为单行警告胶囊</td></tr>
+      </table>
+      <ul style="margin-top:8px">
+        <li>QPainter：开口 <code>QPainterPath</code>（左下 → 左上圆角 → 右上圆角 → 右下），<code>fillPath</code> 自动闭合填充、<code>strokePath</code> 不画下边；填充盖住底栏上沿那段 1px 边线，看起来与底栏连成一体</li>
+        <li>提示只记 {文字, 类型, 开始时间}，透明度由 <code>painter.setOpacity</code> 按时间算；一个 <code>QTimer.singleShot(3000)</code> 开始淡出，淡出结束清空；与录音秒表、字幕状态互不影响</li>
+        <li><code>show_toast</code> 开头判断 <code>mode == "recording" and kind == "warn"</code> 时改为记录提示后返回，公共签名不变；提示行本身不需要改 <code>event_stream.py</code></li>
+        <li>提示行画在窗口固定尺寸内的上方 24px，不改窗口几何</li>
+      </ul>
+    </div>
+    <div class="card">
+      <h3>超宽屏适配与取舍</h3>
+      <ul>
+        <li>状态与文字都在屏幕中线，3440 宽下视线不用在左下角和中间来回跳</li>
+        <li>宽度 480–838px（约屏宽 14%–24%），字号沿用 19px</li>
+        <li>非语音的警告提示也出现在同一位置：不在录音中以胶囊形态显示，录音中以附加提示行显示</li>
+        <li>取舍：贴屏幕底部，会盖住最大化窗口最底部约 80px（与现状相同）</li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="card">
+    <h3>事件流（与 <code>_desktop/event_stream.py</code> 收到的 SSE 事件一致）</h3>
+    <div class="log" id="log"></div>
+  </div>
+</main>
+
+<script>
+'use strict';
+/* ================= 1. 主题令牌（_ui_desktop/theme.py） ================= */
+const C = {
+  capsuleBg: [13, 17, 23, 232 / 255], border: '#30363d', text: '#e6edf3', muted: '#8b949e',
+  rec: '#f85149', polish: '#58a6ff', ok: '#3fb950', warn: '#d29922', err: '#f85149',
+  accent: '#58a6ff', captionBg: [13, 17, 23, 240 / 255], captionBorder: [88, 166, 255, 102 / 255],
+  stable: '#f8fafc', tail: '#94a3b8', surface2: '#1f2630', bgDark: '#0d1117',
+};
+const SANS = '"Noto Sans CJK SC","PingFang SC","Microsoft YaHei","Segoe UI",sans-serif';
+const MONO = '"JetBrains Mono","Noto Sans Mono CJK SC",monospace';
+const SCREEN = { w: 3440, h: 1440, ax: 0, ay: 32, aw: 3440, ah: 1408 };
+
+/* ================= 2. 小工具：颜色、缓动、几何 ================= */
+function hex(h) { const n = parseInt(h.slice(1), 16); return [n >> 16 & 255, n >> 8 & 255, n & 255, 1]; }
+function col(c) { return typeof c === 'string' ? hex(c) : (c.length === 3 ? [...c, 1] : c); }
+function mix(a, b, p) { a = col(a); b = col(b); return a.map((v, i) => v + (b[i] - v) * p); }
+function withA(c, a) { c = col(c); return [c[0], c[1], c[2], a]; }
+function rgba(c, mul = 1) { c = col(c); return `rgba(${c[0] | 0},${c[1] | 0},${c[2] | 0},${(c[3] * mul).toFixed(3)})`; }
+const clamp01 = x => x < 0 ? 0 : x > 1 ? 1 : x;
+const EASE = {
+  outCubic: p => 1 - Math.pow(1 - p, 3),
+  linear: p => p,
+};
+function prog(t, t0, dur, e = 'outCubic') { return EASE[e](clamp01((t - t0) / dur)); }
+const lerp = (a, b, p) => a + (b - a) * p;
+function lerpRect(a, b, p) { return { x: lerp(a.x, b.x, p), y: lerp(a.y, b.y, p), w: lerp(a.w, b.w, p), h: lerp(a.h, b.h, p) }; }
+function sameRect(a, b) { return a && b && Math.abs(a.x - b.x) < .5 && Math.abs(a.y - b.y) < .5 && Math.abs(a.w - b.w) < .5 && Math.abs(a.h - b.h) < .5; }
+function rr(ctx, x, y, w, h, r) { ctx.beginPath(); ctx.roundRect(x, y, w, h, Math.max(0, Math.min(r, h / 2, w / 2))); }
+function fmtDur(ms) { const s = Math.max(0, Math.floor(ms / 1000)); return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`; }
+
+/* ================= 3. 断行（对应 caption_bar.compute_trailing_two_lines：词边界或任意处断行） ================= */
+const CJK = /[⺀-鿿豈-﫿＀-￯　-〿]/;
+const NO_LINE_START = /[，。、；：！？）》」』,.!?;:)\]]/;
+function tokenize(text) {
+  const out = []; let i = 0;
+  while (i < text.length) {
+    let e = i + 1;
+    if (CJK.test(text[i])) { while (e < text.length && NO_LINE_START.test(text[e])) e++; }
+    else if (text[i] !== ' ') { while (e < text.length && text[e] !== ' ' && !CJK.test(text[e])) e++; }
+    out.push([i, e]); i = e;
+  }
+  return out;
+}
+function wrapText(ctx, text, maxW) {
+  const lines = []; let ls = 0, lw = 0, le = 0;
+  for (const [s, e] of tokenize(text)) {
+    const w = ctx.measureText(text.slice(s, e)).width;
+    if (lw > 0 && lw + w > maxW && text[s] !== ' ') { lines.push([ls, le]); ls = s; lw = 0; }
+    lw += w; le = e;
+  }
+  if (le > ls) lines.push([ls, le]);
+  return lines.filter(([s, e]) => text.slice(s, e).trim());
+}
+const measure = document.createElement('canvas').getContext('2d');
+
+/* ================= 4. 悬浮条（方法名与 VoiceHudOverlay 一一对应） ================= */
+const L = { BOTTOM: 28, STATUS_W: 84, PAD_L: 16, PAD_R: 22, PAD_Y: 12, INNER_MAX: 716, MIN_W: 480, LINE_H: 28, GAP: 6, PILL_H: 32 };
+L.MAX_W = L.STATUS_W + L.PAD_L + L.INNER_MAX + L.PAD_R;
+const CAPTION_FONT = `500 19px ${SANS}`;
+const SMALL_FONT = `500 12px ${SANS}`;
+const T_IN = 180, T_MORPH = 200, T_ROLL = 200, T_FRESH = 220, T_OUT = 260, HOLD_TYPED = 1500, HOLD_ERROR = 3500;
+/* 附加提示行：录音中到来的警告提示画在底栏上沿外侧，不改变底栏几何与状态 */
+const NOTICE = { H: 24, INSET: 16, PAD_X: 10, RADIUS: 8, RISE: 4, IN: 160, SHOW: 3000, OUT: 260 };
+
+class VoiceHudA {
+  constructor() { this.reset(); }
+  reset() {
+    Object.assign(this, {
+      mode: 'hidden', form: 'pill', formAt: -1e9, inAt: -1e9, outAt: null, hideAt: null, recAt: 0,
+      stable: '', tail: '', text: '', lines: [], nLines: 0, rollAt: -1e9,
+      freshS: 0, freshE: 0, freshAt: -1e9, swap: null, msg: '', confirm: null, buttons: [], hover: null,
+      rFrom: null, rTo: null, rAt: -1e9, notice: null,
+      dotFrom: C.rec, dotTo: C.rec, dotAt: -1e9, bFrom: C.captionBorder, bTo: C.captionBorder, bAt: -1e9,
+    });
+  }
+  /* --- 计时器结算：对应 QTimer.singleShot（自动隐藏、淡出结束） --- */
+  tick(t) {
+    if (this.hideAt !== null && t >= this.hideAt && this.outAt === null) { this.outAt = this.hideAt; this.hideAt = null; }
+    if (this.outAt !== null && t >= this.outAt + T_OUT) { const keep = this.hover; this.reset(); this.hover = keep; }
+    if (this.notice && t >= this.notice.at + NOTICE.SHOW + NOTICE.OUT) this.notice = null;
+  }
+  show(t) {
+    if (this.mode === 'hidden' || this.outAt !== null) { this.inAt = t; this.outAt = null; this.rTo = null; }
+    this.hideAt = null;
+  }
+  exit(t) { if (this.mode !== 'hidden' && this.outAt === null) this.outAt = t; this.hideAt = null; }
+  setDot(c, t) { this.dotFrom = this.dotColor(t); this.dotTo = c; this.dotAt = t; }
+  setBorder(c, t) { this.bFrom = this.borderColor(t); this.bTo = c; this.bAt = t; }
+  dotColor(t) { return mix(this.dotFrom, this.dotTo, prog(t, this.dotAt, 200)); }
+  borderColor(t) { return mix(this.bFrom, this.bTo, prog(t, this.bAt, 200)); }
+
+  setIdle(t) { this.tick(t); if (['typed', 'toast', 'error', 'hidden'].includes(this.mode)) return; this.exit(t); }
+  setRecording(t) {
+    this.tick(t); this.show(t);
+    Object.assign(this, { mode: 'recording', recAt: t, stable: '', tail: '', nLines: 0, swap: null, freshS: 0, freshE: 0, notice: null });
+    this.setDot(C.rec, t); this.setBorder(C.captionBorder, t); this.relayout(t);
+  }
+  setPartial(stable, tail, t) {
+    this.tick(t);
+    if (!['recording', 'polishing'].includes(this.mode)) return;
+    if (stable.length > this.stable.length) { this.freshS = this.stable.length; this.freshE = stable.length; this.freshAt = t; }
+    this.stable = stable; this.tail = tail; this.relayout(t);
+  }
+  setPolishing(t) {
+    this.tick(t); this.show(t);
+    const merged = this.stable + this.tail;
+    if (merged.length > this.stable.length) { this.freshS = this.stable.length; this.freshE = merged.length; this.freshAt = t; }
+    Object.assign(this, { mode: 'polishing', stable: merged, tail: '' });
+    this.setDot(C.polish, t); this.setBorder(withA(C.polish, .6), t); this.relayout(t);
+  }
+  setTyped(text, t) {
+    this.tick(t); this.show(t);
+    this.swap = { at: t, text: this.text, lines: this.lines.slice(-2) };
+    Object.assign(this, { mode: 'typed', stable: text || (this.stable + this.tail), tail: '', freshS: 0, freshE: 0, nLines: 0 });
+    this.setDot(C.ok, t); this.setBorder(withA(C.ok, .7), t); this.relayout(t);
+    this.hideAt = t + HOLD_TYPED;
+  }
+  setError(msg, t) {
+    this.tick(t); this.show(t);
+    Object.assign(this, { mode: 'error', msg: msg || '操作失败' });
+    this.setDot(C.err, t); this.setBorder(withA(C.err, .7), t); this.relayout(t);
+    this.hideAt = t + HOLD_ERROR;
+  }
+  showToast(msg, kind, ms, t) {
+    this.tick(t);
+    if (this.mode === 'recording' && kind === 'warn') { this.attachNotice(msg, t); return; }
+    this.show(t);
+    Object.assign(this, { mode: 'toast', msg });
+    this.setDot({ ok: C.ok, warn: C.warn, error: C.err, info: C.accent }[kind] || C.ok, t); this.setBorder(C.border, t);
+    this.relayout(t); this.hideAt = t + ms;
+  }
+  showDeliveryConfirmation(jobId, text, onDecision, t) {
+    this.tick(t); this.show(t);
+    const pv = text.replace(/\s+/g, ' ').trim();
+    const preview = pv.length > 24 ? pv.slice(0, 24) + '…' : pv;
+    Object.assign(this, { mode: 'confirm', confirm: { jobId, onDecision }, msg: preview ? `未确认是否已输入「${preview}」，是否重发？` : '未确认文字是否已输入，是否重发？' });
+    this.setDot(C.warn, t); this.setBorder(withA(C.warn, .6), t); this.relayout(t);
+  }
+  resolve(confirmed, t) {
+    if (this.mode !== 'confirm') return;
+    const { jobId, onDecision } = this.confirm;
+    this.exit(t); onDecision(jobId, confirmed);
+  }
+  /* 录音中到来的警告提示：只记下内容与开始时间，不动 mode / 秒表 / 字幕；新提示替换旧提示 */
+  attachNotice(msg, t) { this.notice = { msg, at: t }; }
+
+  /* --- 布局：决定目标矩形（形变动画的终点） --- */
+  pillLabel(t) {
+    if (this.mode === 'recording') return `录音中 ${fmtDur(t - this.recAt)}`;
+    return this.msg;
+  }
+  relayout(t) {
+    let form, w, h;
+    const text = this.stable + this.tail;
+    if (this.mode === 'confirm') {
+      form = 'confirm';
+      measure.font = `500 13px ${SANS}`; const lw = measure.measureText(this.msg).width;
+      measure.font = SMALL_FONT; const b1 = measure.measureText('重新输入').width + 24, b2 = measure.measureText('忽略').width + 24;
+      this.btnW = [b1, b2]; w = 14 + 8 + 10 + lw + 16 + b1 + 8 + b2 + 10; h = 44;
+    } else if (['recording', 'polishing', 'typed'].includes(this.mode) && text.trim()) {
+      form = 'bar';
+      measure.font = CAPTION_FONT;
+      const lines = wrapText(measure, text, L.INNER_MAX);
+      if (this.form === 'bar' && this.mode !== 'typed' && lines.length > this.nLines && lines.length >= 3) this.rollAt = t;
+      this.text = text; this.lines = lines; this.nLines = lines.length;
+      const vis = lines.slice(-2);
+      const tw = Math.max(...vis.map(([s, e]) => measure.measureText(text.slice(s, e)).width));
+      w = Math.min(L.MAX_W, Math.max(L.MIN_W, L.STATUS_W + L.PAD_L + tw + L.PAD_R));
+      h = L.PAD_Y * 2 + vis.length * L.LINE_H + (vis.length - 1) * L.GAP;
+    } else {
+      form = 'pill';
+      measure.font = SMALL_FONT;
+      const label = this.mode === 'recording' ? '录音中 0:00' : this.msg;
+      w = Math.min(560, 14 + 8 + 8 + measure.measureText(label).width + 16); h = L.PILL_H;
+    }
+    if (form !== this.form) { this.form = form; this.formAt = t; }
+    const target = { x: SCREEN.ax + (SCREEN.aw - w) / 2, y: SCREEN.ay + SCREEN.ah - L.BOTTOM - h, w, h };
+    if (!sameRect(target, this.rTo)) { this.rFrom = this.rTo ? this.rectAt(t) : target; this.rTo = target; this.rAt = t; }
+  }
+  rectAt(t) { return this.rFrom ? lerpRect(this.rFrom, this.rTo, prog(t, this.rAt, T_MORPH)) : this.rTo; }
+
+  /* --- 绘制（paintEvent） --- */
+  paint(ctx, t) {
+    this.tick(t);
+    this.buttons = [];
+    if (this.mode === 'hidden' || !this.rTo) return;
+    const aIn = prog(t, this.inAt, T_IN), aOut = this.outAt !== null ? prog(t, this.outAt, T_OUT) : 0;
+    const r = { ...this.rectAt(t) };
+    r.y += (1 - aIn) * 8 + aOut * 6;
+    ctx.save();
+    ctx.globalAlpha = aIn * (1 - aOut);
+    rr(ctx, r.x + .5, r.y + .5, r.w - 1, r.h - 1, this.form === 'bar' ? 14 : r.h / 2);
+    ctx.fillStyle = rgba(this.form === 'bar' ? C.captionBg : C.capsuleBg); ctx.fill();
+    let bc = this.borderColor(t);
+    if (this.mode === 'polishing') bc = withA(bc, .45 + .35 * (.5 + .5 * Math.sin(t / 1200 * 2 * Math.PI)));
+    ctx.strokeStyle = rgba(bc); ctx.lineWidth = 1; ctx.stroke();
+    this.paintNotice(ctx, r, t);
+    const contentA = prog(t, this.formAt + 40, 180);
+    ctx.globalAlpha *= contentA;
+    if (this.form === 'bar') this.paintBar(ctx, r, t);
+    else if (this.form === 'confirm') this.paintConfirm(ctx, r, t);
+    else this.paintPill(ctx, r, t);
+    ctx.restore();
+  }
+  /* 附加提示行：底栏上沿外侧的小标签，下边与底栏上沿相接（盖住那段 1px 边线），不画下边线 */
+  paintNotice(ctx, r, t) {
+    const n = this.notice;
+    if (!n || t < n.at) return;
+    const pIn = prog(t, n.at, NOTICE.IN), pOut = t > n.at + NOTICE.SHOW ? prog(t, n.at + NOTICE.SHOW, NOTICE.OUT) : 0;
+    const c = C.warn;
+    ctx.save();
+    ctx.globalAlpha *= pIn * (1 - pOut);
+    ctx.font = SMALL_FONT;
+    const w = NOTICE.PAD_X + 7 + 7 + ctx.measureText(n.msg).width + NOTICE.PAD_X;
+    const x = w <= r.w - NOTICE.INSET * 2 ? r.x + NOTICE.INSET : r.x + (r.w - w) / 2;
+    const bottom = r.y + 1, top = r.y - NOTICE.H + 1 + (1 - pIn) * NOTICE.RISE, R = NOTICE.RADIUS;
+    ctx.beginPath();
+    ctx.moveTo(x, bottom); ctx.lineTo(x, top + R); ctx.arcTo(x, top, x + R, top, R);
+    ctx.lineTo(x + w - R, top); ctx.arcTo(x + w, top, x + w, top + R, R); ctx.lineTo(x + w, bottom);
+    ctx.fillStyle = rgba(C.captionBg); ctx.fill();
+    ctx.strokeStyle = rgba(withA(c, .6)); ctx.lineWidth = 1; ctx.stroke();
+    const cy = (top + bottom) / 2;
+    ctx.beginPath(); ctx.arc(x + NOTICE.PAD_X + 3.5, cy, 3.5, 0, Math.PI * 2); ctx.fillStyle = rgba(c); ctx.fill();
+    ctx.fillStyle = C.text; ctx.textBaseline = 'middle'; ctx.fillText(n.msg, x + NOTICE.PAD_X + 14, cy + .5);
+    ctx.restore();
+  }
+  paintStatusIcon(ctx, cx, cy, t) {
+    const c = this.dotColor(t);
+    if (this.mode === 'polishing') {
+      const a = t / 900 * 2 * Math.PI;
+      ctx.beginPath(); ctx.arc(cx, cy, 5.5, a, a + Math.PI * 1.5);
+      ctx.strokeStyle = rgba(c); ctx.lineWidth = 2; ctx.lineCap = 'round'; ctx.stroke();
+    } else if (this.mode === 'typed') {
+      const p = prog(t, this.swap ? this.swap.at : 0, 240);
+      ctx.beginPath(); ctx.moveTo(cx - 5, cy); ctx.lineTo(cx - 1.5, cy + 3.5); ctx.lineTo(cx + 5.5, cy - 4.5);
+      ctx.setLineDash([16, 16]); ctx.lineDashOffset = 16 * (1 - p);
+      ctx.strokeStyle = rgba(c); ctx.lineWidth = 2; ctx.lineCap = 'round'; ctx.lineJoin = 'round'; ctx.stroke(); ctx.setLineDash([]);
+    } else {
+      const pulse = this.mode === 'recording' ? .55 + .45 * Math.cos(t / 1200 * 2 * Math.PI) : 1;
+      ctx.beginPath(); ctx.arc(cx, cy, 4, 0, Math.PI * 2); ctx.fillStyle = rgba(c, pulse); ctx.fill();
+    }
+  }
+  paintPill(ctx, r, t) {
+    const cy = r.y + r.h / 2;
+    this.paintStatusIcon(ctx, r.x + 18, cy, t);
+    ctx.font = SMALL_FONT; ctx.fillStyle = C.text; ctx.textBaseline = 'middle';
+    let label = this.pillLabel(t);
+    const maxW = r.w - 30 - 14;
+    while (label.length > 1 && ctx.measureText(label).width > maxW) label = label.slice(0, -2) + '…';
+    ctx.fillText(label, r.x + 30, cy + .5);
+  }
+  paintBar(ctx, r, t) {
+    // 状态列：图标 + 秒表/状态字
+    const cy = r.y + r.h / 2;
+    this.paintStatusIcon(ctx, r.x + 18, cy, t);
+    ctx.textBaseline = 'middle';
+    if (this.mode === 'recording') { ctx.font = `500 12px ${MONO}`; ctx.fillStyle = C.muted; ctx.fillText(fmtDur(t - this.recAt), r.x + 30, cy + .5); }
+    else { ctx.font = SMALL_FONT; ctx.fillStyle = rgba(this.dotColor(t)); ctx.fillText(this.mode === 'typed' ? '已输入' : '润色', r.x + 30, cy + .5); }
+    ctx.fillStyle = C.border; ctx.fillRect(r.x + L.STATUS_W, r.y + 10, 1, r.h - 20);
+    // 文字区（裁剪）
+    ctx.save();
+    ctx.beginPath(); ctx.rect(r.x + L.STATUS_W + 1, r.y + 3, r.w - L.STATUS_W - 4, r.h - 6); ctx.clip();
+    ctx.font = CAPTION_FONT;
+    const x0 = r.x + L.STATUS_W + L.PAD_L, y0 = r.y + L.PAD_Y, step = L.LINE_H + L.GAP;
+    if (this.swap && t < this.swap.at + 260) {
+      const first = t < this.swap.at + 130;
+      ctx.globalAlpha *= first ? 1 - prog(t, this.swap.at, 130) : prog(t, this.swap.at + 130, 130);
+      if (first) { this.swap.lines.forEach(([s, e], i) => this.drawSeg(ctx, this.swap.text, s, e, x0, y0 + i * step + L.LINE_H / 2, this.swap.text.length, t)); ctx.restore(); return; }
+    }
+    const n = this.lines.length, rollP = prog(t, this.rollAt, T_ROLL), off = (1 - rollP) * step;
+    const from = Math.max(0, n - 2 - (rollP < 1 ? 1 : 0));
+    for (let i = from; i < n; i++) {
+      const y = y0 + (i - Math.max(0, n - 2)) * step + off + L.LINE_H / 2;
+      ctx.save();
+      if (i < n - 2) ctx.globalAlpha *= 1 - rollP;
+      this.drawSeg(ctx, this.text, this.lines[i][0], this.lines[i][1], x0, y, this.stable.length, t);
+      ctx.restore();
+    }
+    ctx.restore();
+  }
+  /* 一行分三段：已确认 / 刚确认（颜色过渡中）/ 未确认尾巴（灰 + 虚线下划线） */
+  drawSeg(ctx, text, s, e, x, y, stableLen, t) {
+    const cuts = [s, e, this.freshS, this.freshE, stableLen].filter(v => v > s && v < e);
+    const pts = [...new Set([s, ...cuts, e])].sort((a, b) => a - b);
+    ctx.textBaseline = 'middle';
+    let cx = x;
+    for (let k = 0; k < pts.length - 1; k++) {
+      const a = pts[k], b = pts[k + 1], str = text.slice(a, b), w = ctx.measureText(str).width;
+      let c;
+      if (a >= stableLen) c = C.tail;
+      else if (a >= this.freshS && a < this.freshE) c = mix(C.tail, C.stable, prog(t, this.freshAt, T_FRESH));
+      else c = C.stable;
+      ctx.fillStyle = rgba(c); ctx.fillText(str, cx, y + .5);
+      if (a >= stableLen) {
+        ctx.save(); ctx.setLineDash([3, 3]); ctx.strokeStyle = rgba(C.tail); ctx.lineWidth = 1;
+        ctx.beginPath(); ctx.moveTo(cx, y + 13.5); ctx.lineTo(cx + w, y + 13.5); ctx.stroke(); ctx.restore();
+      }
+      cx += w;
+    }
+  }
+  paintConfirm(ctx, r, t) {
+    const cy = r.y + r.h / 2;
+    ctx.beginPath(); ctx.arc(r.x + 18, cy, 4, 0, Math.PI * 2); ctx.fillStyle = rgba(C.warn); ctx.fill();
+    ctx.font = `500 13px ${SANS}`; ctx.fillStyle = C.text; ctx.textBaseline = 'middle';
+    ctx.fillText(this.msg, r.x + 32, cy + .5);
+    const [b1, b2] = this.btnW;
+    const bx2 = r.x + r.w - 10 - b2, bx1 = bx2 - 8 - b1, by = cy - 14;
+    this.drawButton(ctx, 'resend', '重新输入', bx1, by, b1, 28, true);
+    this.drawButton(ctx, 'ignore', '忽略', bx2, by, b2, 28, false);
+  }
+  drawButton(ctx, id, label, x, y, w, h, primary) {
+    const hov = this.hover === id;
+    rr(ctx, x, y, w, h, 6);
+    ctx.fillStyle = primary ? (hov ? '#79c0ff' : C.accent) : C.surface2; ctx.fill();
+    ctx.strokeStyle = primary ? C.accent : (hov ? C.accent : C.border); ctx.lineWidth = 1; ctx.stroke();
+    ctx.font = `600 12px ${SANS}`; ctx.fillStyle = primary ? C.bgDark : (hov ? C.accent : C.text);
+    ctx.textAlign = 'center'; ctx.fillText(label, x + w / 2, y + h / 2 + .5); ctx.textAlign = 'left';
+    this.buttons.push({ id, x, y, w, h });
+  }
+  hitTest(x, y) { const b = this.buttons.find(b => x >= b.x && x <= b.x + b.w && y >= b.y && y <= b.y + b.h); return b ? b.id : null; }
+}
+
+/* ================= 5. 演示脚本：一句完整语音 + 错误 + 投递未确认 + 非语音提示 ================= */
+const RAW = '帮我把 Linux 下的热键冲突问题整理一下，重点看 GNOME Wayland 跟 XWayland 的差异，明天上午十点前发给设计组，顺便确认一下语音悬浮窗选哪套动效。';
+const FINAL = '帮我把 Linux 下的热键冲突问题整理一下，重点看 GNOME Wayland 与 XWayland 的差异。明天上午十点前发给设计组，并确认语音悬浮窗选用哪套动效。';
+const MISHEAR = [['热键', '热剑'], ['设计组', '设计租'], ['动效', '洞效']];
+/* 第二句：录音中途到来一条警告提示，演示附加提示行 */
+const RAW2 = '下周三下午两点约产品和测试一起过一遍截屏翻译的验收清单，重点看译文对位、复制格式和点击空白处关闭这几项。';
+const FINAL2 = '下周三下午两点约产品和测试一起过一遍截屏翻译的验收清单，重点看译文对位、复制格式和点击空白处关闭。';
+const MISHEAR2 = [['验收', '演收'], ['对位', '对味']];
+function streamSteps(raw = RAW, mishear = MISHEAR) {
+  const steps = []; let sl = 0, k = 0;
+  while (sl < raw.length) {
+    const tl = 4 + (k * 3) % 4;
+    let tail = raw.slice(sl, sl + tl);
+    for (const [ok, bad] of mishear) {
+      const at = raw.indexOf(ok);
+      if (at >= sl && at < sl + tl && k % 2 === 0) tail = tail.replace(ok.slice(0, Math.min(ok.length, sl + tl - at)), bad.slice(0, Math.min(ok.length, sl + tl - at)));
+    }
+    steps.push({ stable: raw.slice(0, sl), tail });
+    sl += 2 + (k * 5) % 3; k++;
+  }
+  steps.push({ stable: raw, tail: '' });
+  return steps;
+}
+const TL = []; const PH = {}; let T = 0;
+function add(dt, ev, phase) { T += dt; TL.push({ at: T, ev }); if (phase && PH[phase] === undefined) PH[phase] = T; }
+function buildTimeline() {
+  add(900, { event: 'recording' }, 'rec');
+  streamSteps().forEach((s, i) => add(i === 0 ? 1300 : 230, { event: 'partial', stable_text: s.stable, tail_text: s.tail }, 'stream'));
+  add(700, { event: 'polishing' }, 'polish');
+  add(1500, { event: 'typed', text: FINAL }, 'typed');
+  add(300, { event: 'idle' });
+  add(900, { event: '_mark' }, 'fade');
+  add(1800, { event: '_mark' });
+  add(0, { event: 'recording' }, 'notice');
+  streamSteps(RAW2, MISHEAR2).forEach((s, i) => {
+    add(i === 0 ? 900 : 420, { event: 'partial', stable_text: s.stable, tail_text: s.tail });
+    if (i === 2) add(0, { event: 'history_write_failed', message: '历史记录写入失败' });
+  });
+  add(900, { event: 'polishing' });
+  add(1300, { event: 'typed', text: FINAL2 });
+  add(300, { event: 'idle' });
+  add(2600, { event: '_mark' });
+  add(0, { event: 'recording' }, 'error');
+  add(1000, { event: 'partial', stable_text: '把这段', tail_text: '话发给' });
+  add(500, { event: 'partial', stable_text: '把这段话发', tail_text: '给小王' });
+  add(700, { event: 'error', message: '未检测到麦克风输入，请检查输入设备' });
+  add(4300, { event: 'idle' });
+  add(600, { event: 'delivery_unknown', job_id: 'job-7f3a', text: FINAL }, 'confirm');
+  add(5200, { event: '_click', confirmed: false });
+  add(1200, { event: 'history_write_failed', message: '历史记录写入失败' }, 'warn');
+  add(3800, { event: '_mark' }, 'end');
+}
+buildTimeline();
+const END = T;
+const PHASES = [['idle', '空闲'], ['rec', '按下 · 录音开始'], ['stream', '流式识别'], ['polish', '松手 · 润色中'], ['typed', '已输入'], ['fade', '淡出'], ['notice', '录音中 · 附加提示行'], ['error', '错误'], ['confirm', '投递未确认（可点）'], ['warn', '警告提示']];
+const PH_ORDER = ['rec', 'stream', 'polish', 'typed', 'fade', 'notice', 'error', 'confirm', 'warn', 'end'];
+function phaseEnd(p) { const i = PH_ORDER.indexOf(p); return PH[PH_ORDER[i + 1]] ?? END; }
+
+/* ================= 6. 事件分发（对应 _desktop/event_stream.py） ================= */
+const hud = new VoiceHudA();
+const logEl = document.getElementById('log'); const logLines = [];
+function log(s) { logLines.unshift(s); logLines.length = Math.min(logLines.length, 9); logEl.innerHTML = logLines.join('\n'); }
+function short(s) { return s.length > 16 ? '…' + s.slice(-16) : s; }
+function fmtEv(ev) {
+  if (ev.event === 'partial') return `<b>partial</b>  stable_text="${short(ev.stable_text)}"  tail_text="${ev.tail_text}"`;
+  if (ev.event === 'typed') return `<b>typed</b>  text="${short(ev.text)}"`;
+  if (ev.event === 'delivery_unknown') return `<b>delivery_unknown</b>  job_id="${ev.job_id}"  text="${short(ev.text)}"`;
+  return `<b>${ev.event}</b>` + (ev.message ? `  message="${ev.message}"` : '');
+}
+const deliverEl = document.getElementById('deliver');
+function onDecision(jobId, confirmed) { log(`→ 用户点击「${confirmed ? '重新输入' : '忽略'}」：on_decision("${jobId}", ${confirmed ? 'True' : 'False'})`); }
+function dispatch(ev, t) {
+  if (ev.event === '_mark') return;
+  if (ev.event === '_click') { hud.resolve(ev.confirmed, t); return; }
+  log(fmtEv(ev));
+  switch (ev.event) {
+    case 'idle': if (hud.mode !== 'toast') hud.setIdle(t); break;
+    case 'recording': hud.setRecording(t); deliverEl.textContent = ''; break;
+    case 'partial': hud.setPartial(ev.stable_text, ev.tail_text, t); break;
+    case 'polishing': hud.setPolishing(t); break;
+    case 'typed': hud.setTyped(ev.text, t); deliverEl.textContent = ev.text; break;
+    case 'error': hud.setError(ev.message || '操作失败', t); break;
+    case 'history_write_failed': hud.showToast(ev.message, 'warn', 3000, t); break;
+    case 'delivery_unknown': hud.showDeliveryConfirmation(ev.job_id, ev.text, onDecision, t); break;
+  }
+}
+
+/* ================= 7. 播放器：自动循环 / 按状态单步 ================= */
+let auto = true, playing = true, vt = 0, idx = 0, stopAt = null, lastNow = performance.now(), curPhase = null;
+function jump(target, now) {
+  hud.reset(); deliverEl.textContent = ''; logLines.length = 0; logEl.innerHTML = '';
+  vt = target; idx = 0;
+  while (idx < TL.length && TL[idx].at <= vt) { dispatch(TL[idx].ev, now - (vt - TL[idx].at)); idx++; }
+}
+function playPhase(p) {
+  auto = false; curPhase = p; const now = performance.now();
+  if (p === 'idle') { jump(0, now); playing = false; }
+  else { jump(PH[p] - 1, now); stopAt = phaseEnd(p) - 1; playing = true; }
+  syncButtons();
+}
+function startAuto() { auto = true; playing = true; stopAt = null; jump(0, performance.now()); syncButtons(); }
+const phaseBox = document.getElementById('phase-btns');
+PHASES.forEach(([p, label]) => {
+  const b = document.createElement('button'); b.textContent = label; b.dataset.p = p;
+  b.onclick = () => playPhase(p); phaseBox.appendChild(b);
+});
+document.getElementById('btn-auto').onclick = () => startAuto();
+function currentPhase() { let cur = 'idle'; for (const p of PH_ORDER) if (PH[p] !== undefined && vt >= PH[p] - 1) cur = p; return cur; }
+function syncButtons() {
+  document.getElementById('btn-auto').classList.toggle('on', auto);
+  const cur = auto ? currentPhase() : curPhase;
+  phaseBox.querySelectorAll('button').forEach(b => b.classList.toggle('on', b.dataset.p === cur));
+}
+
+/* ================= 8. 视口：1:1 实际像素 / 全屏缩略 ================= */
+const vp = document.getElementById('vp'), screenEl = document.getElementById('screen');
+const FOCUS = { x: 1720, y: 1330 };
+let fit = false;
+function layoutView() {
+  const W = vp.clientWidth;
+  if (fit) { const k = W / SCREEN.w; vp.style.height = Math.round(SCREEN.h * k) + 'px'; screenEl.style.transform = `scale(${k})`; }
+  else {
+    vp.style.height = '460px'; const H = 460;
+    const tx = Math.min(0, Math.max(W - SCREEN.w, W / 2 - FOCUS.x)), ty = Math.min(0, Math.max(H - SCREEN.h, H / 2 - FOCUS.y));
+    screenEl.style.transform = `translate(${tx}px,${ty}px)`;
+  }
+  document.getElementById('vp-tag').textContent = fit ? '3440×1440 屏幕 · 全屏缩略（等比）' : '3440×1440 屏幕 · 1:1 局部（底部居中）';
+  document.getElementById('btn-view').textContent = fit ? '视图：全屏缩略' : '视图：1:1 实际像素';
+}
+document.getElementById('btn-view').onclick = () => { fit = !fit; layoutView(); };
+window.addEventListener('resize', layoutView);
+
+const canvas = document.getElementById('hud'), ctx = canvas.getContext('2d');
+function toScreen(e) { const r = canvas.getBoundingClientRect(); return [(e.clientX - r.left) * SCREEN.w / r.width, (e.clientY - r.top) * SCREEN.h / r.height]; }
+canvas.addEventListener('mousemove', e => { const id = hud.hitTest(...toScreen(e)); hud.hover = id; canvas.style.cursor = id ? 'pointer' : 'default'; });
+canvas.addEventListener('click', e => { const id = hud.hitTest(...toScreen(e)); if (id) hud.resolve(id === 'resend', performance.now()); });
+
+/* ================= 9. 帧循环（对应 16ms QTimer + update()） ================= */
+function frame(now) {
+  const dt = Math.min(100, now - lastNow); lastNow = now;
+  if (playing) {
+    vt += dt;
+    while (idx < TL.length && TL[idx].at <= vt) { dispatch(TL[idx].ev, now - (vt - TL[idx].at)); idx++; }
+    if (stopAt !== null && vt >= stopAt) { playing = false; stopAt = null; }
+    if (auto && vt >= END) jump(0, now);
+  }
+  ctx.clearRect(0, 0, SCREEN.w, SCREEN.h);
+  hud.paint(ctx, now);
+  if (auto) syncButtons();
+  requestAnimationFrame(frame);
+}
+/* URL 参数 ?phase=stream&off=2000&view=fit：直接定格到某一状态（便于截图对比） */
+(function init() {
+  const q = new URLSearchParams(location.search);
+  if (q.get('view') === 'fit') fit = true;
+  layoutView();
+  if (q.get('phase')) {
+    const p = q.get('phase'); auto = false; curPhase = p;
+    jump((PH[p] ?? 0) + Number(q.get('off') || 0), performance.now()); playing = false; syncButtons();
+  } else startAuto();
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>

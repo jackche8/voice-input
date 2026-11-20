@@ -176,6 +176,9 @@ def test_daemon_entry_is_thin():
         "StudioTrayIcon",
         "hotkey_rig.reset_voice()",
         "event_loop.request_stop()",
+        # 快捷键组件失败经现有 error 事件进底栏，事件流每次连上重发（main() 需要真实 Qt/平台/单例锁，测试里跑不了，只能扫接线）
+        "on_error=status.set_hotkey_error",
+        "on_connected=status.resend_hotkey_error",
     ):
         assert needed in src
     assert src.index("event_loop.request_stop()") < src.index("api.close()") < src.index("event_loop.stop(")

@@ -8,7 +8,7 @@ import pytest
 
 from _config import ConfigStore, apply_config_update
 from _contracts import AppConfigUpdate, ErrorCode, LogicError
-from _hotkey import HOTKEY_MAIN_KEYS, ensure_distinct_hotkeys, validate_hotkey
+from _hotkey import HOTKEY_MAIN_KEYS, ensure_distinct_hotkeys, parse_hotkey_evdev, validate_hotkey
 
 
 @pytest.mark.parametrize(
@@ -74,6 +74,21 @@ def test_main_key_set_is_the_approved_plan_set():
         | {"grave", "space", "tab", "enter"}
         | {f"f{i}" for i in range(1, 13)}
     )
+
+
+@pytest.mark.parametrize(
+    ("raw", "why"),
+    [
+        ("hyper+z", "不认识的修饰键"),  # GNOME 实际绑定可能带的修饰键，不能当成少一个修饰键的组合
+        ("ctrl+meta+z", "不认识的修饰键"),
+        ("ctrl+alt+nosuchkey", "不认识的主键"),
+        ("ctrl+alt+", "不认识的主键"),
+    ],
+)
+def test_evdev_combo_parse_rejects_unknown_modifier_or_key(raw: str, why: str):
+    with pytest.raises(ValueError) as info:
+        parse_hotkey_evdev(raw)
+    assert why in str(info.value) and repr(raw) in str(info.value)
 
 
 def test_duplicates_rejected_with_all_values():

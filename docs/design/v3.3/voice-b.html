@@ -1,0 +1,643 @@
+<!doctype html>
+<!--
+  v3.3 语音输入悬浮窗 · 模板 B「顶部灵动岛」（需新增数据：麦克风电平）
+  显示的数据：现有事件 recording / partial(stable_text, tail_text) / polishing / typed(text) / error(message)
+             / busy(message) / history_write_failed(message) / delivery_unknown(job_id, text)
+             + 【需新增数据：麦克风电平 level 0–1，约 20Hz，来源 _platform/_common.py:44 SoundDeviceSource.start
+               的 callback 收到的 int16 PCM 帧计算 RMS，经产品事件流新增 level 事件推给桌面端】
+  触发的动作：只有「投递未确认」形态可点击：重新输入 → on_decision(job_id, True)；忽略 → on_decision(job_id, False)。
+  基于：_ui_desktop/voice_hud.py（公共方法不变，新增 set_level）、_ui_desktop/caption_bar.py（断行复用）、
+       _ui_desktop/theme.py、_desktop/event_stream.py（新增 level 分支）。
+  形态变化：左下角胶囊 + 底部字幕条 → 顶部居中一个会伸缩的“岛”。
+  本页用 <canvas> 绘制，只用 QPainter 有对应的操作（圆角矩形、渐变画笔、文字、弧线、虚线描边）。
+-->
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>v3.3 语音悬浮窗 · 模板 B「顶部灵动岛」（需新增麦克风电平）</title>
+<style>
+:root {
+  --font-sans: "Noto Sans CJK SC", "PingFang SC", "Microsoft YaHei", "Segoe UI", sans-serif;
+  --font-mono: "JetBrains Mono", "Noto Sans Mono CJK SC", monospace;
+  --bg: #0d1117; --surface: #161b22; --surface-2: #1f2630; --border: #30363d;
+  --text: #e6edf3; --muted: #8b949e; --accent: #58a6ff; --ok: #3fb950; --warn: #d29922; --err: #f85149;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: #090c10; color: var(--text); font-family: var(--font-sans); font-size: 14px; line-height: 1.55; }
+header.bar { position: sticky; top: 0; z-index: 10; background: #090c10; border-bottom: 1px solid var(--border); padding: 10px 18px; display: flex; flex-direction: column; gap: 8px; }
+.title { display: flex; gap: 12px; align-items: baseline; flex-wrap: wrap; }
+.title strong { color: var(--accent); font-size: 15px; }
+.title span { color: var(--muted); font-size: 12px; }
+.ctrl { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.ctrl button { font: inherit; font-size: 12px; padding: 4px 11px; border-radius: 999px; border: 1px solid var(--border); background: var(--surface); color: #c9d1d9; cursor: pointer; }
+.ctrl button:hover { border-color: var(--accent); color: var(--accent); }
+.ctrl button.on { background: var(--accent); border-color: var(--accent); color: #090c10; font-weight: 700; }
+.ctrl .sep { width: 1px; height: 18px; background: var(--border); margin: 0 4px; }
+main { padding: 14px 18px 40px; display: flex; flex-direction: column; gap: 14px; }
+.vp { position: relative; overflow: hidden; border: 1px solid var(--border); border-radius: 10px; background: #000; height: 460px; }
+.vp .tag { position: absolute; right: 10px; bottom: 8px; z-index: 5; font-size: 11px; color: var(--muted); background: rgba(13,17,23,.85); border: 1px solid var(--border); border-radius: 6px; padding: 2px 8px; }
+.screen { position: absolute; left: 0; top: 0; width: 3440px; height: 1440px; transform-origin: 0 0; }
+.screen canvas { position: absolute; left: 0; top: 0; }
+.wall { position: absolute; inset: 0; background: linear-gradient(135deg, #1b2433 0%, #232a3d 45%, #2d2240 100%); }
+.topbar { position: absolute; left: 0; top: 0; right: 0; height: 32px; background: #000; color: #ddd; font-size: 14px; display: flex; align-items: center; justify-content: space-between; padding: 0 16px; }
+.win { position: absolute; border-radius: 12px; overflow: hidden; box-shadow: 0 10px 40px rgba(0,0,0,.45); }
+.win .tb { height: 44px; display: flex; align-items: center; padding: 0 18px; font-size: 15px; font-weight: 600; }
+.win.dark { background: #1e1e1e; color: #c9d1d9; } .win.dark .tb { background: #2a2a2a; }
+.win.light { background: #ffffff; color: #1f2328; } .win.light .tb { background: #ebedf0; }
+.tabs { display: flex; gap: 4px; padding: 6px 12px 0; background: #dfe3e8; }
+.tabs span { padding: 6px 16px; border-radius: 8px 8px 0 0; font-size: 14px; background: #eef1f4; color: #57606a; }
+.tabs span.on { background: #fff; color: #1f2328; }
+.msg { margin: 18px 28px; max-width: 900px; padding: 12px 16px; border-radius: 12px; background: #f2f4f7; font-size: 17px; }
+.msg.me { margin-left: auto; background: #dbeafe; }
+.inputbox { position: absolute; left: 28px; right: 28px; bottom: 26px; height: 92px; border: 2px solid #3b82f6; border-radius: 12px; padding: 14px 16px; font-size: 17px; color: #1f2328; }
+.inputbox .caret { display: inline-block; width: 2px; height: 22px; background: #1f2328; vertical-align: -4px; animation: blink 1s steps(1) infinite; }
+@keyframes blink { 50% { opacity: 0; } }
+.filelist div { padding: 9px 20px; font-size: 15px; border-bottom: 1px solid #2c2c2c; }
+.notes { display: grid; grid-template-columns: repeat(auto-fit, minmax(330px, 1fr)); gap: 12px; }
+.card { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 12px 16px; font-size: 13px; }
+.card h3 { margin: 0 0 8px; font-size: 14px; }
+.card ul { margin: 0; padding-left: 18px; color: #c9d1d9; }
+.card li { margin: 3px 0; }
+.card code { font-family: var(--font-mono); font-size: 12px; color: #79c0ff; }
+.new { color: var(--warn); font-weight: 700; }
+table.spec { width: 100%; border-collapse: collapse; font-size: 12px; }
+table.spec td, table.spec th { border-bottom: 1px solid var(--border); padding: 4px 6px; text-align: left; vertical-align: top; }
+table.spec th { color: var(--muted); font-weight: 600; }
+.log { font-family: var(--font-mono); font-size: 12px; color: #c9d1d9; background: #0b0f14; border: 1px solid var(--border); border-radius: 8px; padding: 8px 12px; height: 168px; overflow: hidden; white-space: pre; }
+.log b { color: var(--accent); font-weight: 600; }
+.log i { color: var(--warn); font-style: normal; }
+</style>
+</head>
+<body>
+<header class="bar">
+  <div class="title">
+    <strong>模板 B「顶部灵动岛」</strong>
+    <span>顶部居中一个会伸缩的岛：录音时是带电平条的小胶囊，有文字时向下展开成字幕卡，完成后收回消失 · 动效活泼：带回弹的形变 · <b class="new">需新增数据：麦克风电平</b></span>
+  </div>
+  <div class="ctrl">
+    <button id="btn-auto" class="on">▶ 自动循环</button>
+    <span class="sep"></span>
+    <span id="phase-btns" style="display:contents"></span>
+    <span class="sep"></span>
+    <button id="btn-view">视图：1:1 实际像素</button>
+  </div>
+</header>
+
+<main>
+  <div class="vp" id="vp">
+    <div class="tag" id="vp-tag"></div>
+    <div class="screen" id="screen">
+      <div class="wall"></div>
+      <div class="topbar"><span>活动</span><span>11月19日 14:32</span><span>⚡ 🔊 ⏻</span></div>
+      <div class="win dark" style="left:60px;top:90px;width:640px;height:1200px">
+        <div class="tb">文件</div>
+        <div class="filelist"><div>📁 docs</div><div>📁 _ui_desktop</div><div>📄 voice_hud.py</div><div>📄 caption_bar.py</div><div>📄 theme.py</div></div>
+      </div>
+      <div class="win light" style="left:780px;top:90px;width:1880px;height:1200px">
+        <div class="tabs"><span class="on">设计组 · 聊天</span><span>热键冲突记录</span><span>GNOME 文档</span></div>
+        <div class="tb">设计组 · 聊天（输入焦点在下方输入框）</div>
+        <div class="msg">下午把语音悬浮窗的三套动效发群里，大家投票。</div>
+        <div class="msg me">好的，我先把热键冲突的问题整理一下。</div>
+        <div class="inputbox"><span id="deliver"></span><span class="caret"></span></div>
+      </div>
+      <div class="win dark" style="left:2740px;top:90px;width:640px;height:1200px">
+        <div class="tb">浏览器</div>
+        <div style="padding:20px;font-size:15px;color:#8b949e">GNOME Wayland · XWayland 输入法与热键文档…</div>
+      </div>
+      <canvas id="hud" width="3440" height="1440"></canvas>
+    </div>
+  </div>
+
+  <div class="notes">
+    <div class="card">
+      <h3>显示的数据</h3>
+      <ul>
+        <li>现有：<code>recording</code>（本地秒表）、<code>partial.stable_text / tail_text</code>、<code>polishing</code>、<code>typed.text</code>、<code>error.message</code>、<code>busy.message</code>、<code>history_write_failed.message</code>、<code>delivery_unknown.job_id / text</code></li>
+        <li><span class="new">需新增数据：麦克风电平</span> <code>level</code>（0–1，约 20Hz）。来源：<code>_platform/_common.py:44</code> <code>SoundDeviceSource.start</code> 回调里的 int16 PCM 帧算 RMS，节流到 20Hz，经产品事件流新增 <code>{"event":"level","value":0.42}</code> 推给桌面端</li>
+        <li>不接电平时：电平条静止为 5 个短条，<b>不做假动画</b></li>
+      </ul>
+    </div>
+    <div class="card">
+      <h3>触发的动作</h3>
+      <ul>
+        <li>只有「投递未确认」形态可点击：<b>重新输入</b> → <code>on_decision(job_id, True)</code>；<b>忽略</b> → <code>on_decision(job_id, False)</code></li>
+        <li>其余状态鼠标穿透、不抢焦点</li>
+      </ul>
+    </div>
+    <div class="card">
+      <h3>基于哪些现有文件改造</h3>
+      <ul>
+        <li><code>_ui_desktop/voice_hud.py</code>：公共方法不变，新增 <code>set_level(value)</code>；左下角胶囊与底部字幕条两个窗口合并为一个顶部窗口</li>
+        <li><code>_ui_desktop/caption_bar.py</code>：<code>compute_trailing_two_lines</code> 复用（行宽 640）</li>
+        <li><code>_desktop/event_stream.py</code>：新增 <code>level</code> 分支；<code>_v3/sessions.py</code> 或 <code>_desktop/voice.py</code> 负责产出电平事件（由方案确定）</li>
+        <li><code>_ui_desktop/theme.py</code>：岛底色用 <code>CAPTION_BG_RGBA</code>，状态色用 <code>STATE_*</code></li>
+      </ul>
+    </div>
+    <div class="card">
+      <h3>QPainter 实现要点</h3>
+      <ul>
+        <li>窗口固定 680×150 放在顶部居中、透明穿透；岛的形变只在 paintEvent 里改 QRectF 与圆角半径（半径 = min(高/2, 20)）</li>
+        <li>回弹：<code>QEasingCurve.OutBack</code>（overshoot 1.7），收回用 OutCubic</li>
+        <li>电平条：保存最近 5 个 level 采样，每条高 = 4 + 14 × level，<code>fillRect</code> 圆角</li>
+        <li>“润色中”流光：<code>QLinearGradient</code> 作为 QPen 的画刷画文字，渐变起点随时间平移</li>
+        <li>出错抖动：x 偏移 = 6·sin(t/30)·(1−p)，360ms</li>
+        <li>上卷、颜色过渡与模板 A 相同（分段 drawText + 裁剪）</li>
+      </ul>
+    </div>
+    <div class="card">
+      <h3>动效参数</h3>
+      <table class="spec">
+        <tr><th>动作</th><th>时长</th><th>曲线</th></tr>
+        <tr><td>出现：小圆点 → 胶囊</td><td>360ms</td><td>OutBack</td></tr>
+        <tr><td>胶囊 → 字幕卡（向下展开）</td><td>340ms</td><td>OutBack</td></tr>
+        <tr><td>新行上卷 / 颜色过渡</td><td>200 / 220ms</td><td>OutCubic</td></tr>
+        <tr><td>润色流光</td><td>1.1s 周期</td><td>线性</td></tr>
+        <tr><td>已输入保持 → 收回胶囊 → 缩成点消失</td><td>1.5s → 280ms → 200ms</td><td>OutCubic</td></tr>
+        <tr><td>出错抖动 + 保持</td><td>360ms + 3.5s</td><td>衰减正弦</td></tr>
+      </table>
+    </div>
+    <div class="card">
+      <h3>超宽屏适配与取舍</h3>
+      <ul>
+        <li>顶部居中，紧贴 GNOME 顶栏下方 10px；3440 宽下与视线中线对齐</li>
+        <li>不遮挡窗口底部输入框（语音常用于聊天、终端，输入框多在底部）</li>
+        <li>取舍：展开时会盖住最大化窗口的标签栏 / 标题栏约 110px；需要新增电平数据</li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="card">
+    <h3>事件流（现有 SSE 事件 + <span class="new">新增 level 事件</span>，level 只在此处每秒记一条示意）</h3>
+    <div class="log" id="log"></div>
+  </div>
+</main>
+
+<script>
+'use strict';
+/* ================= 1. 主题令牌（_ui_desktop/theme.py） ================= */
+const C = {
+  capsuleBg: [13, 17, 23, 232 / 255], border: '#30363d', text: '#e6edf3', muted: '#8b949e',
+  rec: '#f85149', polish: '#58a6ff', busy: '#d29922', ok: '#3fb950', warn: '#d29922', err: '#f85149',
+  accent: '#58a6ff', accentHover: '#79c0ff', captionBg: [13, 17, 23, 240 / 255],
+  stable: '#f8fafc', tail: '#94a3b8', surface2: '#1f2630', bgDark: '#0d1117',
+};
+const SANS = '"Noto Sans CJK SC","PingFang SC","Microsoft YaHei","Segoe UI",sans-serif';
+const MONO = '"JetBrains Mono","Noto Sans Mono CJK SC",monospace';
+const SCREEN = { w: 3440, h: 1440, ax: 0, ay: 32, aw: 3440, ah: 1408 };
+
+/* ================= 2. 小工具 ================= */
+function hex(h) { const n = parseInt(h.slice(1), 16); return [n >> 16 & 255, n >> 8 & 255, n & 255, 1]; }
+function col(c) { return typeof c === 'string' ? hex(c) : (c.length === 3 ? [...c, 1] : c); }
+function mix(a, b, p) { a = col(a); b = col(b); return a.map((v, i) => v + (b[i] - v) * p); }
+function withA(c, a) { c = col(c); return [c[0], c[1], c[2], a]; }
+function rgba(c, mul = 1) { c = col(c); return `rgba(${c[0] | 0},${c[1] | 0},${c[2] | 0},${(c[3] * mul).toFixed(3)})`; }
+const clamp01 = x => x < 0 ? 0 : x > 1 ? 1 : x;
+const EASE = {
+  outCubic: p => 1 - Math.pow(1 - p, 3),
+  outBack: p => { const c1 = 1.70158, c3 = c1 + 1; return 1 + c3 * Math.pow(p - 1, 3) + c1 * Math.pow(p - 1, 2); },
+  linear: p => p,
+};
+function prog(t, t0, dur, e = 'outCubic') { return EASE[e](clamp01((t - t0) / dur)); }
+const lerp = (a, b, p) => a + (b - a) * p;
+function lerpRect(a, b, p) { return { x: lerp(a.x, b.x, p), y: lerp(a.y, b.y, p), w: lerp(a.w, b.w, p), h: lerp(a.h, b.h, p) }; }
+function sameRect(a, b) { return a && b && Math.abs(a.x - b.x) < .5 && Math.abs(a.y - b.y) < .5 && Math.abs(a.w - b.w) < .5 && Math.abs(a.h - b.h) < .5; }
+function rr(ctx, x, y, w, h, r) { ctx.beginPath(); ctx.roundRect(x, y, Math.max(0, w), Math.max(0, h), Math.max(0, Math.min(r, h / 2, w / 2))); }
+function fmtDur(ms) { const s = Math.max(0, Math.floor(ms / 1000)); return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`; }
+
+/* ================= 3. 断行（对应 compute_trailing_two_lines） ================= */
+const CJK = /[⺀-鿿豈-﫿＀-￯　-〿]/;
+const NO_LINE_START = /[，。、；：！？）》」』,.!?;:)\]]/;
+function tokenize(text) {
+  const out = []; let i = 0;
+  while (i < text.length) {
+    let e = i + 1;
+    if (CJK.test(text[i])) { while (e < text.length && NO_LINE_START.test(text[e])) e++; }
+    else if (text[i] !== ' ') { while (e < text.length && text[e] !== ' ' && !CJK.test(text[e])) e++; }
+    out.push([i, e]); i = e;
+  }
+  return out;
+}
+function wrapText(ctx, text, maxW) {
+  const lines = []; let ls = 0, lw = 0, le = 0;
+  for (const [s, e] of tokenize(text)) {
+    const w = ctx.measureText(text.slice(s, e)).width;
+    if (lw > 0 && lw + w > maxW && text[s] !== ' ') { lines.push([ls, le]); ls = s; lw = 0; }
+    lw += w; le = e;
+  }
+  if (le > ls) lines.push([ls, le]);
+  return lines.filter(([s, e]) => text.slice(s, e).trim());
+}
+const measure = document.createElement('canvas').getContext('2d');
+
+/* ================= 4. 灵动岛（方法名与 VoiceHudOverlay 对应，新增 setLevel） ================= */
+const IS = { TOP: 10, H0: 36, PAD_X: 20, INNER_MAX: 640, MIN_W: 440, MAX_W: 680, LINE_H: 28, GAP: 6, PAD_B: 14 };
+const CAPTION_FONT = `500 19px ${SANS}`;
+const SMALL_FONT = `500 12px ${SANS}`;
+const T_IN = 360, T_MORPH = 340, T_ROLL = 200, T_FRESH = 220, T_COLLAPSE = 280, T_VANISH = 200, HOLD_TYPED = 1500, HOLD_ERROR = 3500;
+
+class VoiceHudB {
+  constructor() { this.reset(); }
+  reset() {
+    Object.assign(this, {
+      mode: 'hidden', form: 'compact', formAt: -1e9, inAt: -1e9, collapseAt: null, outAt: null, hideAt: null, recAt: 0,
+      stable: '', tail: '', text: '', lines: [], nLines: 0, rollAt: -1e9, freshS: 0, freshE: 0, freshAt: -1e9,
+      swap: null, msg: '', errAt: -1e9, confirm: null, buttons: [], hover: null,
+      rFrom: null, rTo: null, rAt: -1e9, rEase: 'outBack', rDur: T_MORPH, levels: [0, 0, 0, 0, 0], hasLevel: false,
+    });
+  }
+  tick(t) {
+    if (this.hideAt !== null && t >= this.hideAt && this.collapseAt === null) { const h = this.hideAt; this.hideAt = null; this.collapse(h); }
+    if (this.outAt !== null && t >= this.outAt + T_VANISH) { const keep = this.hover; this.reset(); this.hover = keep; }
+  }
+  stateColor() { return { recording: C.rec, polishing: C.polish, typed: C.ok, error: C.err, busy: C.busy, toast: this.toastColor || C.ok, confirm: C.warn }[this.mode] || C.muted; }
+  show(t) {
+    if (this.mode === 'hidden' || this.collapseAt !== null) {
+      this.inAt = t; this.collapseAt = null; this.outAt = null;
+      const c = { x: SCREEN.ax + SCREEN.aw / 2 - 11, y: SCREEN.ay + IS.TOP + 7, w: 22, h: 22 };
+      this.rTo = c; this.rFrom = null;
+    }
+    this.hideAt = null;
+  }
+  collapse(t) {
+    this.collapseAt = t; this.form = 'compact'; this.formAt = t;
+    this.retarget(this.compactSize(), t, 'outCubic', T_COLLAPSE);
+    this.outAt = t + T_COLLAPSE;
+  }
+  exit(t) { if (this.mode !== 'hidden' && this.collapseAt === null) this.collapse(t); this.hideAt = null; }
+
+  setIdle(t) { this.tick(t); if (['typed', 'toast', 'error', 'hidden'].includes(this.mode)) return; this.exit(t); }
+  setRecording(t) {
+    this.tick(t); this.show(t);
+    Object.assign(this, { mode: 'recording', recAt: t, stable: '', tail: '', nLines: 0, swap: null, freshS: 0, freshE: 0, levels: [0, 0, 0, 0, 0] });
+    this.relayout(t);
+  }
+  setLevel(v) { this.hasLevel = true; this.levels.push(v); this.levels.shift(); }
+  setPartial(stable, tail, t) {
+    this.tick(t);
+    if (!['recording', 'polishing'].includes(this.mode)) return;
+    if (stable.length > this.stable.length) { this.freshS = this.stable.length; this.freshE = stable.length; this.freshAt = t; }
+    this.stable = stable; this.tail = tail; this.relayout(t);
+  }
+  setPolishing(t) {
+    this.tick(t); this.show(t);
+    const merged = this.stable + this.tail;
+    if (merged.length > this.stable.length) { this.freshS = this.stable.length; this.freshE = merged.length; this.freshAt = t; }
+    Object.assign(this, { mode: 'polishing', stable: merged, tail: '' });
+    this.relayout(t);
+  }
+  setTyped(text, t) {
+    this.tick(t); this.show(t);
+    this.swap = { at: t, text: this.text, lines: this.lines.slice(-2) };
+    Object.assign(this, { mode: 'typed', stable: text || (this.stable + this.tail), tail: '', freshS: 0, freshE: 0, nLines: 0, msg: '已输入' });
+    this.relayout(t); this.hideAt = t + HOLD_TYPED;
+  }
+  setError(msg, t) {
+    this.tick(t); this.show(t);
+    Object.assign(this, { mode: 'error', msg: msg || '操作失败', errAt: t });
+    this.relayout(t); this.hideAt = t + HOLD_ERROR;
+  }
+  setBusy(msg, t) { this.tick(t); this.show(t); Object.assign(this, { mode: 'busy', msg: msg || '处理中…' }); this.relayout(t); }
+  showToast(msg, kind, ms, t) {
+    this.tick(t); this.show(t);
+    Object.assign(this, { mode: 'toast', msg, toastColor: { ok: C.ok, warn: C.warn, error: C.err, info: C.accent }[kind] || C.ok });
+    this.relayout(t); this.hideAt = t + ms;
+  }
+  showDeliveryConfirmation(jobId, text, onDecision, t) {
+    this.tick(t); this.show(t);
+    const pv = text.replace(/\s+/g, ' ').trim();
+    Object.assign(this, { mode: 'confirm', confirm: { jobId, onDecision }, msg: '未确认是否已输入，是否重发？', preview: pv.length > 30 ? pv.slice(0, 30) + '…' : pv });
+    this.relayout(t);
+  }
+  resolve(confirmed, t) {
+    if (this.mode !== 'confirm') return;
+    const { jobId, onDecision } = this.confirm;
+    this.msg = confirmed ? '已重新输入' : '已忽略'; this.exit(t); onDecision(jobId, confirmed);
+  }
+
+  compactSize() {
+    measure.font = SMALL_FONT;
+    let w;
+    if (this.mode === 'recording') w = 16 + 8 + 10 + 27 + 12 + 30 + 16;
+    else w = 16 + 10 + 10 + measure.measureText(this.compactLabel()).width + 18;
+    return { w: Math.min(520, w), h: IS.H0 };
+  }
+  compactLabel() { return this.mode === 'typed' ? '已输入' : this.mode === 'error' ? '出错' : this.msg; }
+  relayout(t) {
+    if (this.collapseAt !== null) return;
+    let form = 'expanded', w, h;
+    const text = this.stable + this.tail;
+    if (this.mode === 'confirm') {
+      measure.font = `400 15px ${SANS}`;
+      w = Math.max(440, measure.measureText(`「${this.preview}」`).width + 40); h = 36 + 24 + 10 + 28 + 14;
+    } else if (this.mode === 'error') {
+      measure.font = `500 16px ${SANS}`;
+      w = Math.min(IS.MAX_W, Math.max(360, measure.measureText(this.msg).width + 40)); h = 36 + 24 + 14;
+    } else if (['recording', 'polishing', 'typed'].includes(this.mode) && text.trim()) {
+      measure.font = CAPTION_FONT;
+      const lines = wrapText(measure, text, IS.INNER_MAX);
+      if (this.form === 'expanded' && this.mode !== 'typed' && lines.length > this.nLines && lines.length >= 3) this.rollAt = t;
+      this.text = text; this.lines = lines; this.nLines = lines.length;
+      const vis = lines.slice(-2);
+      const tw = Math.max(...vis.map(([s, e]) => measure.measureText(text.slice(s, e)).width));
+      w = Math.min(IS.MAX_W, Math.max(IS.MIN_W, tw + IS.PAD_X * 2));
+      h = 36 + vis.length * IS.LINE_H + (vis.length - 1) * IS.GAP + IS.PAD_B;
+    } else { form = 'compact'; ({ w, h } = this.compactSize()); }
+    if (form !== this.form) { this.form = form; this.formAt = t; }
+    this.retarget({ w, h }, t, 'outBack', T_MORPH);
+  }
+  retarget({ w, h }, t, ease, dur) {
+    const target = { x: SCREEN.ax + (SCREEN.aw - w) / 2, y: SCREEN.ay + IS.TOP, w, h };
+    if (sameRect(target, this.rTo)) return;
+    this.rFrom = this.rTo ? this.rectAt(t) : target; this.rTo = target; this.rAt = t; this.rEase = ease; this.rDur = dur;
+  }
+  rectAt(t) { return this.rFrom ? lerpRect(this.rFrom, this.rTo, prog(t, this.rAt, this.rDur, this.rEase)) : this.rTo; }
+
+  paint(ctx, t) {
+    this.tick(t);
+    this.buttons = [];
+    if (this.mode === 'hidden' || !this.rTo) return;
+    const r = { ...this.rectAt(t) };
+    let alpha = prog(t, this.inAt, 160);
+    if (this.outAt !== null) {   // 收回后缩成点消失
+      const p = prog(t, this.outAt, T_VANISH);
+      const cx = r.x + r.w / 2, s = 1 - .7 * p;
+      r.w *= s; r.h *= s; r.x = cx - r.w / 2; alpha *= 1 - p;
+    }
+    if (this.mode === 'error') r.x += 6 * Math.sin((t - this.errAt) / 30) * (1 - clamp01((t - this.errAt) / 360));
+    ctx.save();
+    ctx.globalAlpha = alpha;
+    rr(ctx, r.x, r.y, r.w, r.h, Math.min(r.h / 2, 20));
+    ctx.fillStyle = rgba(C.captionBg); ctx.fill();
+    ctx.strokeStyle = this.mode === 'error' ? rgba(withA(C.err, .7)) : 'rgba(255,255,255,0.08)'; ctx.lineWidth = 1; ctx.stroke();
+    ctx.save(); rr(ctx, r.x, r.y, r.w, r.h, Math.min(r.h / 2, 20)); ctx.clip();
+    ctx.globalAlpha *= prog(t, this.formAt + 60, 200);
+    if (this.form === 'compact') this.paintCompact(ctx, r, t); else this.paintExpanded(ctx, r, t);
+    ctx.restore();
+    ctx.restore();
+  }
+  paintIcon(ctx, cx, cy, t) {
+    const c = this.stateColor();
+    ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+    if (this.mode === 'polishing') {
+      const a = t / 900 * 2 * Math.PI;
+      ctx.beginPath(); ctx.arc(cx, cy, 5.5, a, a + Math.PI * 1.5); ctx.strokeStyle = rgba(c); ctx.lineWidth = 2; ctx.stroke();
+    } else if (this.mode === 'typed') {
+      ctx.beginPath(); ctx.moveTo(cx - 5, cy); ctx.lineTo(cx - 1.5, cy + 3.5); ctx.lineTo(cx + 5.5, cy - 4.5);
+      ctx.strokeStyle = rgba(c); ctx.lineWidth = 2; ctx.stroke();
+    } else if (this.mode === 'error') {
+      ctx.beginPath(); ctx.moveTo(cx - 4, cy - 4); ctx.lineTo(cx + 4, cy + 4); ctx.moveTo(cx + 4, cy - 4); ctx.lineTo(cx - 4, cy + 4);
+      ctx.strokeStyle = rgba(c); ctx.lineWidth = 2; ctx.stroke();
+    } else {
+      const pulse = ['recording', 'busy'].includes(this.mode) ? .55 + .45 * Math.cos(t / 1200 * 2 * Math.PI) : 1;
+      ctx.beginPath(); ctx.arc(cx, cy, 4, 0, Math.PI * 2); ctx.fillStyle = rgba(c, pulse); ctx.fill();
+    }
+  }
+  paintLevels(ctx, x, cy) {
+    // 【需新增数据】最近 5 个电平采样；无数据时静止短条
+    for (let i = 0; i < 5; i++) {
+      const v = this.hasLevel ? this.levels[i] : 0, h = 4 + 14 * v;
+      rr(ctx, x + i * 6, cy - h / 2, 3, h, 1.5); ctx.fillStyle = rgba(C.rec, .55 + .45 * v); ctx.fill();
+    }
+  }
+  paintCompact(ctx, r, t) {
+    const cy = r.y + r.h / 2;
+    this.paintIcon(ctx, r.x + 18, cy, t);
+    ctx.textBaseline = 'middle';
+    if (this.mode === 'recording' && this.collapseAt === null) {
+      this.paintLevels(ctx, r.x + 34, cy);
+      ctx.font = `500 12px ${MONO}`; ctx.fillStyle = C.muted; ctx.textAlign = 'right';
+      ctx.fillText(fmtDur(t - this.recAt), r.x + r.w - 16, cy + .5); ctx.textAlign = 'left';
+    } else {
+      ctx.font = SMALL_FONT; ctx.fillStyle = this.mode === 'typed' ? C.ok : this.mode === 'error' ? C.err : C.text;
+      ctx.fillText(this.compactLabel(), r.x + 32, cy + .5);
+    }
+  }
+  paintExpanded(ctx, r, t) {
+    const hy = r.y + 18;
+    this.paintIcon(ctx, r.x + 20, hy, t);
+    ctx.textBaseline = 'middle';
+    if (this.mode === 'recording') {
+      this.paintLevels(ctx, r.x + 36, hy);
+      ctx.font = `500 12px ${MONO}`; ctx.fillStyle = C.muted; ctx.textAlign = 'right'; ctx.fillText(fmtDur(t - this.recAt), r.x + r.w - 18, hy + .5); ctx.textAlign = 'left';
+    } else if (this.mode === 'polishing') {
+      ctx.font = `600 12px ${SANS}`;
+      const x = r.x + 34, w = ctx.measureText('润色中').width, sweep = ((t / 1100) % 1) * (w + 60) - 30;
+      const g = ctx.createLinearGradient(x + sweep - 30, 0, x + sweep + 30, 0);
+      g.addColorStop(0, rgba(C.polish)); g.addColorStop(.5, '#ffffff'); g.addColorStop(1, rgba(C.polish));
+      ctx.fillStyle = g; ctx.fillText('润色中', x, hy + .5);
+    } else {
+      ctx.font = `600 12px ${SANS}`; ctx.fillStyle = rgba(this.stateColor());
+      ctx.fillText(this.mode === 'typed' ? '已输入' : this.mode === 'error' ? '出错' : this.msg, r.x + 34, hy + .5);
+    }
+    const x0 = r.x + IS.PAD_X, y0 = r.y + 36;
+    if (this.mode === 'error') { ctx.font = `500 16px ${SANS}`; ctx.fillStyle = C.stable; ctx.fillText(this.msg, x0, y0 + 12); return; }
+    if (this.mode === 'confirm') { this.paintConfirm(ctx, r, x0, y0); return; }
+    ctx.save(); ctx.beginPath(); ctx.rect(r.x, y0 - 2, r.w, r.h - 36 - 4); ctx.clip();
+    ctx.font = CAPTION_FONT;
+    const step = IS.LINE_H + IS.GAP;
+    if (this.swap && t < this.swap.at + 260) {
+      const first = t < this.swap.at + 130;
+      ctx.globalAlpha *= first ? 1 - prog(t, this.swap.at, 130) : prog(t, this.swap.at + 130, 130);
+      if (first) { this.swap.lines.forEach(([s, e], i) => this.drawSeg(ctx, this.swap.text, s, e, x0, y0 + i * step + IS.LINE_H / 2, this.swap.text.length, t)); ctx.restore(); return; }
+    }
+    const n = this.lines.length, rollP = prog(t, this.rollAt, T_ROLL), off = (1 - rollP) * step;
+    for (let i = Math.max(0, n - 2 - (rollP < 1 ? 1 : 0)); i < n; i++) {
+      const y = y0 + (i - Math.max(0, n - 2)) * step + off + IS.LINE_H / 2;
+      ctx.save(); if (i < n - 2) ctx.globalAlpha *= 1 - rollP;
+      this.drawSeg(ctx, this.text, this.lines[i][0], this.lines[i][1], x0, y, this.stable.length, t);
+      ctx.restore();
+    }
+    ctx.restore();
+  }
+  drawSeg(ctx, text, s, e, x, y, stableLen, t) {
+    const pts = [...new Set([s, ...[this.freshS, this.freshE, stableLen].filter(v => v > s && v < e), e])].sort((a, b) => a - b);
+    let cx = x;
+    for (let k = 0; k < pts.length - 1; k++) {
+      const a = pts[k], b = pts[k + 1], str = text.slice(a, b), w = ctx.measureText(str).width;
+      const c = a >= stableLen ? C.tail : (a >= this.freshS && a < this.freshE) ? mix(C.tail, C.stable, prog(t, this.freshAt, T_FRESH)) : C.stable;
+      ctx.fillStyle = rgba(c); ctx.fillText(str, cx, y + .5);
+      if (a >= stableLen) { ctx.save(); ctx.setLineDash([3, 3]); ctx.strokeStyle = rgba(C.tail); ctx.beginPath(); ctx.moveTo(cx, y + 13.5); ctx.lineTo(cx + w, y + 13.5); ctx.stroke(); ctx.restore(); }
+      cx += w;
+    }
+  }
+  paintConfirm(ctx, r, x0, y0) {
+    ctx.font = `400 15px ${SANS}`; ctx.fillStyle = C.muted; ctx.fillText(`「${this.preview}」`, x0 - 6, y0 + 12);
+    measure.font = `600 12px ${SANS}`;
+    const b2 = measure.measureText('忽略').width + 24, b1 = measure.measureText('重新输入').width + 24, by = y0 + 34;
+    this.drawButton(ctx, 'ignore', '忽略', r.x + r.w - 18 - b2, by, b2, 28, false);
+    this.drawButton(ctx, 'resend', '重新输入', r.x + r.w - 18 - b2 - 8 - b1, by, b1, 28, true);
+  }
+  drawButton(ctx, id, label, x, y, w, h, primary) {
+    const hov = this.hover === id;
+    rr(ctx, x, y, w, h, 14);
+    ctx.fillStyle = primary ? (hov ? C.accentHover : C.accent) : C.surface2; ctx.fill();
+    ctx.strokeStyle = primary ? C.accent : (hov ? C.accent : C.border); ctx.lineWidth = 1; ctx.stroke();
+    ctx.font = `600 12px ${SANS}`; ctx.fillStyle = primary ? C.bgDark : (hov ? C.accent : C.text);
+    ctx.textAlign = 'center'; ctx.fillText(label, x + w / 2, y + h / 2 + .5); ctx.textAlign = 'left';
+    this.buttons.push({ id, x, y, w, h });
+  }
+  hitTest(x, y) { const b = this.buttons.find(b => x >= b.x && x <= b.x + b.w && y >= b.y && y <= b.y + b.h); return b ? b.id : null; }
+}
+
+/* ================= 5. 演示脚本 ================= */
+const RAW = '帮我把 Linux 下的热键冲突问题整理一下，重点看 GNOME Wayland 跟 XWayland 的差异，明天上午十点前发给设计组，顺便确认一下语音悬浮窗选哪套动效。';
+const FINAL = '帮我把 Linux 下的热键冲突问题整理一下，重点看 GNOME Wayland 与 XWayland 的差异。明天上午十点前发给设计组，并确认语音悬浮窗选用哪套动效。';
+const MISHEAR = [['热键', '热剑'], ['设计组', '设计租'], ['动效', '洞效']];
+function streamSteps() {
+  const steps = []; let sl = 0, k = 0;
+  while (sl < RAW.length) {
+    const tl = 4 + (k * 3) % 4;
+    let tail = RAW.slice(sl, sl + tl);
+    for (const [ok, bad] of MISHEAR) {
+      const at = RAW.indexOf(ok);
+      if (at >= sl && at < sl + tl && k % 2 === 0) tail = tail.replace(ok.slice(0, Math.min(ok.length, sl + tl - at)), bad.slice(0, Math.min(ok.length, sl + tl - at)));
+    }
+    steps.push({ stable: RAW.slice(0, sl), tail });
+    sl += 2 + (k * 5) % 3; k++;
+  }
+  steps.push({ stable: RAW, tail: '' });
+  return steps;
+}
+const TL = []; const PH = {}; let T = 0;
+function add(dt, ev, phase) { T += dt; TL.push({ at: T, ev }); if (phase && PH[phase] === undefined) PH[phase] = T; }
+add(900, { event: 'recording' }, 'rec');
+streamSteps().forEach((s, i) => add(i === 0 ? 1300 : 230, { event: 'partial', stable_text: s.stable, tail_text: s.tail }, 'stream'));
+add(700, { event: 'polishing' }, 'polish');
+add(1500, { event: 'typed', text: FINAL }, 'typed');
+add(300, { event: 'idle' });
+add(900, { event: '_mark' }, 'fade');
+add(1800, { event: '_mark' });
+add(0, { event: 'recording' }, 'error');
+add(1000, { event: 'partial', stable_text: '把这段', tail_text: '话发给' });
+add(500, { event: 'partial', stable_text: '把这段话发', tail_text: '给小王' });
+add(700, { event: 'error', message: '未检测到麦克风输入，请检查输入设备' });
+add(4300, { event: 'idle' });
+add(600, { event: 'delivery_unknown', job_id: 'job-7f3a', text: FINAL }, 'confirm');
+add(5200, { event: '_click', confirmed: false });
+add(1200, { event: 'busy' }, 'busy');
+add(1800, { event: 'idle' });
+add(600, { event: 'history_write_failed', message: '历史记录写入失败' }, 'warn');
+add(3800, { event: '_mark' }, 'end');
+const END = T;
+const PHASES = [['idle', '空闲'], ['rec', '按下 · 录音开始'], ['stream', '流式识别'], ['polish', '松手 · 润色中'], ['typed', '已输入'], ['fade', '收回消失'], ['error', '错误'], ['confirm', '投递未确认（可点）'], ['busy', '处理中'], ['warn', '警告提示']];
+const PH_ORDER = ['rec', 'stream', 'polish', 'typed', 'fade', 'error', 'confirm', 'busy', 'warn', 'end'];
+function phaseEnd(p) { const i = PH_ORDER.indexOf(p); return PH[PH_ORDER[i + 1]] ?? END; }
+
+/* 【需新增数据】模拟麦克风电平：说话时起伏，开头静音 */
+function simLevel(t) {
+  if (hud.mode !== 'recording') return 0;
+  const since = t - hud.recAt, speaking = since > 1100 && !!(hud.stable + hud.tail);
+  const base = speaking ? .7 : .08;
+  return clamp01(base * (.3 + .7 * Math.abs(Math.sin(t / 83) * Math.sin(t / 211 + .7))) + .05 * Math.random());
+}
+
+/* ================= 6. 事件分发（对应 _desktop/event_stream.py，新增 level） ================= */
+const hud = new VoiceHudB();
+const logEl = document.getElementById('log'); const logLines = [];
+function log(s) { logLines.unshift(s); logLines.length = Math.min(logLines.length, 9); logEl.innerHTML = logLines.join('\n'); }
+function short(s) { return s.length > 16 ? '…' + s.slice(-16) : s; }
+function fmtEv(ev) {
+  if (ev.event === 'partial') return `<b>partial</b>  stable_text="${short(ev.stable_text)}"  tail_text="${ev.tail_text}"`;
+  if (ev.event === 'typed') return `<b>typed</b>  text="${short(ev.text)}"`;
+  if (ev.event === 'delivery_unknown') return `<b>delivery_unknown</b>  job_id="${ev.job_id}"  text="${short(ev.text)}"`;
+  return `<b>${ev.event}</b>` + (ev.message ? `  message="${ev.message}"` : '');
+}
+const deliverEl = document.getElementById('deliver');
+function onDecision(jobId, confirmed) { log(`→ 用户点击「${confirmed ? '重新输入' : '忽略'}」：on_decision("${jobId}", ${confirmed ? 'True' : 'False'})`); }
+function dispatch(ev, t) {
+  if (ev.event === '_mark') return;
+  if (ev.event === '_click') { hud.resolve(ev.confirmed, t); return; }
+  log(fmtEv(ev));
+  switch (ev.event) {
+    case 'idle': if (hud.mode !== 'toast') hud.setIdle(t); break;
+    case 'recording': hud.setRecording(t); deliverEl.textContent = ''; break;
+    case 'partial': hud.setPartial(ev.stable_text, ev.tail_text, t); break;
+    case 'polishing': hud.setPolishing(t); break;
+    case 'typed': hud.setTyped(ev.text, t); deliverEl.textContent = ev.text; break;
+    case 'busy': if (hud.mode !== 'toast') hud.setBusy(ev.message || '处理中…', t); break;
+    case 'error': hud.setError(ev.message || '操作失败', t); break;
+    case 'history_write_failed': hud.showToast(ev.message, 'warn', 3000, t); break;
+    case 'delivery_unknown': hud.showDeliveryConfirmation(ev.job_id, ev.text, onDecision, t); break;
+  }
+}
+
+/* ================= 7. 播放器 ================= */
+let auto = true, playing = true, vt = 0, idx = 0, stopAt = null, lastNow = performance.now(), curPhase = null, lastLevelAt = 0, lastLevelLog = 0;
+function jump(target, now) {
+  hud.reset(); deliverEl.textContent = ''; logLines.length = 0; logEl.innerHTML = '';
+  vt = target; idx = 0;
+  while (idx < TL.length && TL[idx].at <= vt) { dispatch(TL[idx].ev, now - (vt - TL[idx].at)); idx++; }
+  if (hud.mode === 'recording') for (let i = 0; i < 5; i++) hud.setLevel(simLevel(now - (4 - i) * 50));
+}
+function playPhase(p) {
+  auto = false; curPhase = p; const now = performance.now();
+  if (p === 'idle') { jump(0, now); playing = false; }
+  else { jump(PH[p] - 1, now); stopAt = phaseEnd(p) - 1; playing = true; }
+  syncButtons();
+}
+function startAuto() { auto = true; playing = true; stopAt = null; jump(0, performance.now()); syncButtons(); }
+const phaseBox = document.getElementById('phase-btns');
+PHASES.forEach(([p, label]) => { const b = document.createElement('button'); b.textContent = label; b.dataset.p = p; b.onclick = () => playPhase(p); phaseBox.appendChild(b); });
+document.getElementById('btn-auto').onclick = () => startAuto();
+function currentPhase() { let cur = 'idle'; for (const p of PH_ORDER) if (PH[p] !== undefined && vt >= PH[p] - 1) cur = p; return cur; }
+function syncButtons() {
+  document.getElementById('btn-auto').classList.toggle('on', auto);
+  const cur = auto ? currentPhase() : curPhase;
+  phaseBox.querySelectorAll('button').forEach(b => b.classList.toggle('on', b.dataset.p === cur));
+}
+
+/* ================= 8. 视口 ================= */
+const vp = document.getElementById('vp'), screenEl = document.getElementById('screen');
+const FOCUS = { x: 1720, y: 200 };
+let fit = false;
+function layoutView() {
+  const W = vp.clientWidth;
+  if (fit) { const k = W / SCREEN.w; vp.style.height = Math.round(SCREEN.h * k) + 'px'; screenEl.style.transform = `scale(${k})`; }
+  else {
+    vp.style.height = '460px'; const H = 460;
+    const tx = Math.min(0, Math.max(W - SCREEN.w, W / 2 - FOCUS.x)), ty = Math.min(0, Math.max(H - SCREEN.h, H / 2 - FOCUS.y));
+    screenEl.style.transform = `translate(${tx}px,${ty}px)`;
+  }
+  document.getElementById('vp-tag').textContent = fit ? '3440×1440 屏幕 · 全屏缩略（等比）' : '3440×1440 屏幕 · 1:1 局部（顶部居中）';
+  document.getElementById('btn-view').textContent = fit ? '视图：全屏缩略' : '视图：1:1 实际像素';
+}
+document.getElementById('btn-view').onclick = () => { fit = !fit; layoutView(); };
+window.addEventListener('resize', layoutView);
+
+const canvas = document.getElementById('hud'), ctx = canvas.getContext('2d');
+function toScreen(e) { const r = canvas.getBoundingClientRect(); return [(e.clientX - r.left) * SCREEN.w / r.width, (e.clientY - r.top) * SCREEN.h / r.height]; }
+canvas.addEventListener('mousemove', e => { const id = hud.hitTest(...toScreen(e)); hud.hover = id; canvas.style.cursor = id ? 'pointer' : 'default'; });
+canvas.addEventListener('click', e => { const id = hud.hitTest(...toScreen(e)); if (id) hud.resolve(id === 'resend', performance.now()); });
+
+/* ================= 9. 帧循环 ================= */
+function frame(now) {
+  const dt = Math.min(100, now - lastNow); lastNow = now;
+  if (playing) {
+    vt += dt;
+    while (idx < TL.length && TL[idx].at <= vt) { dispatch(TL[idx].ev, now - (vt - TL[idx].at)); idx++; }
+    if (stopAt !== null && vt >= stopAt) { playing = false; stopAt = null; }
+    if (auto && vt >= END) jump(0, now);
+  }
+  if (hud.mode === 'recording' && now - lastLevelAt >= 50) {
+    lastLevelAt = now; const v = simLevel(now); hud.setLevel(v);
+    if (now - lastLevelLog > 1000) { lastLevelLog = now; log(`<i>level</i>  value=${v.toFixed(2)}   <i>← 需新增数据（实际约 20Hz，这里每秒记一条）</i>`); }
+  }
+  ctx.clearRect(0, 0, SCREEN.w, 400);
+  hud.paint(ctx, now);
+  if (auto) syncButtons();
+  requestAnimationFrame(frame);
+}
+(function init() {
+  const q = new URLSearchParams(location.search);
+  if (q.get('view') === 'fit') fit = true;
+  layoutView();
+  if (q.get('phase')) {
+    const p = q.get('phase'); auto = false; curPhase = p;
+    jump((PH[p] ?? 0) + Number(q.get('off') || 0), performance.now()); playing = false; syncButtons();
+  } else startAuto();
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>

@@ -1,15 +1,17 @@
-"""XInput2 RawKey 全局快捷键 (X server 客户端层 raw event stream，支持四键)。"""
+"""XInput2 RawKey 全局快捷键 (X server 客户端层 raw event stream，支持四键)。
+
+Wayland 下只做 XTEST 卡键清理，不进快捷键状态机；仅在 X11 回退模式（XGrabKey 不可用，manager 打开
+actions_enabled）时把组合的按下区间与放行上报给 sink，停录后补发修饰键抬起（现状语义）。
+"""
 from __future__ import annotations
 
 import sys
 import time
 
-from _linux.hotkey_actions import GLib, HotkeyActionMixin, HotkeyContext
+from _linux.hotkey_actions import GLib, HotkeyContext, HotkeySink, end_interval_and_release
+from _linux.hotkey_state import Action
 from _linux.uinput_device import UINPUT_DEVICE_NAME
 
-STUCK_MOD_HARD_SECONDS = 6.0
-STUCK_MOD_SOFT_SECONDS = 2.5
-STUCK_MOD_IDLE_SECONDS = 1.5
 STUCK_MOD_KEYPRESS_SECONDS = 3.0
 STUCK_MOD_MATCH_SECONDS = 3.0
 
@@ -25,6 +27,8 @@ _XI_RAW_KEY_PRESS = 13
 _XI_RAW_KEY_RELEASE = 14
 _XI_RAW_KEY_PRESS_MASK = 1 << _XI_RAW_KEY_PRESS
 _XI_RAW_KEY_RELEASE_MASK = 1 << _XI_RAW_KEY_RELEASE
+_AUTOREPEAT_RELEASE_MS = 50
+_MASK = 0xFFFFFFFF
 
 
 def xi_source_ids_by_name(dpy, name: str) -> set[int]:
@@ -74,19 +78,23 @@ def _build_xi_raw_event_struct():
     )
 
 
-class XInputHotkeyGrabber(HotkeyActionMixin):
+class XInputHotkeyGrabber:
     """XInput2 RawKey 全局快捷键管理，完整支持 voice / screenshot / ocr / repeat 四键。"""
 
     def __init__(
         self,
         ctx: HotkeyContext,
+        sink: HotkeySink,
         *,
         display_factory=None,
         hotkey_parser=None,
         keysym_resolver=None,
     ) -> None:
-        self._init_hotkey_actions(ctx)
+        self.ctx = ctx
+        self.sink = sink
         self.actions_enabled = True
+        self._held: set[Action] = set()
+        self._pending_release: dict[Action, int] = {}  # 组合 → 待定的结束计时器（滤 X 自动重复）
         self.only_xtest_sources = False
         self._pressed: set[int] = set()
         self._ignore_source_ids: set[int] = set()
@@ -117,6 +125,7 @@ class XInputHotkeyGrabber(HotkeyActionMixin):
                     "Super_R": 0xFFEC,
                     "Meta_L": 0xFFE7,
                     "Meta_R": 0xFFE8,
+                    "Escape": 0xFF1B,
                 }
                 keysym_resolver = lambda name: _fake_syms.get(name, 0)
 
@@ -182,6 +191,8 @@ class XInputHotkeyGrabber(HotkeyActionMixin):
             else None
         )
         self._repeat_combo = self._compile_hotkey(self.ctx.bindings.repeat)
+        escape_sym = self._keysym_resolver("Escape")
+        self._escape_kc = self.dpy.keysym_to_keycode(escape_sym) if escape_sym else 0
         print(
             f"  XInput2: 语音 {self.ctx.bindings.voice} "
             f"→ trigger=kc{self._voice_combo['trigger']} mods={self._voice_combo['modifiers']}"
@@ -275,21 +286,32 @@ class XInputHotkeyGrabber(HotkeyActionMixin):
                 if self._is_injected_source(getattr(e.data, "sourceid", 0)):
                     continue
                 sourceid = int(getattr(e.data, "sourceid", 0))
+                t_ms = int(getattr(e.data, "time", 0)) & _MASK
                 if evt == _XI_RAW_KEY_PRESS:
-                    self._handle_press(e.data.detail, sourceid)
+                    self._handle_press(e.data.detail, sourceid, t_ms)
                 else:
-                    self._handle_release(e.data.detail, sourceid)
+                    self._handle_release(e.data.detail, sourceid, t_ms)
             except Exception as e:
                 print(f"XInput2 event error: {e}", file=sys.stderr)
         return True
 
-    def _handle_press(self, keycode: int, sourceid: int = 0) -> None:
+    def _combos(self) -> list[tuple[Action, dict]]:
+        combos: list[tuple[Action, dict]] = [
+            ("voice", self._voice_combo),
+            ("screenshot", self._screen_combo),
+            ("repeat", self._repeat_combo),
+        ]
+        if self._ocr_combo is not None:
+            combos.append(("ocr", self._ocr_combo))
+        return combos
+
+    def _handle_press(self, keycode: int, sourceid: int = 0, t_ms: int = 0) -> None:
         if not self._ignore_source_ids and self.ctx.guard.active():
             return
         self._last_key_activity = time.monotonic()
         if keycode in self._mod_kcs:
             self._mod_down_since.setdefault(keycode, self._last_key_activity)
-        elif not self.voice_active and self._last_key_activity - self._last_stuck_check > 0.25:
+        elif not self.sink.voice_active and self._last_key_activity - self._last_stuck_check > 0.25:
             self._last_stuck_check = self._last_key_activity
             if self._has_lingering_modifier(STUCK_MOD_KEYPRESS_SECONDS):
                 lingering = self._lingering_modifiers()
@@ -312,25 +334,23 @@ class XInputHotkeyGrabber(HotkeyActionMixin):
             return
         is_repeat = keycode in self._pressed
         self._pressed.add(keycode)
-        if keycode == self._voice_combo["trigger"] and self.voice_active:
-            if self._pending_release_id:
-                GLib.source_remove(self._pending_release_id)
-                self._pending_release_id = 0
-            return
+        for action, combo in self._combos():
+            pending = self._pending_release.pop(action, 0) if keycode == combo["trigger"] else 0
+            if pending:
+                GLib.source_remove(pending)  # X 自动重复的松开/按下对：仍是同一次按下
+                return
         if is_repeat:
             return
-        if self._match_combo(self._voice_combo, keycode):
-            self._on_voice_press()
-        elif self._match_combo(self._screen_combo, keycode):
-            GLib.idle_add(self._on_screenshot)
-        elif self._ocr_combo is not None and self._match_combo(self._ocr_combo, keycode):
-            GLib.idle_add(self._on_ocr)
-        elif self._match_combo(self._repeat_combo, keycode):
-            self._on_repeat()
-        elif keycode not in self._mod_kcs:
-            self._close_overlay_on_key()
+        for action, combo in self._combos():
+            if self._match_combo(combo, keycode):
+                self._held.add(action)
+                self.sink.interval_started(action, t_ms)
+                self.sink.activated(action, t_ms)
+                return
+        if keycode == self._escape_kc:
+            self.sink.escape_pressed()
 
-    def _handle_release(self, keycode: int, sourceid: int = 0) -> None:
+    def _handle_release(self, keycode: int, sourceid: int = 0, t_ms: int = 0) -> None:
         if not self._ignore_source_ids and self.ctx.guard.active():
             triggers = {
                 self._voice_combo["trigger"],
@@ -344,23 +364,25 @@ class XInputHotkeyGrabber(HotkeyActionMixin):
         self._last_key_activity = time.monotonic()
         self._mod_down_since.pop(keycode, None)
         self._pressed.discard(keycode)
-        if (
-            self.voice_active
-            and self._is_voice_combo_key(keycode)
-            and self.actions_enabled
-            and (not self.only_xtest_sources or self._is_xtest_source(sourceid))
-        ):
-            if self._pending_release_id:
-                GLib.source_remove(self._pending_release_id)
-            self._pending_release_id = GLib.timeout_add(50, self._do_release)
+        if not self.actions_enabled or (self.only_xtest_sources and not self._is_xtest_source(sourceid)):
+            return
+        for action, combo in self._combos():
+            if action in self._held and self._is_combo_key(combo, keycode):
+                previous = self._pending_release.pop(action, 0)
+                if previous:
+                    GLib.source_remove(previous)
+                self._pending_release[action] = GLib.timeout_add(
+                    _AUTOREPEAT_RELEASE_MS, self._end_after_autorepeat_window, action, t_ms
+                )
 
-    def _is_voice_combo_key(self, keycode: int) -> bool:
-        if keycode == self._voice_combo["trigger"]:
-            return True
-        for mod_set in self._voice_combo["modifiers"]:
-            if keycode in mod_set:
-                return True
-        return False
+    def _end_after_autorepeat_window(self, action: Action, t_ms: int) -> bool:
+        self._pending_release.pop(action, None)
+        self._held.discard(action)
+        return end_interval_and_release(self.sink, self.ctx, action, t_ms)
+
+    @staticmethod
+    def _is_combo_key(combo: dict, keycode: int) -> bool:
+        return keycode == combo["trigger"] or any(keycode in mods for mods in combo["modifiers"])
 
     def _lingering_modifiers(self) -> dict[int, float]:
         now = time.monotonic()
@@ -378,15 +400,6 @@ class XInputHotkeyGrabber(HotkeyActionMixin):
 
     def _has_lingering_modifier(self, min_held: float) -> bool:
         return any(h > min_held for h in self._lingering_modifiers().values())
-
-    def has_stuck_modifiers(self) -> bool:
-        idle = time.monotonic() - self._last_key_activity
-        for held in self._lingering_modifiers().values():
-            if held > STUCK_MOD_HARD_SECONDS or (
-                held > STUCK_MOD_SOFT_SECONDS and idle > STUCK_MOD_IDLE_SECONDS
-            ):
-                return True
-        return False
 
     def _match_combo(self, combo: dict, pressed_kc: int | None = None) -> bool:
         if pressed_kc is not None and pressed_kc != combo["trigger"]:
@@ -430,9 +443,9 @@ class XInputHotkeyGrabber(HotkeyActionMixin):
             self._mod_down_since.pop(kc, None)
 
     def cleanup(self) -> None:
-        if self._pending_release_id:
-            GLib.source_remove(self._pending_release_id)
-            self._pending_release_id = 0
+        for source_id in self._pending_release.values():
+            GLib.source_remove(source_id)
+        self._pending_release.clear()
         try:
             self.dpy.close()
         except Exception:

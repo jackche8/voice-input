@@ -278,7 +278,9 @@ class MacOSPlatformAdapter:
         on_repeat: Callable[[], None] = noop,
         overlay_active: Callable[[], bool] = always_false,
         close_overlay: Callable[[], bool] = always_false,
+        on_error: Callable[[str | None], None],
     ) -> HotkeyRig:
+        del on_error  # 协议要求的组件失败通道；pynput 监听器没有组件级运行期失败，不调用
         return MacOSHotkeyRig(
             bindings,
             on_voice_start=on_voice_start,

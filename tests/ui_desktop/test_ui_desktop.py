@@ -12,7 +12,7 @@ import pytest
 from PySide6.QtCore import QBuffer, QByteArray, QIODevice, QPoint, QRect, Qt
 from PySide6.QtGui import QColor, QGuiApplication, QImage, QPainter
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QSystemTrayIcon
+from PySide6.QtWidgets import QApplication, QSystemTrayIcon, QWidget
 
 from _contracts import OcrTextBlock
 from _ui_desktop import (
@@ -90,6 +90,8 @@ def test_theme_tokens_and_ui_layer_purity() -> None:
         "region_selector.py",
         "theme.py",
         "tray.py",
+        "voice_bar_motion.py",
+        "voice_bar_view.py",
         "voice_hud.py",
     ]
 
@@ -528,142 +530,208 @@ def test_inplace_overlay_toolbar_boundary_avoidance_copy_retry_and_close(
 
 
 # ---------------------------------------------------------------------------
-# 4. VoiceHudOverlay：状态胶囊、可点击重发确认、双行大字幕防溢出与 1.5s 自动隐藏
+# 4. VoiceHudOverlay 一体底栏（UI 验收标准 docs/design/v3.3/voice-a.html）
 # ---------------------------------------------------------------------------
-def test_voice_hud_capsule_states_passthrough_and_delivery_confirmation(
-    qapp: QApplication,
-) -> None:
-    now = [100.0]
-    hud = VoiceHudOverlay(
-        available_screen_rect=(0, 0, 1280, 800),
-        clock=lambda: now[0],
-    )
-    try:
-        # idle 默认隐藏，且处于鼠标穿透不抢焦点态
-        assert hud.isVisible() is False
-        assert hud.caption_bar.isVisible() is False
-        assert hud.is_mouse_passthrough is True
+def _fake_clock(start_s: float = 100.0):
+    now = [start_s]
 
+    def advance(ms: float) -> None:
+        now[0] += ms / 1000.0
+
+    return (lambda: now[0]), advance
+
+
+def _bar_image(hud: VoiceHudOverlay) -> QImage:
+    return hud.grab().toImage().convertToFormat(QImage.Format.Format_ARGB32)
+
+
+def _pixels_of(img: QImage, hex_color: str, tol: int = 6) -> list[tuple[int, int]]:
+    target = QColor(hex_color)
+    found = []
+    for y in range(img.height()):
+        for x in range(img.width()):
+            c = img.pixelColor(x, y)
+            if (
+                c.alpha() == 255
+                and abs(c.red() - target.red()) <= tol
+                and abs(c.green() - target.green()) <= tol
+                and abs(c.blue() - target.blue()) <= tol
+            ):
+                found.append((x, y))
+    return found
+
+
+def _painted_box(img: QImage) -> QRect:
+    xs, ys = [], []
+    for y in range(img.height()):
+        for x in range(img.width()):
+            if img.pixelColor(x, y).alpha() > 0:
+                xs.append(x)
+                ys.append(y)
+    return QRect(min(xs), min(ys), max(xs) - min(xs) + 1, max(ys) - min(ys) + 1)
+
+
+def _max_alpha(img: QImage) -> int:
+    return max(img.pixelColor(x, y).alpha() for y in range(img.height()) for x in range(img.width()))
+
+
+def _centroid(points: list[tuple[int, int]]) -> QPoint:
+    return QPoint(sum(x for x, _ in points) // len(points), sum(y for _, y in points) // len(points))
+
+
+def test_voice_bar_single_window_bottom_center_flow_and_fade_out(qapp: QApplication) -> None:
+    """录音 → 字幕 → 润色 → 已输入 → 保持 1.5s 后淡出：全程只有一个顶层窗、底部居中。"""
+    clock, advance = _fake_clock()
+    before = {w for w in QApplication.topLevelWidgets() if w.isVisible()}
+    hud = VoiceHudOverlay(available_screen_rect=(0, 0, 1280, 800), clock=clock)
+    try:
+        assert hud.isVisible() is False
         hud.set_recording()
+        advance(400)
         assert hud.isVisible() is True
-        assert hud.is_mouse_passthrough is True
-        assert "0:00" in hud.capsule_text
-        now[0] = 104.2
-        hud._on_record_tick()
-        assert "0:04" in hud.capsule_text
+        assert hud.mode == "recording"
+        assert hud.capsule_text == "录音中 0:00"
+
+        hud.update_caption(
+            stable_text="第一句历史前缀应当在超过两行后平滑滚出顶部视野之外，" * 3 + "当前正在稳定输出的倒数第二行内容，",
+            tail_text="以及尾部实时跳动的增量识别片段",
+        )
+        advance(400)
+        lines = hud.visible_caption_lines()
+        assert len(lines) == 2
+        assert lines[-1][1].endswith("增量识别片段")
+        img = _bar_image(hud)
+        assert _pixels_of(img, theme.STABLE_TEXT_HEX)
+        assert _pixels_of(img, theme.TAIL_TEXT_HEX)
+
+        assert [w for w in QApplication.topLevelWidgets() if w.isVisible() and w not in before] == [hud]
+        assert [w for w in hud.findChildren(QWidget) if w.isWindow()] == []
+        drawn = _painted_box(img)
+        assert abs(hud.x() + drawn.center().x() + 0.5 - 640) <= 1
+        assert abs(hud.y() + drawn.bottom() + 1 - (800 - 28)) <= 1
+        geometry = hud.geometry()
 
         hud.set_polishing()
+        advance(400)
         assert hud.mode == "polishing"
-        assert hud.is_mouse_passthrough is True
+        assert hud.visible_caption_lines()[-1][1] == ""
 
-        hud.set_busy("截图准备中…")
-        assert hud.mode == "busy"
-        assert "截图准备中" in hud.capsule_text
-        assert hud.is_mouse_passthrough is True
+        hud.set_typed("最终润色后的句子。")
+        advance(400)
+        hud.set_idle()  # 事件流随后的 idle 不打断已输入的保持
+        assert hud.mode == "toast"
+        assert hud.capsule_text == "✓ 已输入"
+        assert hud.visible_caption_lines() == [("最终润色后的句子。", "")]
+        assert hud.geometry() == geometry
 
-        hud.set_error("未检测到麦克风", duration_ms=0)
-        assert hud.mode == "error"
-        assert hud.is_mouse_passthrough is True
-
-        hud.show_toast("已复制 OCR 文本（28 字）", kind="ok", duration_ms=70)
+        advance(CAPTION_AUTO_HIDE_MS - 400 - 1)
+        hud._on_frame()
         assert hud.isVisible() is True
-        assert hud.is_mouse_passthrough is True
-        QTest.qWait(110)
-        assert hud.isVisible() is False
-
-        # delivery_unknown 确认卡片：唯一开启鼠标点击态（仍保持 WindowDoesNotAcceptFocus），点击后恢复穿透并隐藏
-        decisions: list[bool] = []
-        hud.show_delivery_confirmation(
-            "job-unknown-1",
-            "需要确认是否已经输入的语音句子",
-            lambda confirmed: decisions.append(confirmed),
-        )
+        assert _max_alpha(_bar_image(hud)) == 255
+        advance(2)
+        hud._on_frame()
+        advance(theme.VOICE_FADE_OUT_MS / 2)
         assert hud.isVisible() is True
-        assert hud.is_mouse_passthrough is False
-        assert bool(hud.windowFlags() & Qt.WindowType.WindowDoesNotAcceptFocus)
-
-        QTest.mouseClick(hud.confirm_button, Qt.MouseButton.LeftButton)
-        qapp.processEvents()
-        assert decisions == [True]
+        assert 0 < _max_alpha(_bar_image(hud)) < 128
+        advance(theme.VOICE_FADE_OUT_MS)
+        hud._on_frame()
         assert hud.isVisible() is False
-        assert hud.is_mouse_passthrough is True
-
-        # 支持取消（忽略）与双参数 (job_id, confirmed) 回调签名
-        pair_decisions: list[tuple[str, bool]] = []
-
-        def on_pair(job_id: str, ok: bool) -> None:
-            pair_decisions.append((job_id, ok))
-
-        hud.show_delivery_confirmation("job-unknown-2", "第二句待确认文本", on_pair)
-        QTest.mouseClick(hud.cancel_button, Qt.MouseButton.LeftButton)
-        qapp.processEvents()
-        assert pair_decisions == [("job-unknown-2", False)]
-        assert hud.is_mouse_passthrough is True
+        assert hud.mode == "idle"
     finally:
         hud.close()
         hud.deleteLater()
 
 
-def test_voice_hud_streaming_caption_strictly_two_lines_colors_and_autohide(
-    qapp: QApplication,
-) -> None:
-    assert CAPTION_AUTO_HIDE_MS == 1500
-
-    hud = VoiceHudOverlay(available_screen_rect=(0, 0, 1280, 800))
+def test_voice_bar_warning_notice_line_while_recording(qapp: QApplication) -> None:
+    """录音中的警告走附加提示行：不改状态、秒表、字幕与几何；替换重新计时、3s 后淡出、新录音清空。"""
+    clock, advance = _fake_clock()
+    hud = VoiceHudOverlay(available_screen_rect=(0, 0, 1280, 800), clock=clock)
     try:
-        # 输入超长流式文本（远超 2 行宽度），验证严格只保留最新末尾两行
-        early_prefix = "第一句历史前缀应当在超过两行后平滑滚出顶部视野之外不再挤压高度，" * 3
-        recent_stable = "当前正在稳定输出的倒数第二行内容，"
-        live_tail = "以及尾部实时跳动的增量识别片段"
+        hud.set_recording()
+        advance(1000)
+        hud.update_caption("今天下午三点开会讨论", "语音底栏")
+        advance(400)
+        hud._on_record_tick()
+        snapshot = (hud.mode, hud.capsule_text, hud.visible_caption_lines(), hud.geometry())
+        assert _pixels_of(_bar_image(hud), theme.STATE_WARN_HEX) == []
 
-        hud.update_caption(
-            stable_text=early_prefix + recent_stable,
-            tail_text=live_tail,
-        )
-        qapp.processEvents()
+        hud.show_toast("历史记录写入失败", kind="warn")
+        advance(300)
+        hud._on_record_tick()
+        assert (hud.mode, hud.capsule_text, hud.visible_caption_lines(), hud.geometry()) == snapshot
+        img = _bar_image(hud)
+        warn = _pixels_of(img, theme.STATE_WARN_HEX)
+        caption = _pixels_of(img, theme.STABLE_TEXT_HEX)
+        assert warn
+        assert max(y for _, y in warn) < min(y for _, y in caption)
 
-        assert hud.caption_bar.isVisible() is True
-        assert bool(hud.caption_bar.windowFlags() & Qt.WindowType.WindowTransparentForInput)
-        assert bool(hud.caption_bar.windowFlags() & Qt.WindowType.WindowDoesNotAcceptFocus)
+        advance(1700)
+        hud.show_toast("第二条警告", kind="warn")
+        advance(1500)  # 第一条若未被替换此时早已淡出
+        assert _pixels_of(_bar_image(hud), theme.STATE_WARN_HEX)
+        advance(theme.VOICE_NOTICE_SHOW_MS + theme.VOICE_NOTICE_OUT_MS - 1500)
+        hud._on_frame()
+        assert _pixels_of(_bar_image(hud), theme.STATE_WARN_HEX) == []
+        assert hud.mode == "recording"
 
-        lines = hud.visible_caption_lines()
-        assert len(lines) == 2
-        rendered_joined = "".join(s + t for s, t in lines)
-        assert "第一句历史前缀" != rendered_joined[:7]
-        assert live_tail in rendered_joined
-        assert lines[-1][1].endswith("增量识别片段")
+        hud.show_toast("第三条警告", kind="warn")
+        advance(300)
+        hud.set_recording()
+        advance(300)
+        assert _pixels_of(_bar_image(hud), theme.STATE_WARN_HEX) == []
 
-        # 抓取字幕条真实渲染像素，验证同屏存在 #f8fafc (stable_text) 与 #94a3b8 (tail_text) 色系字形像素
-        cap_img = hud.caption_bar.grab().toImage()
-        stable_target = QColor(theme.STABLE_TEXT_HEX)
-        tail_target = QColor(theme.TAIL_TEXT_HEX)
-        found_stable_px = False
-        found_tail_px = False
-        for y in range(cap_img.height()):
-            for x in range(cap_img.width()):
-                c = cap_img.pixelColor(x, y)
-                if (
-                    abs(c.red() - stable_target.red()) <= 8
-                    and abs(c.green() - stable_target.green()) <= 8
-                    and abs(c.blue() - stable_target.blue()) <= 8
-                ):
-                    found_stable_px = True
-                if (
-                    abs(c.red() - tail_target.red()) <= 10
-                    and abs(c.green() - tail_target.green()) <= 10
-                    and abs(c.blue() - tail_target.blue()) <= 10
-                ):
-                    found_tail_px = True
-        assert found_stable_px is True
-        assert found_tail_px is True
+        hud.set_error("未检测到麦克风输入")
+        assert hud.mode == "error"
+        hud.show_toast("历史记录写入失败", kind="warn")
+        assert hud.mode == "toast"
+        assert hud.capsule_text == "历史记录写入失败"
+    finally:
+        hud.close()
+        hud.deleteLater()
 
-        # 验证完成态定格与自动隐藏（默认 1500ms；此处用短 hold 验证定时器闭环）
-        hud.finish_caption(hold_ms=80)
-        assert hud.caption_bar.isVisible() is True
-        assert hud.caption_bar.is_auto_hide_active() is True
-        QTest.qWait(120)
-        assert hud.caption_bar.isVisible() is False
-        assert hud.visible_caption_lines() == []
+
+def test_voice_bar_only_confirm_card_takes_clicks(qapp: QApplication) -> None:
+    """只有确认卡片区域接收点击并回调 on_decision(job_id?, confirmed)；其余状态鼠标穿透。"""
+    clock, advance = _fake_clock()
+    hud = VoiceHudOverlay(available_screen_rect=(0, 0, 1280, 800), clock=clock)
+    try:
+        for enter in (
+            hud.set_recording,
+            hud.set_polishing,
+            lambda: hud.set_error("未检测到麦克风"),
+            lambda: hud.show_toast("历史记录写入失败", kind="warn"),
+        ):
+            enter()
+            assert hud.is_mouse_passthrough is True
+            assert hud.mask().isEmpty()
+
+        decisions: list[bool] = []
+        hud.show_delivery_confirmation("job-unknown-1", "需要确认是否已经输入的语音句子", decisions.append)
+        advance(400)
+        hud._on_frame()
+        assert hud.mode == "confirm"
+        assert hud.is_mouse_passthrough is False
+        assert bool(hud.windowFlags() & Qt.WindowType.WindowDoesNotAcceptFocus)
+        img = _bar_image(hud)
+        card = hud.mask().boundingRect()
+        drawn = _painted_box(img)
+        for edge in ("left", "top", "right", "bottom"):
+            assert abs(getattr(card, edge)() - getattr(drawn, edge)()) <= 1, edge
+        assert hud.mask().contains(QPoint(2, 2)) is False
+
+        QTest.mouseClick(hud, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, _centroid(_pixels_of(img, theme.ACCENT_HEX)))
+        assert decisions == [True]
+        assert hud.is_mouse_passthrough is True
+        assert hud.mask().isEmpty()
+
+        pairs: list[tuple[str, bool]] = []
+        hud.show_delivery_confirmation("job-unknown-2", "第二句待确认文本", lambda job_id, ok: pairs.append((job_id, ok)))
+        advance(400)
+        hud._on_frame()
+        ignore_at = _centroid(_pixels_of(_bar_image(hud), theme.SURFACE_2_HEX))
+        QTest.mouseClick(hud, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, ignore_at)
+        assert pairs == [("job-unknown-2", False)]
+        assert hud.is_mouse_passthrough is True
     finally:
         hud.close()
         hud.deleteLater()
@@ -795,7 +863,6 @@ def test_selector_transparent_live_mode_and_no_flicker_hud_guards(qapp: QApplica
     hud = VoiceHudOverlay(available_screen_rect=(0, 0, 1920, 1080), clock=lambda: now_box[0])
     try:
         assert hud.testAttribute(Qt.WidgetAttribute.WA_InputMethodEnabled) is False
-        assert hud.caption_bar.testAttribute(Qt.WidgetAttribute.WA_InputMethodEnabled) is False
         hud.set_recording()
         first_geom = hud.geometry()
         # 同秒内 tick 不变更文本，不应抖动几何或重触发 show

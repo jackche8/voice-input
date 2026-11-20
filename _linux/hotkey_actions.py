@@ -1,15 +1,13 @@
-"""快捷键后端共享的动作层：录音开始/停止、截图翻译、纯 OCR、重复输入、关闭浮层。
+"""快捷键后端共用的接口：GLib 调度适配、动作与上下文、后端上报的 sink 协议、自判开始后端的结束补发。
 
-后端只负责把"按键按下/松开"翻译成这里的调用，不复制业务逻辑；业务实现由 `_desktop` 或 `_platform` 注入。
-portal 路径已经有原生 Deactivated，无需补发修饰键释放。
-当运行在无 `gi`（PyGObject）的隔离测试或纯 Qt 环境时，自动回退线程安全的定时器/即时调度。
+后端只把按键事件翻译成 sink 上报（按下区间、放行、Esc、事件源失败），不持有按住状态；状态与执行动作在
+`_linux/hotkey_dispatch.py`。当运行在无 `gi`（PyGObject）的隔离测试或纯 Qt 环境时，自动回退线程安全的定时器/即时调度。
 """
 from __future__ import annotations
 
 import threading
-import time
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Protocol
 
 
@@ -63,6 +61,7 @@ except Exception:  # pragma: no cover - used in isolated venv-test without PyGOb
     GLib = _FallbackGLib()  # type: ignore[assignment]
 
 from _hotkey import HotkeyBindings  # noqa: E402
+from _linux.hotkey_state import Action  # noqa: E402
 from _linux.inject_guard import InjectGuard  # noqa: E402
 from _linux.modifiers import ModifierJanitor  # noqa: E402
 
@@ -74,6 +73,8 @@ class HotkeyActions(Protocol):
 
     def screenshot(self) -> None: ...
 
+    def ocr(self) -> None: ...
+
     def repeat(self) -> None: ...
 
     def overlay_active(self) -> bool: ...
@@ -83,7 +84,7 @@ class HotkeyActions(Protocol):
 
 @dataclass
 class CallbackHotkeyActions:
-    """基于函数回调的 `HotkeyActions` 实现，完整支持四键（`on_ocr` 默认空回调兼容旧调用方）。"""
+    """基于函数回调的 `HotkeyActions` 实现，完整支持四键。"""
 
     on_voice_start: Callable[[], bool]
     on_voice_stop: Callable[[], None]
@@ -115,10 +116,6 @@ class CallbackHotkeyActions:
         return self.on_close_overlay()
 
 
-def _noop() -> None:
-    return None
-
-
 @dataclass
 class HotkeyContext:
     actions: HotkeyActions
@@ -126,76 +123,34 @@ class HotkeyContext:
     janitor: ModifierJanitor
     guard: InjectGuard
     session_type: str
-    on_ocr: Callable[[], None] = field(default=_noop)
 
 
-class HotkeyActionMixin:
-    ctx: HotkeyContext
-    voice_active: bool
-    voice_started_at: float
-    _pending_release_id: int
-    _release_modifiers_on_stop = True
+class HotkeySink(Protocol):
+    """后端上报按下区间与放行的唯一去处（主线程执行动作，单一按住状态）。"""
 
-    def _init_hotkey_actions(self, ctx: HotkeyContext) -> None:
-        self.ctx = ctx
-        self.voice_active = False
-        self.voice_started_at = 0.0  # 录音开始时刻，供看门狗判定 release 丢失卡死
-        self._pending_release_id = 0
+    @property
+    def voice_active(self) -> bool: ...
 
-    def _cancel_pending_release(self) -> None:
-        if self._pending_release_id:
-            try:
-                GLib.source_remove(self._pending_release_id)
-            except Exception:
-                pass
-            self._pending_release_id = 0
+    def interval_started(self, action: Action, s_ms: int) -> bool: ...
 
-    def reset_voice(self) -> None:
-        """外部看门狗强制 finish 后复位录音按下态并取消挂起释放定时器。"""
-        self._cancel_pending_release()
-        self.voice_active = False
-        self.voice_started_at = 0.0
+    def interval_ended(self, action: Action, e_ms: int) -> bool: ...
 
-    def _on_voice_press(self) -> None:
-        self._cancel_pending_release()
-        if not self.voice_active:
-            self.voice_active = True
-            self.voice_started_at = time.monotonic()
-            if not self.ctx.actions.voice_start():
-                self.voice_active = False
+    def activated(self, action: Action, t_ms: int) -> bool: ...
 
-    def _schedule_release(self) -> bool:
-        """50ms 延迟释放：X11 自动重复会在 KeyRelease 后立刻补 KeyPress。"""
-        self._cancel_pending_release()
-        self._pending_release_id = GLib.timeout_add(50, self._do_release)
-        return False
+    def reader_progress(self, p_ms: int) -> bool: ...
 
-    def _do_release(self) -> bool:
-        self._pending_release_id = 0
-        if self.voice_active:
-            self.voice_active = False
-            self.ctx.actions.voice_stop()
-            if self._release_modifiers_on_stop and self.ctx.janitor is not None:
-                self.ctx.janitor.release_hotkey(self.ctx.bindings.voice)
-        return False
+    def escape_pressed(self) -> None: ...
 
-    def _on_screenshot(self) -> bool:
-        self.ctx.actions.screenshot()
-        return False
+    def source_failed(self, reason: str) -> bool: ...
 
-    def _on_ocr(self) -> bool:
-        ocr_fn = getattr(self.ctx.actions, "ocr", None)
-        if callable(ocr_fn):
-            ocr_fn()
-        else:
-            self.ctx.on_ocr()
-        return False
 
-    def _on_repeat(self) -> bool:
-        self.ctx.actions.repeat()
-        return False
+def end_interval_and_release(sink: HotkeySink, ctx: HotkeyContext, action: Action, ts_ms: int) -> bool:
+    """自行判定开始的后端（X11、回退模式）在主线程报结束；这次结束停了录音时补发语音组合的修饰键抬起。
 
-    def _close_overlay_on_key(self) -> None:
-        """非修饰键且未命中自身热键的普通按键（含 Esc）→ 关活跃浮窗，不依赖焦点。"""
-        if self.ctx.actions.overlay_active():
-            GLib.idle_add(self.ctx.actions.close_overlay)
+    补发是这些后端的现状语义（门户模式不补发），归后端、不归分发器；可作 GLib.idle_add 回调。
+    """
+    was_active = sink.voice_active
+    sink.interval_ended(action, ts_ms)
+    if was_active and not sink.voice_active and ctx.janitor is not None:
+        ctx.janitor.release_hotkey(ctx.bindings.voice)
+    return False

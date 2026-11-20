@@ -146,12 +146,31 @@ def _portal(portal_version: PortalVersionFn, interface: str, cap_id: str, label:
     )
 
 
+def _evdev_keyboards(keyboard_devices: Callable[[], list[str]]) -> SetupCapability:
+    """Wayland 下快捷键的按下与松开只能从 evdev 读到：读不到键盘类设备时快捷键组件不可用。"""
+    try:
+        paths = keyboard_devices()
+        error = None
+    except Exception as exc:  # python-evdev 缺失等探测失败，原因直接展示
+        paths, error = [], f"{type(exc).__name__}: {exc}"
+    if error is None and not paths:
+        error = "当前用户读不到任何键盘设备（/dev/input/event*），通常需加入 input 组并重新登录"
+    return SetupCapability(
+        id="evdev_keyboards",
+        label="物理按键读取（evdev）",
+        available=bool(paths),
+        required=True,
+        detail=error or "、".join(paths),
+    )
+
+
 def probe_capabilities(
     *,
     session: str,
     which: Callable[[str], str | None],
     portal_version: PortalVersionFn,
     ocr_languages: Callable[[], list[str]],
+    keyboard_devices: Callable[[], list[str]],
 ) -> list[SetupCapability]:
     caps = [
         _tool(which, "xclip", "剪贴板 xclip", required=True),
@@ -172,6 +191,8 @@ def probe_capabilities(
     if not x11:
         caps.append(_portal(portal_version, PORTAL_SCREENSHOT, "portal_screenshot", "Wayland 截图 portal", required=wayland))
         caps.append(_portal(portal_version, PORTAL_SHORTCUTS, "portal_shortcuts", "Wayland 全局快捷键 portal", required=wayland))
+    if wayland:
+        caps.append(_evdev_keyboards(keyboard_devices))
     if not wayland:
         caps.append(_tool(which, "maim", "X11 截图 maim", required=x11))
     try:

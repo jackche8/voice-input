@@ -7,6 +7,9 @@
    `actual_triggers` 与配置值，不一致时自动调用 `ConfigureShortcuts` 并发出明确重绑提示。
 2. 监听 `org.freedesktop.portal.Desktop` D-Bus 总线名拥有者变更：portal 退出时通知回退观察器，
    portal 重启上线（新 owner 出现）时强制重新注册 `org.freedesktop.host.portal.Registry` 并重建会话。
+
+门户只负责「放行」：`Activated(t)` 原样交给 sink 判定（一次按下由 evdev 的按下区间界定，结束只看 evdev），
+`Deactivated` 不再订阅；绑定成功与 `ShortcutsChanged` 时把 GNOME 实际绑定交给 manager 下发给 evdev。
 """
 from __future__ import annotations
 
@@ -14,9 +17,10 @@ import os
 import re
 import time
 import traceback
+from collections.abc import Callable
 
 from _hotkey import HOTKEY_MODIFIERS, normalize_accel, normalize_hotkey, to_portal_trigger
-from _linux.hotkey_actions import GLib, HotkeyActionMixin, HotkeyContext
+from _linux.hotkey_actions import GLib, HotkeyContext, HotkeySink
 from _linux.portal_dbus import (
     GLOBAL_SHORTCUTS_IFACE,
     PORTAL_NAME,
@@ -28,9 +32,7 @@ from _linux.portal_dbus import (
 )
 
 _KNOWN_ACTIONS = ("voice", "screenshot", "ocr", "repeat")
-_DISCRETE_ACTIONS = frozenset({"screenshot", "ocr", "repeat"})
-DISCRETE_DEBOUNCE_S = 0.35
-DISCRETE_STALE_S = 1.5
+_MASK = 0xFFFFFFFF
 
 
 def _canonicalize_modifier_order(normalized: str) -> str:
@@ -89,27 +91,26 @@ def portal_trigger_matches(actual_trigger: str, configured_hotkey: str) -> bool:
     return actual == expected
 
 
-class PortalGlobalShortcutsGrabber(HotkeyActionMixin):
-    """xdg-desktop-portal GlobalShortcuts 后端（Wayland 主路径）。"""
-
-    _release_modifiers_on_stop = False
-    DISCRETE_STALE_S = DISCRETE_STALE_S
+class PortalGlobalShortcutsGrabber:
+    """xdg-desktop-portal GlobalShortcuts 后端（Wayland 主路径）：只上报放行与 GNOME 实际绑定。"""
 
     def __init__(
         self,
         ctx: HotkeyContext,
+        sink: HotkeySink,
         on_bound=None,
         on_failed=None,
+        on_triggers: Callable[[dict[str, str]], None] | None = None,
         *,
         dbus_mod=None,
         bus=None,
         version_probe=portal_interface_version,
-        clock=None,
     ) -> None:
-        self._init_hotkey_actions(ctx)
+        self.ctx = ctx
+        self.sink = sink
         self._on_bound_cb = on_bound
         self._on_failed_cb = on_failed
-        self._clock = clock
+        self._on_triggers_cb = on_triggers
         self._dbus = None
         self._bus = None
         self._iface = None
@@ -117,9 +118,6 @@ class PortalGlobalShortcutsGrabber(HotkeyActionMixin):
         self._signal_matches: list = []
         self._request_matches: list = []
         self._token_seq = 0
-        self._active_shortcuts: set[str] = set()
-        self._last_discrete_at: dict[str, float] = {}
-        self._last_activated_at: dict[str, float] = {}
         self._closed = False
         self._failed = False
         self._bound = False
@@ -179,9 +177,6 @@ class PortalGlobalShortcutsGrabber(HotkeyActionMixin):
         self._bound = False
         self._session_handle = None
         self._configure_attempted = False
-        self._active_shortcuts.clear()
-        self._last_discrete_at.clear()
-        self._last_activated_at.clear()
         try:
             self._clear_request_matches()
             self._clear_signal_matches()
@@ -216,7 +211,6 @@ class PortalGlobalShortcutsGrabber(HotkeyActionMixin):
     def _connect_signals(self) -> None:
         for name, cb in (
             ("Activated", self._on_activated),
-            ("Deactivated", self._on_deactivated),
             ("ShortcutsChanged", self._on_shortcuts_changed),
         ):
             try:
@@ -458,11 +452,17 @@ class PortalGlobalShortcutsGrabber(HotkeyActionMixin):
         for sid, trigger in self.actual_triggers.items():
             print(f"    {sid}: {trigger}", flush=True)
         self._sync_action_triggers_and_verify()
+        self._report_triggers()
         if self._on_bound_cb:
             try:
                 self._on_bound_cb()
             except Exception:
                 traceback.print_exc()
+
+    def _report_triggers(self) -> None:
+        """GNOME 实际绑定是组合定义的唯一来源：交给 manager 解析后下发给 evdev。"""
+        if self._on_triggers_cb is not None:
+            self._on_triggers_cb(dict(self.action_triggers))
 
     def _on_shortcuts_changed(self, session_handle, shortcuts) -> None:
         if self._session_handle and str(session_handle) != self._session_handle:
@@ -470,59 +470,17 @@ class PortalGlobalShortcutsGrabber(HotkeyActionMixin):
         self.actual_triggers = self._parse_shortcuts(shortcuts)
         self._sync_action_triggers_and_verify(allow_configure=False)
         print(f"  快捷键: portal 键位已更新 {self.actual_triggers}", flush=True)
+        self._report_triggers()
 
     def _on_activated(self, session_handle, shortcut_id, timestamp, options) -> None:
-        del timestamp, options
-        if self._session_handle and str(session_handle) != self._session_handle:
+        del options
+        if self._closed or (self._session_handle and str(session_handle) != self._session_handle):
             return
         action = action_from_shortcut_id(str(shortcut_id))
-        if action in _DISCRETE_ACTIONS:
-            now = self._clock() if self._clock is not None else time.monotonic()
-            # 根治：GNOME Portal 在长按离散快捷键时会以 ~30Hz 连发 Activated，
-            # 必须按活跃态 + 350ms 防抖拦截重复触发；同时若前一次 Deactivated 信号丢失，
-            # 超过 DISCRETE_STALE_S 自动清除过期活跃态并放行本次新触发。
-            if action in self._active_shortcuts:
-                if (now - self._last_activated_at.get(action, 0.0)) < self.DISCRETE_STALE_S:
-                    self._last_activated_at[action] = now
-                    return
-                self._active_shortcuts.discard(action)
-                self._last_activated_at.pop(action, None)
-            last = self._last_discrete_at.get(action, -1e9)
-            if (now - last) < DISCRETE_DEBOUNCE_S:
-                return
-            self._active_shortcuts.add(action)
-            self._last_discrete_at[action] = now
-            self._last_activated_at[action] = now
-        GLib.idle_add(self._idle_action, action)
-
-    def _idle_action(self, sid: str) -> bool:
-        if self._closed:
-            return False
-        action = action_from_shortcut_id(sid)
-        if action == "voice":
-            self._on_voice_press()
-        elif action == "screenshot":
-            self._on_screenshot()
-        elif action == "ocr":
-            self._on_ocr()
-        elif action == "repeat":
-            self._on_repeat()
-        return False
-
-    def _on_deactivated(self, session_handle, shortcut_id, timestamp, options) -> None:
-        del timestamp, options
-        if self._session_handle and str(session_handle) != self._session_handle:
+        if action not in _KNOWN_ACTIONS:
             return
-        action = action_from_shortcut_id(str(shortcut_id))
-        self._active_shortcuts.discard(action)
-        self._last_activated_at.pop(action, None)
-        if action == "voice":
-            GLib.idle_add(self._idle_stop)
-
-    def _idle_stop(self) -> bool:
-        if not self._closed:
-            self._do_release()
-        return False
+        # timestamp = 合成器单调毫秒（与 evdev 内核事件时间同源，实测相等）
+        GLib.idle_add(self.sink.activated, action, int(timestamp) & _MASK)
 
     def _fail(self, message: str) -> None:
         if self._failed or self._closed:
@@ -546,10 +504,6 @@ class PortalGlobalShortcutsGrabber(HotkeyActionMixin):
             return
         self._closed = True
         self.watching_owner = False
-        self._active_shortcuts.clear()
-        self._last_discrete_at.clear()
-        self._last_activated_at.clear()
-        self._cancel_pending_release()
         self._clear_request_matches()
         self._clear_signal_matches()
         if self._owner_watch is not None:

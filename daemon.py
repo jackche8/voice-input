@@ -140,6 +140,7 @@ def main() -> None:
         on_event=lambda ev: bridge.post(
             lambda _ev=ev: dispatch_product_event(_ev, hud=hud, tray=tray, on_confirm_resend=_on_confirm_resend)
         ),
+        on_connected=status.resend_hotkey_error,
     )
     event_loop.start()
 
@@ -152,6 +153,7 @@ def main() -> None:
         on_repeat=actions.repeat,
         overlay_active=actions.overlay_active,
         close_overlay=actions.close_overlay,
+        on_error=status.set_hotkey_error,
     )
     hotkey_rig.start()
 

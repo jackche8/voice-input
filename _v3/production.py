@@ -40,6 +40,7 @@ from _history_service import HistoryService
 from _jobs import JobStore
 from _jobs_service import JobsService
 from _linux.conflicts import scan_hotkey_conflicts
+from _linux.evdev_keyboards import readable_keyboard_paths
 from _ocr import image_to_text
 from _ocr_layout import extract_ocr_layout
 from _ollama import OllamaClient
@@ -152,6 +153,7 @@ class SystemAdapters:
     which: Callable[[str], str | None] = shutil.which
     portal_version: Callable[[str], tuple[int | None, str | None]] = dbus_portal_version
     ocr_languages: Callable[[], list[str]] | None = None
+    keyboard_devices: Callable[[], list[str]] = readable_keyboard_paths
     list_ips: Callable[[], list[str]] = list_physical_lan_ipv4
     http_transport: httpx.BaseTransport | None = None
     spawn: Spawn = thread_spawn
@@ -245,6 +247,7 @@ def _setup_service(
                 which=adapters.which,
                 portal_version=adapters.portal_version,
                 ocr_languages=ocr_languages,
+                keyboard_devices=adapters.keyboard_devices,
             ),
             hotkey_conflicts_capability(hotkey_scan),
             desktop_daemon_capability(

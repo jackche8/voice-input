@@ -3,19 +3,6 @@ from __future__ import annotations
 from _capture import FakeAudioSource, SessionCapture, chunk_pcm, chunk_width, duration_s
 from _focus import StaticFocusProbe
 from _hotkey import normalize_accel, to_portal_trigger
-from _linux.inject_guard import InjectGuard
-from _linux.watchdog import IdleSafetyWatchdog
-
-
-class Clock:
-    def __init__(self) -> None:
-        self.t = 1000.0  # monotonic 不会是 0；0 表示“未记录开始时刻”
-
-    def __call__(self) -> float:
-        return self.t
-
-    def advance(self, s: float) -> None:
-        self.t += s
 
 
 def test_short_utterance_discarded():
@@ -57,81 +44,6 @@ def test_mic_open_failure_raises_and_resets():
     else:
         raise AssertionError("开麦失败必须抛出")
     assert cap.recording is False
-
-
-class FakeManager:
-    def __init__(self, clock) -> None:
-        self.voice_active = True
-        self.voice_started_at = clock()
-        self.stopped: list[str] = []
-
-    def force_stop_voice(self) -> None:
-        self.voice_active = False
-        self.stopped.append("finish")
-
-
-class FakeJanitor:
-    def __init__(self) -> None:
-        self.calls: list[str] = []
-
-    def clear_uinput(self):
-        self.calls.append("uinput")
-
-    def release_seat_grab(self):
-        self.calls.append("seat")
-
-    def clear_xtest(self):
-        self.calls.append("xtest")
-
-
-def test_watchdog_finishes_not_cancels_after_120s_and_feeds_systemd():
-    clock = Clock()
-    manager = FakeManager(clock)
-    janitor = FakeJanitor()
-    notes: list[str] = []
-    wd = IdleSafetyWatchdog(
-        manager=manager, janitor=janitor, guard=InjectGuard(), overlay_active=lambda: False,
-        notify=notes.append, clock=clock,
-    )
-    clock.advance(119)
-    assert wd.tick() is True
-    assert manager.stopped == [] and janitor.calls == []
-    clock.advance(2)
-    assert wd.tick() is True
-    assert manager.stopped == ["finish"]
-    assert janitor.calls == ["uinput", "seat", "xtest"]
-    assert notes == ["WATCHDOG=1", "WATCHDOG=1"]
-
-
-def test_watchdog_skips_cleanup_while_injecting_or_overlay():
-    clock = Clock()
-    manager = FakeManager(clock)
-    manager.voice_active = False
-    janitor = FakeJanitor()
-    guard = InjectGuard()
-    wd = IdleSafetyWatchdog(manager=manager, janitor=janitor, guard=guard, overlay_active=lambda: True, notify=lambda s: None, clock=clock)
-    wd.tick()
-    assert janitor.calls == []
-    wd.overlay_active = lambda: False
-    import threading
-
-    held = threading.Event()
-    release = threading.Event()
-
-    def hold():
-        with guard.lock:
-            held.set()
-            release.wait(2)
-
-    t = threading.Thread(target=hold)
-    t.start()
-    held.wait(2)
-    wd.tick()
-    release.set()
-    t.join()
-    assert janitor.calls == []
-    wd.tick()
-    assert janitor.calls == ["uinput", "seat", "xtest"]
 
 
 def test_hotkey_helpers():

@@ -104,6 +104,20 @@ def test_daemon_read_failure_is_unknown():
     assert "./restart.sh" not in cap.detail and "--acceptance" not in cap.detail
 
 
+# ---------------------------------------------------------------- evdev_keyboards
+def test_wayland_requires_readable_keyboards_and_x11_does_not_list_it():
+    def cap(world):
+        return {c.id: c for c in world.capabilities(world.session)}.get("evdev_keyboards")
+
+    none = cap(FakeWorld(keyboards=[]))
+    assert none.required and not none.available and "input 组" in none.detail
+    broken = cap(FakeWorld(keyboards=ModuleNotFoundError("No module named 'evdev'")))
+    assert broken.required and not broken.available and broken.detail == "ModuleNotFoundError: No module named 'evdev'"
+    ok = cap(FakeWorld(keyboards=["/dev/input/event5", "/dev/input/event16"]))
+    assert ok.required and ok.available and "/dev/input/event16" in ok.detail
+    assert cap(FakeWorld(session="x11", keyboards=[])) is None
+
+
 # ---------------------------------------------------------------- asr status (B2)
 class FixedTasks(SetupTaskManager):
     def __init__(self, tasks):

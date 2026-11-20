@@ -15,11 +15,8 @@ sys.path.insert(0, str(ROOT))
 from _hotkey import HotkeyBindings, normalize_accel, to_portal_trigger  # noqa: E402
 from _linux.conflicts import scan_hotkey_conflicts  # noqa: E402
 from _linux.geometry import selection_crop_box  # noqa: E402
-from _linux.hotkey_actions import CallbackHotkeyActions, HotkeyActionMixin, HotkeyContext  # noqa: E402
-from _linux.hotkey_evdev import EvdevHotkeyGrabber  # noqa: E402
+from _linux.hotkey_actions import CallbackHotkeyActions, HotkeyContext  # noqa: E402
 from _linux.hotkey_portal import (  # noqa: E402
-    DISCRETE_DEBOUNCE_S,
-    DISCRETE_STALE_S,
     PortalGlobalShortcutsGrabber,
     action_from_shortcut_id,
     normalize_portal_trigger,
@@ -34,6 +31,7 @@ from _linux.portal_dbus import (  # noqa: E402
     PORTAL_NAME,
     register_portal_host_app,
 )
+from tests.hotkey.fakes import FakeX11Display, ManualTimers, RecordingSink  # noqa: E402
 
 DEFAULTS = HotkeyBindings(voice="ctrl+alt+z", screenshot="ctrl+alt+x", ocr="ctrl+alt+o", repeat="ctrl+alt+r")
 
@@ -102,62 +100,6 @@ def test_parse_shortcuts_description() -> None:
     assert parsed["screenshot"] == "CTRL+ALT+X"
     assert parsed["ocr"] == "CTRL+ALT+O"
     assert parsed["repeat"] == "CTRL+ALT+R"
-
-
-class _DummyRecorder:
-    """旧版 HotkeyActions 夹具（故意不含 ocr 方法，验证默认空回调向后兼容）。"""
-
-    def __init__(self) -> None:
-        self.starts = 0
-        self.stops = 0
-
-    def voice_start(self) -> bool:
-        self.starts += 1
-        return True
-
-    def voice_stop(self) -> None:
-        self.stops += 1
-
-    def screenshot(self) -> None:
-        pass
-
-    def repeat(self) -> None:
-        pass
-
-    def overlay_active(self) -> bool:
-        return False
-
-    def close_overlay(self) -> bool:
-        return False
-
-
-class _DummyActions(HotkeyActionMixin):
-    _release_modifiers_on_stop = False
-
-    def __init__(self) -> None:
-        self.recorder = _DummyRecorder()
-        self._init_hotkey_actions(
-            HotkeyContext(
-                actions=self.recorder,
-                bindings=DEFAULTS,
-                janitor=None,
-                guard=InjectGuard(),
-                session_type="x11",
-            )
-        )
-
-
-def test_action_mixin_voice_start_stop_and_default_ocr_noop() -> None:
-    actions = _DummyActions()
-    actions._on_voice_press()
-    actions._on_voice_press()
-    assert actions.voice_active is True
-    assert actions.recorder.starts == 1
-    assert actions._on_ocr() is False  # 旧调用方无 ocr() 时安全 no-op，不抛异常
-    actions._do_release()
-    actions._do_release()
-    assert actions.voice_active is False
-    assert actions.recorder.stops == 1
 
 
 def test_portal_four_hotkeys_rebind_mismatch_and_bus_restart_recovery() -> None:
@@ -257,13 +199,10 @@ def test_portal_four_hotkeys_rebind_mismatch_and_bus_restart_recovery() -> None:
         "host_registers": [],
         "closed_sessions": 0,
     }
-    events: list[str] = []
     actions = CallbackHotkeyActions(
-        on_voice_start=lambda: (events.append("v_start") or True),
-        on_voice_stop=lambda: events.append("v_stop"),
-        on_screenshot=lambda: events.append("shot"),
-        on_ocr=lambda: events.append("ocr"),
-        on_repeat=lambda: events.append("repeat"),
+        on_voice_start=lambda: True,
+        on_voice_stop=lambda: None,
+        on_screenshot=lambda: None,
     )
     custom_bindings = HotkeyBindings(
         voice="ctrl+alt+z", screenshot="ctrl+shift+s", ocr="ctrl+alt+o", repeat="ctrl+alt+r"
@@ -287,10 +226,14 @@ def test_portal_four_hotkeys_rebind_mismatch_and_bus_restart_recovery() -> None:
         nonlocal failed_count
         failed_count += 1
 
+    sink = RecordingSink()
+    reported_triggers: list[dict[str, str]] = []
     grabber = PortalGlobalShortcutsGrabber(
         ctx,
+        sink,
         on_bound=on_bound,
         on_failed=on_failed,
+        on_triggers=reported_triggers.append,
         dbus_mod=FakeDbusMod(state),
         bus=bus,
         version_probe=lambda _iface: 2,
@@ -323,6 +266,13 @@ def test_portal_four_hotkeys_rebind_mismatch_and_bus_restart_recovery() -> None:
     assert bound_count == 1
     assert "screenshot" in grabber.mismatched_triggers
     assert state["configure_calls"] == ["/session/1"]
+    # GNOME 实际绑定（不是配置）交给 manager 下发给 evdev
+    assert reported_triggers[-1] == {
+        "voice": "CTRL+ALT+Z",
+        "screenshot": "CTRL+ALT+X",
+        "ocr": "CTRL+ALT+O",
+        "repeat": "CTRL+ALT+R",
+    }
 
     # 根治回归：ShortcutsChanged 信号到来时同步重算 mismatched_triggers（修复后清空，新冲突即时反映，且不死循环弹 ConfigureShortcuts）
     state["signals"]["ShortcutsChanged"](
@@ -336,6 +286,7 @@ def test_portal_four_hotkeys_rebind_mismatch_and_bus_restart_recovery() -> None:
     )
     assert grabber.mismatched_triggers == {}
     assert state["configure_calls"] == ["/session/1"]
+    assert reported_triggers[-1]["screenshot"] == "SHIFT+CTRL+S"
 
     state["signals"]["ShortcutsChanged"](
         "/session/1",
@@ -349,24 +300,23 @@ def test_portal_four_hotkeys_rebind_mismatch_and_bus_restart_recovery() -> None:
     assert "screenshot" in grabber.mismatched_triggers
     assert state["configure_calls"] == ["/session/1"]
 
-    # 验证四条热键信号派发（含按下/松开）
-    state["signals"]["Activated"]("/session/1", "voice_ctrl_alt_z", 0, {})
-    state["signals"]["Deactivated"]("/session/1", "voice_ctrl_alt_z", 0, {})
-    state["signals"]["Activated"]("/session/1", "screenshot_ctrl_shift_s", 0, {})
-    # 根治回归：长按快捷键期间 GNOME Portal 以 ~30Hz 连发 Activated，未 Deactivated 前必须全部忽略
-    for _ in range(10):
-        state["signals"]["Activated"]("/session/1", "screenshot_ctrl_shift_s", 0, {})
-    state["signals"]["Deactivated"]("/session/1", "screenshot_ctrl_shift_s", 0, {})
-    # 350ms 防抖窗口内再次按下也忽略
-    state["signals"]["Activated"]("/session/1", "screenshot_ctrl_shift_s", 0, {})
-    state["signals"]["Deactivated"]("/session/1", "screenshot_ctrl_shift_s", 0, {})
-    state["signals"]["Activated"]("/session/1", "ocr_ctrl_alt_o", 0, {})
-    state["signals"]["Activated"]("/session/1", "ocr_ctrl_alt_o", 0, {})
-    state["signals"]["Deactivated"]("/session/1", "ocr_ctrl_alt_o", 0, {})
-    state["signals"]["Activated"]("/session/1", "repeat_ctrl_alt_r", 0, {})
-    state["signals"]["Deactivated"]("/session/1", "repeat_ctrl_alt_r", 0, {})
+    # 门户只上报放行（带合成器时间戳），不订阅 Deactivated；别的会话与未知 ID 不上报
+    assert "Deactivated" not in state["signals"]
+    state["signals"]["Activated"]("/session/1", "voice_ctrl_alt_z", 1000, {})
+    state["signals"]["Activated"]("/session/1", "screenshot_ctrl_shift_s", 2000, {})
+    state["signals"]["Activated"]("/session/1", "screenshot_ctrl_shift_s", 2500, {})
+    state["signals"]["Activated"]("/session/1", "ocr_ctrl_alt_o", 3000, {})
+    state["signals"]["Activated"]("/session/1", "repeat_ctrl_alt_r", 4000, {})
+    state["signals"]["Activated"]("/session/other", "voice_ctrl_alt_z", 5000, {})
+    state["signals"]["Activated"]("/session/1", "unknown_shortcut", 6000, {})
     _drain_glib()
-    assert events == ["v_start", "v_stop", "shot", "ocr", "repeat"]
+    assert sink.calls == [
+        ("activated", "voice", 1000),
+        ("activated", "screenshot", 2000),
+        ("activated", "screenshot", 2500),
+        ("activated", "ocr", 3000),
+        ("activated", "repeat", 4000),
+    ]
 
     # 模拟 xdg-desktop-portal 退出并重启（owner -> "" -> ":1.88"）：必须调用单源 register_portal_host_app(force=True) 重注册
     regs_before_restart = len(state["host_registers"])
@@ -395,113 +345,60 @@ def test_portal_four_hotkeys_rebind_mismatch_and_bus_restart_recovery() -> None:
     assert state["closed_sessions"] == 1
 
 
-def test_x11_and_evdev_four_hotkeys_dispatch() -> None:
-    events: list[str] = []
-    actions = CallbackHotkeyActions(
-        on_voice_start=lambda: (events.append("v_start") or True),
-        on_voice_stop=lambda: events.append("v_stop"),
-        on_screenshot=lambda: events.append("shot"),
-        on_ocr=lambda: events.append("ocr"),
-        on_repeat=lambda: events.append("repeat"),
-    )
+def test_x11_reports_intervals_and_filters_autorepeat_release_pairs() -> None:
+    import _linux.hotkey_x11 as hotkey_x11
+
+    sink = RecordingSink()
     ctx = HotkeyContext(
-        actions=actions,
+        actions=CallbackHotkeyActions(on_voice_start=lambda: True, on_voice_stop=lambda: None, on_screenshot=lambda: None),
         bindings=DEFAULTS,
         janitor=None,
         guard=InjectGuard(),
         session_type="x11",
     )
+    def key(kind, ch, ms):
+        return type("E", (), {"type": kind, "detail": ord(ch), "time": ms})()
 
-    # 1. X11 HotkeyGrabber 四键 grab/ungrab 与分派
-    grabbed: list[tuple[int, int]] = []
-    ungrabbed: list[tuple[int, int]] = []
-
-    class FakeRoot:
-        def grab_key(self, kc, mask, *_rest):
-            grabbed.append((kc, mask))
-
-        def ungrab_key(self, kc, mask):
-            ungrabbed.append((kc, mask))
-
-    class FakeX11Display:
-        def set_error_handler(self, _fn):
-            pass
-
-        def screen(self):
-            return type("S", (), {"root": FakeRoot()})()
-
-        def keysym_to_keycode(self, sym):
-            return sym
-
-        def flush(self):
-            pass
-
-        def sync(self):
-            pass
-
-    x11 = HotkeyGrabber(
-        ctx,
-        display_factory=FakeX11Display,
-        hotkey_parser=lambda hk: (4, ord(hk.split("+")[-1])),
-    )
-    x11.grab()
-    grabbed_kcs = {kc for kc, _m in grabbed}
-    assert grabbed_kcs == {ord("z"), ord("x"), ord("o"), ord("r")}
-    x11._handle_event(type("E", (), {"type": _X_KEY_PRESS, "detail": ord("o")})())
-    x11._handle_event(type("E", (), {"type": _X_KEY_PRESS, "detail": ord("x")})())
-    x11._handle_event(type("E", (), {"type": _X_KEY_PRESS, "detail": ord("r")})())
-    x11._handle_event(type("E", (), {"type": _X_KEY_PRESS, "detail": ord("z")})())
-    x11._do_release()
-    assert events == ["ocr", "shot", "repeat", "v_start", "v_stop"]
-    x11.ungrab()
-    assert {kc for kc, _m in ungrabbed} == {ord("z"), ord("x"), ord("o"), ord("r")}
-    x11.cleanup()
-
-    # 2. EvdevHotkeyGrabber 四键命中分派 + 修饰键不误关浮窗、Esc 正常关闭
-    events.clear()
-    overlay_state = {"open": True}
-    ev_actions = CallbackHotkeyActions(
-        on_voice_start=lambda: (events.append("v_start") or True),
-        on_voice_stop=lambda: events.append("v_stop"),
-        on_screenshot=lambda: events.append("shot"),
-        on_ocr=lambda: events.append("ocr"),
-        on_repeat=lambda: events.append("repeat"),
-        is_overlay_active=lambda: overlay_state["open"],
-        on_close_overlay=lambda: (overlay_state.__setitem__("open", False) or events.append("close_ov") or False),
-    )
-    ev_ctx = HotkeyContext(
-        actions=ev_actions,
-        bindings=DEFAULTS,
-        janitor=None,
-        guard=InjectGuard(),
-        session_type="wayland",
-    )
-    fake_dev = type("FakeDev", (), {"fd": 99, "name": "kbd", "path": "/dev/input/event99", "close": lambda self: None})()
-    key_map = {"z": 44, "x": 45, "o": 24, "r": 19}
-    ev_grabber = EvdevHotkeyGrabber(
-        ev_ctx,
-        devices=[fake_dev],
-        combo_parser=lambda hk: {"trigger": key_map[hk.split("+")[-1]], "modifiers": [{29}, {56}]},
-    )
-    ev_grabber._handle_key_event(29, 1)  # Ctrl down -> 不误关浮窗
-    ev_grabber._handle_key_event(56, 1)  # Alt down -> 不误关浮窗
-    ev_grabber._handle_key_event(24, 1)  # O down -> OCR（组合键自身不误关浮窗）
-    ev_grabber._handle_key_event(24, 0)
-    ev_grabber._handle_key_event(45, 1)  # X down -> Screenshot!
-    ev_grabber._handle_key_event(45, 0)
-    ev_grabber._handle_key_event(19, 1)  # R down -> Repeat!
-    ev_grabber._handle_key_event(19, 0)
-    _drain_glib()
-    assert overlay_state["open"] is True
-    assert events == ["ocr", "shot", "repeat"]
-    # 释放修饰键后按 Esc (code=1) 正常关闭活跃浮窗
-    ev_grabber._handle_key_event(29, 0)
-    ev_grabber._handle_key_event(56, 0)
-    ev_grabber._handle_key_event(1, 1)
-    _drain_glib()
-    assert overlay_state["open"] is False
-    assert events[-1] == "close_ov"
-    ev_grabber.cleanup()
+    timers = ManualTimers()
+    saved_glib = hotkey_x11.GLib
+    hotkey_x11.GLib = timers
+    try:
+        x11 = HotkeyGrabber(
+            ctx,
+            sink,
+            display_factory=FakeX11Display,
+            hotkey_parser=lambda hk: (4, ord(hk.split("+")[-1])),
+        )
+        x11.grab()
+        assert {kc for kc, _m in x11.dpy.root.grabbed} == {ord("z"), ord("x"), ord("o"), ord("r")}
+        x11._handle_event(key(_X_KEY_PRESS, "o", 1000))
+        x11._handle_event(key(_X_KEY_RELEASE, "o", 1100))  # X 自动重复：松开后同一时刻又按下
+        x11._handle_event(key(_X_KEY_PRESS, "o", 1100))
+        x11._handle_event(key(_X_KEY_RELEASE, "o", 1500))
+        timers.fire_all()
+        for ch, action, ms in (("x", "screenshot", 2000), ("r", "repeat", 3000), ("z", "voice", 4000)):
+            x11._handle_event(key(_X_KEY_PRESS, ch, ms))
+            x11._handle_event(key(_X_KEY_RELEASE, ch, ms + 50))
+            timers.fire_all()
+        assert sink.calls == [
+            ("start", "ocr", 1000),
+            ("activated", "ocr", 1000),
+            ("end", "ocr", 1500),
+            ("start", "screenshot", 2000),
+            ("activated", "screenshot", 2000),
+            ("end", "screenshot", 2050),
+            ("start", "repeat", 3000),
+            ("activated", "repeat", 3000),
+            ("end", "repeat", 3050),
+            ("start", "voice", 4000),
+            ("activated", "voice", 4000),
+            ("end", "voice", 4050),
+        ]
+        x11.ungrab()
+        assert {kc for kc, _m in x11.dpy.root.ungrabbed} == {ord("z"), ord("x"), ord("o"), ord("r")}
+        x11.cleanup()
+    finally:
+        hotkey_x11.GLib = saved_glib
 
 
 def test_portal_presubscribes_response_before_dbus_call() -> None:
@@ -608,6 +505,7 @@ def test_portal_presubscribes_response_before_dbus_call() -> None:
     bound = []
     grabber = PortalGlobalShortcutsGrabber(
         ctx,
+        RecordingSink(),
         on_bound=lambda: bound.append(True),
         dbus_mod=ImmediateDbus(),
         bus=ImmediateBus(),
@@ -655,163 +553,15 @@ def test_conflict_scanner_known_show_desktop() -> None:
     assert any("show-desktop" in item for item in conflicts), conflicts
 
 
-def test_portal_discrete_debounce_deactivated_recovery_and_stale_self_heal() -> None:
-    """P1-3 回归：Deactivated 正常恢复 + 超 350ms 再次触发 + 长按连发持续抑制 + 丢 Deactivated 超 DISCRETE_STALE_S 自愈。"""
-    assert DISCRETE_DEBOUNCE_S == 0.35
-    assert DISCRETE_STALE_S == 1.5
-
-    class _Match:
-        def remove(self) -> None:
-            pass
-
-    signals: dict[str, object] = {}
-
-    class _Iface:
-        def connect_to_signal(self, name, cb):
-            signals[name] = cb
-            return _Match()
-
-        def CreateSession(self, _opts):
-            return "/req/s"
-
-        def Register(self, _app_id, _opts):
-            pass
-
-        def Close(self):
-            pass
-
-    class _Bus:
-        def __init__(self) -> None:
-            self.owner_cb = None
-
-        def get_object(self, bus_name, obj_path):
-            return (bus_name, str(obj_path))
-
-        def watch_name_owner(self, _name, cb):
-            self.owner_cb = cb
-            cb(":1.1")
-            return "w"
-
-        def unwatch_name_owner(self, _tok):
-            pass
-
-    class _Dbus:
-        String = staticmethod(str)
-        ObjectPath = staticmethod(str)
-
-        @staticmethod
-        def Dictionary(d, signature=None):
-            del signature
-            return dict(d)
-
-        @staticmethod
-        def Array(items, signature=None):
-            del signature
-            return list(items)
-
-        @staticmethod
-        def Interface(_obj, _iface):
-            return _Iface()
-
-    now = [100.0]
-    events: list[str] = []
-    ctx = HotkeyContext(
-        actions=CallbackHotkeyActions(
-            on_voice_start=lambda: True,
-            on_voice_stop=lambda: None,
-            on_screenshot=lambda: events.append("shot"),
-            on_ocr=lambda: events.append("ocr"),
-            on_repeat=lambda: events.append("repeat"),
-        ),
-        bindings=DEFAULTS,
-        janitor=None,
-        guard=InjectGuard(),
-        session_type="wayland",
-    )
-    bus = _Bus()
-    grabber = PortalGlobalShortcutsGrabber(
-        ctx,
-        dbus_mod=_Dbus(),
-        bus=bus,
-        version_probe=lambda _i: 2,
-        clock=lambda: now[0],
-    )
-    grabber._session_handle = "/session/heal"
-    grabber._bound = True
-
-    # 1. 首次按下触发，长按期间每 0.2s 连发（总跨度 2.0s > DISCRETE_STALE_S，但每次间隔 < 1.5s）均持续抑制
-    signals["Activated"]("/session/heal", "screenshot_ctrl_alt_x", 0, {})
-    for _ in range(10):
-        now[0] += 0.2
-        signals["Activated"]("/session/heal", "screenshot_ctrl_alt_x", 0, {})
-    _drain_glib()
-    assert events == ["shot"]
-
-    # 2. 正常 Deactivated 后清理活跃态与激活时间，超 350ms 再次触发成功
-    now[0] += 0.05
-    signals["Deactivated"]("/session/heal", "screenshot_ctrl_alt_x", 0, {})
-    assert "screenshot" not in grabber._active_shortcuts
-    assert "screenshot" not in grabber._last_activated_at
-
-    now[0] += 0.05  # 距上次真实触发(100.0)已 > 0.35s
-    signals["Activated"]("/session/heal", "screenshot_ctrl_alt_x", 0, {})
-    _drain_glib()
-    assert events == ["shot", "shot"]
-
-    # 3. Deactivated 后 < 350ms 内再次按下仍被防抖拦截；超过 350ms 后正常再次触发
-    fire2_at = now[0]
-    now[0] = fire2_at + 0.05
-    signals["Deactivated"]("/session/heal", "screenshot_ctrl_alt_x", 0, {})
-    now[0] = fire2_at + 0.20
-    signals["Activated"]("/session/heal", "screenshot_ctrl_alt_x", 0, {})
-    signals["Deactivated"]("/session/heal", "screenshot_ctrl_alt_x", 0, {})
-    _drain_glib()
-    assert events == ["shot", "shot"]
-
-    now[0] = fire2_at + 0.40
-    signals["Activated"]("/session/heal", "screenshot_ctrl_alt_x", 0, {})
-    _drain_glib()
-    assert events == ["shot", "shot", "shot"]
-
-    # 4. 故意丢失 Deactivated：1.0s (< 1.5s) 内仍抑制并刷新时间戳，再过 1.55s (>= 1.5s) 自动清除过期活跃态并放行！
-    now[0] += 1.0
-    signals["Activated"]("/session/heal", "screenshot_ctrl_alt_x", 0, {})
-    _drain_glib()
-    assert events == ["shot", "shot", "shot"]
-
-    now[0] += 1.55
-    signals["Activated"]("/session/heal", "screenshot_ctrl_alt_x", 0, {})
-    _drain_glib()
-    assert events == ["shot", "shot", "shot", "shot"]
-
-    # 5. Portal 重连与 cleanup 均同步清空三个状态容器
-    assert grabber._active_shortcuts and grabber._last_discrete_at and grabber._last_activated_at
-    bus.owner_cb("")
-    bus.owner_cb(":1.99")
-    assert grabber._active_shortcuts == set()
-    assert grabber._last_discrete_at == {}
-    assert grabber._last_activated_at == {}
-
-    grabber._active_shortcuts.add("ocr")
-    grabber._last_discrete_at["ocr"] = now[0]
-    grabber._last_activated_at["ocr"] = now[0]
-    grabber.cleanup()
-    assert grabber._active_shortcuts == set()
-    assert grabber._last_discrete_at == {}
-    assert grabber._last_activated_at == {}
-
-
 def main() -> int:
     test_portal_trigger_format_and_fingerprint_id()
     test_accel_normalize()
     test_selection_crop_box()
     test_parse_shortcuts_description()
-    test_action_mixin_voice_start_stop_and_default_ocr_noop()
     test_portal_four_hotkeys_rebind_mismatch_and_bus_restart_recovery()
     test_portal_presubscribes_response_before_dbus_call()
-    test_x11_and_evdev_four_hotkeys_dispatch()
+    test_x11_reports_intervals_and_filters_autorepeat_release_pairs()
     test_conflict_scanner_known_show_desktop()
-    test_portal_discrete_debounce_deactivated_recovery_and_stale_self_heal()
     print("PASS: portal / 四键动作层纯函数测试")
     return 0
 

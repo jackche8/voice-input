@@ -1,28 +1,39 @@
-"""X11 XGrabKey 全局快捷键（X11 独占，支持 voice / screenshot / ocr / repeat 四键）。"""
+"""X11 XGrabKey 全局快捷键（X11 独占，支持 voice / screenshot / ocr / repeat 四键）。
+
+首个 KeyPress 即一次按下的开始并放行；trigger 松开（50ms 内无同键 KeyPress，滤掉 X 自动重复的松开/按下对）即结束。
+XGrabKey 收不到修饰键松开，所以 X11 下「任一键松开即结束」不成立（第七节已知限制）。停录后补发修饰键抬起是
+本后端的现状语义，经 end_interval_and_release 完成。
+"""
 from __future__ import annotations
 
 import sys
 
-from _linux.hotkey_actions import GLib, HotkeyActionMixin, HotkeyContext
+from _linux.hotkey_actions import GLib, HotkeyContext, HotkeySink, end_interval_and_release
+from _linux.hotkey_state import Action
 
 # 标准 X11 常量，避免在模块导入阶段强依赖 python-xlib（隔离单测可注入假 Display）。
 _X_KEY_PRESS = 2
 _X_KEY_RELEASE = 3
 _X_GRAB_MODE_ASYNC = 1
 _DEFAULT_LOCK_MASKS = (0, 1 << 4, 1 << 1, (1 << 4) | (1 << 1))  # 0, Mod2Mask, LockMask, both
+_AUTOREPEAT_RELEASE_MS = 50
+_MASK = 0xFFFFFFFF
 
 
-class HotkeyGrabber(HotkeyActionMixin):
+class HotkeyGrabber:
     """XGrabKey 快捷键管理，通过 GLib.io_add_watch 集成到事件循环。"""
 
     def __init__(
         self,
         ctx: HotkeyContext,
+        sink: HotkeySink,
         *,
         display_factory=None,
         hotkey_parser=None,
     ) -> None:
-        self._init_hotkey_actions(ctx)
+        self.ctx = ctx
+        self.sink = sink
+        self._pending_release: dict[int, int] = {}  # trigger 键码 → 待定的松开计时器
         if display_factory is None:
             from Xlib import display as xdisplay
 
@@ -56,6 +67,16 @@ class HotkeyGrabber(HotkeyActionMixin):
         self.ocr_mask = o_mask
         self.repeat_kc = self.dpy.keysym_to_keycode(r_sym)
         self.repeat_mask = r_mask
+        self._actions_by_kc: dict[int, Action] = {
+            kc: action
+            for kc, action in (
+                (self.voice_kc, "voice"),
+                (self.screen_kc, "screenshot"),
+                (self.ocr_kc, "ocr"),
+                (self.repeat_kc, "repeat"),
+            )
+            if kc
+        }
 
     def _on_x_error(self, err, *args):
         del args
@@ -108,7 +129,7 @@ class HotkeyGrabber(HotkeyActionMixin):
         GLib.timeout_add(500, self._refresh_grab)
 
     def _refresh_grab(self) -> bool:
-        if not self.voice_active:
+        if not self.sink.voice_active:
             try:
                 self.grab()
             except Exception:
@@ -116,18 +137,28 @@ class HotkeyGrabber(HotkeyActionMixin):
         return True
 
     def _handle_event(self, event) -> None:
+        action = self._actions_by_kc.get(event.detail)
+        if action is None:
+            return
+        t_ms = int(event.time) & _MASK
         if event.type == _X_KEY_PRESS:
-            if event.detail == self.voice_kc:
-                self._on_voice_press()
-            elif event.detail == self.screen_kc:
-                self._on_screenshot()
-            elif self.ocr_kc and event.detail == self.ocr_kc:
-                self._on_ocr()
-            elif event.detail == self.repeat_kc:
-                self._on_repeat()
+            pending = self._pending_release.pop(event.detail, 0)
+            if pending:
+                GLib.source_remove(pending)  # X 自动重复的松开/按下对：仍是同一次按下
+                return
+            self.sink.interval_started(action, t_ms)
+            self.sink.activated(action, t_ms)
         elif event.type == _X_KEY_RELEASE:
-            if event.detail == self.voice_kc and self.voice_active:
-                self._schedule_release()
+            previous = self._pending_release.pop(event.detail, 0)
+            if previous:
+                GLib.source_remove(previous)
+            self._pending_release[event.detail] = GLib.timeout_add(
+                _AUTOREPEAT_RELEASE_MS, self._release_after_autorepeat_window, event.detail, action, t_ms
+            )
+
+    def _release_after_autorepeat_window(self, keycode: int, action: Action, t_ms: int) -> bool:
+        self._pending_release.pop(keycode, None)
+        return end_interval_and_release(self.sink, self.ctx, action, t_ms)
 
     def _on_xlib_event(self, fd, condition) -> bool:
         del fd, condition
@@ -145,6 +176,6 @@ class HotkeyGrabber(HotkeyActionMixin):
         return True
 
     def cleanup(self) -> None:
-        if self._pending_release_id:
-            GLib.source_remove(self._pending_release_id)
-            self._pending_release_id = 0
+        for source_id in self._pending_release.values():
+            GLib.source_remove(source_id)
+        self._pending_release.clear()

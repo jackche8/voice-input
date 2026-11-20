@@ -129,6 +129,7 @@ def world(tmp_path: Path):
         which=lambda name: f"/usr/bin/{name}" if name in ("xclip", "nvidia-smi") else None,
         portal_version=lambda iface: (1, None),
         ocr_languages=lambda: ["eng", "chi_sim"],
+        keyboard_devices=lambda: ["/dev/input/event5"],  # Wayland 环境：不碰真实输入设备
         list_ips=lambda: ["192.168.10.20"],
         http_transport=httpx.MockTransport(services),
         spawn=lambda fn: fn(),

@@ -1064,7 +1064,7 @@ def test_product_event_loop_request_stop_before_stream_close_exits_immediately()
 
 def test_hotkey_rig_reset_voice_recovers_after_watchdog_timeout():
     """P1-4 回归：120s 看门狗触发后调用 hotkey_rig.reset_voice()，下次按语音热键不吞键。"""
-    from _linux.hotkey_actions import CallbackHotkeyActions, HotkeyActionMixin, HotkeyContext
+    from _linux.hotkey_actions import CallbackHotkeyActions, HotkeyContext
     from _linux.hotkey_manager import HotkeyManager
     from _linux.inject_guard import InjectGuard
     from _platform._pynput_hotkeys import PynputHotkeyRig
@@ -1079,7 +1079,7 @@ def test_hotkey_rig_reset_voice_recovers_after_watchdog_timeout():
         mask = 0
         for p in parts[:-1]:
             mask |= {"ctrl": 1, "alt": 2, "shift": 4, "super": 8}[p]
-        return mask, ord(parts[-1])
+        return mask, 27 if parts[-1] == "escape" else ord(parts[-1])  # 监听器构造时解析 Esc 键码
 
     def extract_simple(key: tuple[int, int]) -> tuple[int, int]:
         return key
@@ -1111,7 +1111,7 @@ def test_hotkey_rig_reset_voice_recovers_after_watchdog_timeout():
     rig.handle_press((0, ord("z")))
     assert rig.voice_active is True and events == ["start", "start"]
 
-    # 2. LinuxHotkeyRig + HotkeyManager + HotkeyActionMixin
+    # 2. LinuxHotkeyRig + HotkeyManager：唯一按住状态由分发器持有，复位不重复调用 voice_stop
     linux_starts: list[str] = []
     released_hotkeys: list[str] = []
 
@@ -1120,13 +1120,6 @@ def test_hotkey_rig_reset_voice_recovers_after_watchdog_timeout():
 
         def release_hotkey(self, hk: str) -> None:
             released_hotkeys.append(hk)
-
-    class DummyGrabber(HotkeyActionMixin):
-        def __init__(self, ctx: HotkeyContext) -> None:
-            self._init_hotkey_actions(ctx)
-
-        def cleanup(self) -> None:
-            pass
 
     ctx = HotkeyContext(
         actions=CallbackHotkeyActions(
@@ -1139,24 +1132,24 @@ def test_hotkey_rig_reset_voice_recovers_after_watchdog_timeout():
         guard=InjectGuard(),
         session_type="x11",
     )
-    mgr = HotkeyManager(ctx)
-    grabber = DummyGrabber(ctx)
-    mgr.active = grabber
+    mgr = HotkeyManager(ctx, on_error=lambda _reason: None)
     linux_rig = LinuxHotkeyRig(mgr)
     assert isinstance(linux_rig, HotkeyRig)
 
-    grabber._on_voice_press()
-    assert mgr.voice_active is True and linux_starts == ["start"]
+    # 一次按下开始录音，随后结束事件丢失（看门狗 120s 到时强制 finish）
+    mgr.dispatcher.interval_started("voice", 1000)
+    mgr.dispatcher.activated("voice", 1000)
+    assert mgr.dispatcher.voice_active is True and linux_starts == ["start"]
 
     linux_rig.reset_voice()
-    assert mgr.voice_active is False
-    assert grabber.voice_active is False
+    assert mgr.dispatcher.voice_active is False
     assert released_hotkeys == [DEFAULTS.voice]
     assert linux_starts == ["start"]  # reset_voice 不重复调用 voice_stop
 
     # 再次按下可立即触发下一句录音
-    grabber._on_voice_press()
-    assert mgr.voice_active is True and linux_starts == ["start", "start"]
+    mgr.dispatcher.interval_started("voice", 9000)
+    mgr.dispatcher.activated("voice", 9000)
+    assert mgr.dispatcher.voice_active is True and linux_starts == ["start", "start"]
 
 
 # ------------------------------------------------------------------ Actions / Repeat / SSE / Lock
@@ -1232,6 +1225,45 @@ def test_repeat_action_confirm_resend():
     ]
 
 
+def test_hotkey_failure_is_held_and_resent_each_time_the_event_stream_connects():
+    """快捷键组件失败原因留在 PlatformStatus；事件流每条连接收到首个事件（服务端 idle）后重发一条 error。"""
+    status, posted = _status()
+    connections = {"n": 0}
+
+    def iter_events(_stop):
+        connections["n"] += 1
+        if connections["n"] <= 2:
+            yield {"event": "idle"}
+            yield {"event": "recording"}
+            return
+        if connections["n"] == 3:
+            status.set_hotkey_error(None)  # 期间恢复正常（例如 GNOME 改回可解析的绑定）
+            yield {"event": "idle"}
+            return
+        raise ConnectionError("stop")
+
+    waits: list[float] = []
+    loop = ProductEventLoop(
+        iter_events=iter_events,
+        on_event=lambda _ev: None,
+        on_connected=status.resend_hotkey_error,
+        wait_fn=lambda delay: (waits.append(delay) or len(waits) >= 4),
+    )
+    status.set_hotkey_error("Wayland 下快捷键需要读取键盘设备（evdev），当前不可用：未找到可读的键盘设备")
+    loop.run_forever()
+    status.drain()
+    errors = [p for p in posted if p["event"] == "error"]
+    # 立即 1 条 + 前两次连上各重发 1 条；恢复后第三次连上不再发
+    assert len(errors) == 3
+    assert {e["error"] for e in errors} == {"dependency_failed"}
+    assert all("evdev" in e["message"] for e in errors)
+
+    quiet, quiet_posted = _status()
+    quiet.resend_hotkey_error()  # 从未出错：连上不发
+    quiet.drain()
+    assert quiet_posted == []
+
+
 def test_product_event_loop_exponential_backoff_and_hud_dispatch():
     waits: list[float] = []
     received: list[dict] = []
@@ -1274,7 +1306,6 @@ def test_product_event_loop_exponential_backoff_and_hud_dispatch():
         def set_partial(self, stable_text="", tail_text=""): hud_log.append(("partial", stable_text, tail_text))
         def set_polishing(self): hud_log.append(("polishing",))
         def set_typed(self, text=""): hud_log.append(("typed", text))
-        def set_busy(self, msg=""): hud_log.append(("busy", msg))
         def set_error(self, msg=""): hud_log.append(("error", msg))
         def show_toast(self, msg, kind="ok", duration_ms=1800): hud_log.append(("toast", msg, kind))
         def show_delivery_confirmation(self, jid, text, cb):
@@ -1290,7 +1321,6 @@ def test_product_event_loop_exponential_backoff_and_hud_dispatch():
         {"event": "partial", "stable_text": "你好", "tail_text": "世界"},
         {"event": "polishing"},
         {"event": "typed", "job_id": "j1", "text": "你好世界"},
-        {"event": "busy"},
         {"event": "error", "message": "测试错误"},
         {"event": "delivery_unknown", "job_id": "j2", "text": "重发我"},
         {"event": "idle"},
@@ -1306,12 +1336,11 @@ def test_product_event_loop_exponential_backoff_and_hud_dispatch():
         ("partial", "你好", "世界"),
         ("polishing",),
         ("typed", "你好世界"),
-        ("busy", "处理中…"),
         ("error", "测试错误"),
         ("confirm", "j2", "重发我"),
         ("idle",),
     ]
-    assert tray_log == ["recording", "polishing", "idle", "busy", "error", "error", "idle"]
+    assert tray_log == ["recording", "polishing", "idle", "error", "error", "idle"]
     assert confirmed == [("j2", "重发我", True)]
 
 

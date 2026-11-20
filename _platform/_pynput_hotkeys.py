@@ -44,6 +44,7 @@ class PynputHotkeyRig:
         self.screenshot_spec = hotkey_parser(bindings.screenshot)
         self.ocr_spec = hotkey_parser(bindings.ocr) if bindings.ocr else None
         self.repeat_spec = hotkey_parser(bindings.repeat)
+        self._escape_code = hotkey_parser("escape")[1]  # 浮窗只认 Esc 关闭（与 Linux evdev 一致）
 
         self._on_voice_start = on_voice_start
         self._on_voice_stop = on_voice_stop
@@ -96,7 +97,7 @@ class PynputHotkeyRig:
                 elif (mods, code) == self.repeat_spec:
                     matched_binding = True
                     action_to_run = self._on_repeat
-                if not matched_binding and self._overlay_active():
+                if not matched_binding and code == self._escape_code and self._overlay_active():
                     should_close_overlay = True
 
         if should_close_overlay:

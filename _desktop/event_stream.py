@@ -56,13 +56,6 @@ def dispatch_product_event(
             tray.set_state("idle")
         return
 
-    if kind == "busy":
-        if getattr(hud, "mode", None) != "toast":
-            hud.set_busy(str(event.get("message") or "处理中…"))
-        if tray is not None:
-            tray.set_state("busy")
-        return
-
     if kind == "error":
         hud.set_error(str(event.get("message") or "操作失败"))
         if tray is not None:
@@ -96,12 +89,14 @@ class ProductEventLoop:
         *,
         iter_events: Callable[[threading.Event], Iterator[dict[str, Any]]],
         on_event: Callable[[dict[str, Any]], None],
+        on_connected: Callable[[], None] = lambda: None,
         backoff_initial_s: float = BACKOFF_INITIAL_S,
         backoff_max_s: float = BACKOFF_MAX_S,
         wait_fn: Callable[[float], bool] | None = None,
     ) -> None:
         self._iter_events = iter_events
         self._on_event = on_event
+        self._on_connected = on_connected  # 每条连接收到首个事件（服务端连上先发的 idle）后调用一次
         self._backoff_initial_s = max(0.01, float(backoff_initial_s))
         self._backoff_max_s = max(self._backoff_initial_s, float(backoff_max_s))
         self._stop = threading.Event()
@@ -127,9 +122,12 @@ class ProductEventLoop:
                 for event in self._iter_events(self._stop):
                     if self._stop.is_set():
                         return
+                    first_event = not got_event
                     got_event = True
                     delay = self._backoff_initial_s
                     self._on_event(event)
+                    if first_event:
+                        self._on_connected()
             except Exception as exc:
                 if self._stop.is_set():
                     return

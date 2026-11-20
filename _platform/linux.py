@@ -309,7 +309,9 @@ class LinuxPlatformAdapter:
         on_repeat: Callable[[], None] = noop,
         overlay_active: Callable[[], bool] = always_false,
         close_overlay: Callable[[], bool] = always_false,
+        on_error: Callable[[str | None], None],
     ) -> HotkeyRig:
+        """组件失败（evdev 不可读、实际绑定解析不了、事件源意外退出）经 on_error 上报，恢复时 on_error(None)。"""
         actions = CallbackHotkeyActions(
             on_voice_start=on_voice_start,
             on_voice_stop=on_voice_stop,
@@ -325,9 +327,8 @@ class LinuxPlatformAdapter:
             janitor=self._ensure_janitor(),
             guard=self._guard,
             session_type=self.session_type,
-            on_ocr=on_ocr,
         )
-        return LinuxHotkeyRig(self._hotkey_manager_cls(ctx))
+        return LinuxHotkeyRig(self._hotkey_manager_cls(ctx, on_error=on_error))
 
     def capabilities(self, bindings: HotkeyBindings | None = None) -> list[SetupCapability]:
         xclip_path = self._which("xclip") or self._which("xsel") or (

@@ -112,6 +112,7 @@ class PlatformAdapter(Protocol):
         on_repeat: Callable[[], None] = ...,
         overlay_active: Callable[[], bool] = ...,
         close_overlay: Callable[[], bool] = ...,
+        on_error: Callable[[str | None], None],
     ) -> HotkeyRig: ...
 
     def capabilities(self) -> list[SetupCapability]: ...

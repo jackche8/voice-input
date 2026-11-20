@@ -16,6 +16,8 @@ class PlatformStatus:
     def __init__(self, post: Callable[[dict], None], *, start_thread: bool = True) -> None:
         self._post = post
         self._queue: queue.Queue[dict | None] = queue.Queue()
+        self._hotkey_lock = threading.Lock()
+        self._hotkey_error: str | None = None
         self._thread: threading.Thread | None = None
         if start_thread:
             self._thread = threading.Thread(target=self._run, name="platform-status", daemon=True)
@@ -29,6 +31,20 @@ class PlatformStatus:
 
     def error(self, code: ErrorCode, message: str) -> None:
         self._queue.put({"event": "error", "error": code.value, "message": message})
+
+    def set_hotkey_error(self, message: str | None) -> None:
+        """快捷键组件失败：记住原因并立即发一条 error；None = 已恢复，清除、不发。"""
+        with self._hotkey_lock:
+            self._hotkey_error = message
+        if message is not None:
+            self.error(ErrorCode.dependency_failed, message)
+
+    def resend_hotkey_error(self) -> None:
+        """事件流每次连上（服务端首条 idle）时调用：仍有快捷键组件失败就再发一条，保证底栏看得到。"""
+        with self._hotkey_lock:
+            message = self._hotkey_error
+        if message is not None:
+            self.error(ErrorCode.dependency_failed, message)
 
     def drain(self) -> None:
         """测试/退出用：同步发送已排队的事件。"""

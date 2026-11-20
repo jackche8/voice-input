@@ -1,103 +1,63 @@
-"""按会话选择按键所有权后端；portal 负责动作，观察器补旧 XTEST/活动与物理修饰键状态。
+"""按会话装配快捷键后端，并把它们接到唯一的按住状态与分发器（业务装配）。
 
-Wayland：portal GlobalShortcuts 独占；失败才回退 evdev/XI2 观察器并明确告警"按键未独占"，
-且在 portal 服务重启恢复时自动切回 portal 独占。
-X11：XGrabKey 独占；失败回退观察器。
+Wayland：evdev 必需（按下区间的唯一来源）；门户 GlobalShortcuts 负责放行，组合定义取 GNOME 实际绑定下发给 evdev；
+门户不可用或失败时 evdev 回退为自行判定开始（按配置绑定）。XInput 只做 XTEST 卡键清理，不进状态机。
+X11：XGrabKey 独占；失败回退 evdev + XInput（只收 XTEST 来源）。
+组件失败（evdev 打不开、实际绑定解析不了、事件源意外退出、全部后端不可用）只经 on_error 上报，不抛异常，
+守护进程其余功能照常；之后恢复正常时 on_error(None)。
 """
 from __future__ import annotations
 
+from collections.abc import Callable, Mapping
+
+from _hotkey import parse_hotkey_evdev
 from _linux.hotkey_actions import HotkeyContext
+from _linux.hotkey_dispatch import HotkeyDispatcher
 from _linux.hotkey_evdev import EvdevHotkeyGrabber
-from _linux.hotkey_portal import PortalGlobalShortcutsGrabber
+from _linux.hotkey_portal import PortalGlobalShortcutsGrabber, normalize_portal_trigger
+from _linux.hotkey_state import ACTIONS, Action, HotkeyPressState
 from _linux.hotkey_x11 import HotkeyGrabber
 from _linux.hotkey_xinput import XInputHotkeyGrabber
 
 
 class HotkeyManager:
-    """按会话选择按键所有权后端；portal 负责动作，观察器补旧 XTEST/活动。"""
+    """按会话选择后端；唯一的 HotkeyPressState + HotkeyDispatcher 作为全部后端的 sink。"""
 
-    def __init__(self, ctx: HotkeyContext) -> None:
+    def __init__(
+        self,
+        ctx: HotkeyContext,
+        *,
+        on_error: Callable[[str | None], None],
+        evdev_factory=EvdevHotkeyGrabber,
+        portal_factory=PortalGlobalShortcutsGrabber,
+        portal_available: Callable[[], bool] = PortalGlobalShortcutsGrabber.available,
+        x11_factory=HotkeyGrabber,
+        xinput_factory=XInputHotkeyGrabber,
+    ) -> None:
         self.ctx = ctx
-        self.active = None          # portal / X11 主后端；回退时指向主观察器
-        self.observers: list = []   # Evdev / XInput 被动观察器
-        self._portal = None
-        self._closed = False
+        self.on_error = on_error
+        self.dispatcher = HotkeyDispatcher(ctx, HotkeyPressState(), on_error=on_error)
+        self._evdev_factory = evdev_factory
+        self._portal_factory = portal_factory
+        self._portal_available = portal_available
+        self._x11_factory = x11_factory
+        self._xinput_factory = xinput_factory
         self.backend_name = "none"
+        self._evdev: EvdevHotkeyGrabber | None = None
+        self._xinput: XInputHotkeyGrabber | None = None
+        self._portal: PortalGlobalShortcutsGrabber | None = None
+        self._x11: HotkeyGrabber | None = None
+        self._closed = False
         if self.ctx.janitor is not None and getattr(self.ctx.janitor, "evdev_any_modifier_down", None) is None:
             self.ctx.janitor.evdev_any_modifier_down = self.evdev_any_modifier_down
 
-    def _all_objects(self) -> list:
-        seen: set[int] = set()
-        out: list = []
-        for obj in [self.active, self._portal, *self.observers]:
-            if obj is None or id(obj) in seen:
-                continue
-            seen.add(id(obj))
-            out.append(obj)
-        return out
-
     def evdev_any_modifier_down(self) -> bool:
         """供 ModifierJanitor 在 Wayland 下查询物理修饰键是否仍处于按下态。"""
-        for obj in self._all_objects():
-            probe = getattr(obj, "any_modifier_down", None)
-            if callable(probe):
-                try:
-                    if probe():
-                        return True
-                except Exception:
-                    pass
-        return False
-
-    @property
-    def voice_active(self) -> bool:
-        return any(
-            getattr(obj, "voice_active", False) for obj in self._all_objects()
-        )
-
-    @property
-    def voice_started_at(self) -> float:
-        for obj in self._all_objects():
-            if getattr(obj, "voice_active", False):
-                return float(getattr(obj, "voice_started_at", 0.0))
-        return 0.0
-
-    def has_stuck_modifiers(self) -> bool:
-        for obj in self._all_objects():
-            if hasattr(obj, "has_stuck_modifiers"):
-                try:
-                    return bool(obj.has_stuck_modifiers())
-                except Exception:
-                    pass
-        return self.ctx.session_type != "wayland"
-
-    def _clear_voice_flags(self) -> None:
-        for obj in self._all_objects():
-            reset_fn = getattr(obj, "reset_voice", None)
-            if callable(reset_fn):
-                try:
-                    reset_fn()
-                except Exception:
-                    pass
-            elif getattr(obj, "voice_active", False):
-                try:
-                    obj.voice_active = False
-                except Exception:
-                    pass
+        return self._evdev is not None and self._evdev.any_modifier_down()
 
     def reset_voice(self) -> None:
-        """看门狗超时后复位全部后端的 `voice_active` 状态并释放残留修饰键（不重复调用 `voice_stop`）。"""
-        self._clear_voice_flags()
-        if self.ctx.janitor is not None:
-            self.ctx.janitor.release_hotkey(self.ctx.bindings.voice)
-
-    def force_stop_voice(self) -> None:
-        self._clear_voice_flags()
-        try:
-            self.ctx.actions.voice_stop()  # 看门狗到时 = finish，不是 cancel
-        except Exception:
-            pass
-        if self.ctx.janitor is not None:
-            self.ctx.janitor.release_hotkey(self.ctx.bindings.voice)
+        """看门狗超时后复位语音状态并补发当前生效组合的修饰键抬起（不重复调用 voice_stop）。"""
+        self.dispatcher.reset_voice()
 
     def start(self) -> None:
         if self.ctx.session_type == "wayland":
@@ -105,115 +65,147 @@ class HotkeyManager:
         else:
             self._start_x11()
 
-    def _start_observers(self) -> bool:
-        self.observers = []
-        for cls in (EvdevHotkeyGrabber, XInputHotkeyGrabber):
-            try:
-                obj = cls(self.ctx)
-                obj.actions_enabled = False
-                if isinstance(obj, XInputHotkeyGrabber):
-                    obj.only_xtest_sources = True
-                obj.start()
-                self.observers.append(obj)
-                print(f"  快捷键: 观察器 {cls.__name__} 已启动", flush=True)
-            except Exception as exc:
-                print(f"  快捷键: 观察器 {cls.__name__} 不可用 ({exc})", flush=True)
-        return bool(self.observers)
-
+    # ---- Wayland ----------------------------------------------------------
     def _start_wayland(self) -> None:
-        if PortalGlobalShortcutsGrabber.available():
-            self._start_observers()
-            try:
-                self._portal = PortalGlobalShortcutsGrabber(
-                    self.ctx,
-                    on_bound=self._on_portal_bound,
-                    on_failed=self._on_portal_failed,
-                )
-                print(
-                    "  快捷键: 启用 portal GlobalShortcuts — compositor 独占",
-                    flush=True,
-                )
-                self._portal.start()
-                return
-            except Exception as exc:
-                print(f"  快捷键: portal 初始化失败 ({exc})", flush=True)
-                self._portal = None
-        self._activate_fallback()
+        try:
+            self._evdev = self._evdev_factory(self.ctx, self.dispatcher)
+        except Exception as exc:
+            self._fail(f"Wayland 下快捷键需要读取键盘设备（evdev），当前不可用：{exc}")
+            return
+        self._evdev.start()
+        print("  快捷键: evdev 已启动（按下区间来源）", flush=True)
+        self._start_xinput_cleaner()
+        if not self._portal_available():
+            self._activate_evdev_fallback("xdg-desktop-portal GlobalShortcuts 不可用")
+            return
+        try:
+            self._portal = self._portal_factory(
+                self.ctx,
+                self.dispatcher,
+                on_bound=self._on_portal_bound,
+                on_failed=self._on_portal_failed,
+                on_triggers=self._apply_actual_triggers,
+            )
+        except Exception as exc:
+            self._activate_evdev_fallback(f"portal 初始化失败：{exc}")
+            return
+        print("  快捷键: 启用 portal GlobalShortcuts — compositor 独占", flush=True)
+        self._portal.start()
+
+    def _start_xinput_cleaner(self) -> None:
+        try:
+            self._xinput = self._xinput_factory(self.ctx, self.dispatcher)
+        except Exception as exc:
+            print(f"  快捷键: XInput 卡键清理不可用 ({exc})", flush=True)
+            return
+        self._xinput.actions_enabled = False  # Wayland 下不进状态机，只做 XTEST 卡键清理
+        self._xinput.only_xtest_sources = True
+        self._xinput.start()
 
     def _on_portal_bound(self) -> None:
-        self.active = self._portal
         self.backend_name = "portal"
-        for obj in self.observers:
-            # portal 覆盖 compositor 级按键；观察器只保留活动/修饰键物理检测，避免双触发。
-            obj.actions_enabled = False
-            if isinstance(obj, XInputHotkeyGrabber):
-                obj.only_xtest_sources = True
-        print("  快捷键: portal 已接管；观察器仅做键盘活动与修饰键探测", flush=True)
+        if self._evdev is not None:
+            self._evdev.activations_enabled = False
+        print("  快捷键: portal 已接管；evdev 只报按下区间", flush=True)
 
     def _on_portal_failed(self) -> None:
         if self._portal is not None and not getattr(self._portal, "watching_owner", False):
-            try:
-                self._portal.cleanup()
-            except Exception:
-                pass
-        if self.active is self._portal:
-            self.active = None
-        try:
-            self._activate_fallback()
-        except RuntimeError as exc:
-            # 若正在监听 portal 总线重连，不在此处让异常崩掉 D-Bus 信号回调
-            if not getattr(self._portal, "watching_owner", False):
-                raise
-            print(f"  快捷键: {exc}（等待 portal 服务恢复）", flush=True)
+            self._portal.cleanup()
+        self._activate_evdev_fallback("portal GlobalShortcuts 失败")
 
-    def _activate_fallback(self) -> None:
-        if self.active is not None:
+    def _activate_evdev_fallback(self, reason: str) -> None:
+        if self._evdev is None:
             return
-        if not self.observers:
-            self._start_observers()
-        if not self.observers:
-            raise RuntimeError("所有快捷键抓取方式均不可用")
-        has_evdev = any(
-            isinstance(obj, EvdevHotkeyGrabber) for obj in self.observers
-        )
-        for obj in self.observers:
-            obj.actions_enabled = True
-            if isinstance(obj, XInputHotkeyGrabber):
-                obj.only_xtest_sources = has_evdev
-        self.active = next(
-            (obj for obj in self.observers if isinstance(obj, EvdevHotkeyGrabber)),
-            self.observers[0],
-        )
-        self.backend_name = "+".join(
-            "evdev" if isinstance(obj, EvdevHotkeyGrabber) else "xinput"
-            for obj in self.observers
-        )
-        print(
-            "  快捷键: 启用观察器回退（按键未独占，可能仍会传给应用）",
-            flush=True,
-        )
+        self._evdev.activations_enabled = True
+        self._install_combos({action: self._configured(action) for action in ACTIONS})
+        self.dispatcher.voice_hotkey = self.ctx.bindings.voice
+        self.backend_name = "evdev"
+        print(f"  快捷键: {reason}，启用 evdev 回退（按键未独占，可能仍会传给应用）", flush=True)
 
+    def _apply_actual_triggers(self, action_triggers: Mapping[str, str]) -> None:
+        """GNOME 实际绑定是组合定义的唯一来源：规范化 + 严格解析后下发给 evdev。"""
+        if self._evdev is None:
+            return
+        canonical = {
+            action: normalize_portal_trigger(action_triggers.get(action, ""))
+            for action in ACTIONS
+            if self._configured(action)
+        }
+        self._install_combos(canonical)
+        self.dispatcher.voice_hotkey = canonical.get("voice") or self.ctx.bindings.voice
+
+    def _install_combos(self, hotkeys: Mapping[Action, str]) -> None:
+        """解析并下发给 evdev：能解析的照常生效；有解析不了的动作就按组件失败上报，全部可用时报恢复。"""
+        combos: dict[Action, dict] = {}
+        failed: list[str] = []
+        for action, hotkey in hotkeys.items():
+            if not hotkey:
+                failed.append(f"{action}=（GNOME 未给出绑定）")
+                continue
+            try:
+                combos[action] = parse_hotkey_evdev(hotkey)
+            except ValueError as exc:
+                failed.append(f"{action}={hotkey!r}（{exc}）")
+        self._evdev.set_combos(combos)
+        if failed:
+            self._fail("快捷键实际绑定无法解析为键码：" + "；".join(failed))
+        else:
+            self.on_error(None)
+
+    def _configured(self, action: Action) -> str:
+        return (getattr(self.ctx.bindings, action) or "").strip()
+
+    # ---- X11 --------------------------------------------------------------
     def _start_x11(self) -> None:
         try:
-            self.active = HotkeyGrabber(self.ctx)
-            self.backend_name = "XGrabKey"
-            print("  快捷键: 启用 XGrabKey — X11 独占", flush=True)
-            self.active.start()
+            self._x11 = self._x11_factory(self.ctx, self.dispatcher)
         except Exception as exc:
             print(f"  快捷键: XGrabKey 不可用 ({exc})，尝试回退", flush=True)
-            self.active = None
-            self._activate_fallback()
+            self._start_x11_fallback()
+            return
+        self.backend_name = "XGrabKey"
+        print("  快捷键: 启用 XGrabKey — X11 独占", flush=True)
+        self._x11.start()
+
+    def _start_x11_fallback(self) -> None:
+        names: list[str] = []
+        try:
+            self._evdev = self._evdev_factory(self.ctx, self.dispatcher)
+        except Exception as exc:
+            print(f"  快捷键: evdev 不可用 ({exc})", flush=True)
+        else:
+            self._evdev.activations_enabled = True
+            self._install_combos({action: self._configured(action) for action in ACTIONS})
+            self._evdev.start()
+            names.append("evdev")
+        try:
+            self._xinput = self._xinput_factory(self.ctx, self.dispatcher)
+        except Exception as exc:
+            print(f"  快捷键: XInput 不可用 ({exc})", flush=True)
+        else:
+            self._xinput.actions_enabled = True
+            self._xinput.only_xtest_sources = self._evdev is not None
+            self._xinput.start()
+            names.append("xinput")
+        if not names:
+            self._fail("所有快捷键抓取方式均不可用（XGrabKey、evdev、XInput）")
+            return
+        self.backend_name = "+".join(names)
+        print("  快捷键: 启用观察器回退（按键未独占，可能仍会传给应用）", flush=True)
+
+    # ---- 共用 -------------------------------------------------------------
+    def _fail(self, reason: str) -> None:
+        print(f"  快捷键: [ERROR] {reason}", flush=True)
+        self.on_error(reason)
 
     def cleanup(self) -> None:
         if self._closed:
             return
         self._closed = True
-        seen: set[int] = set()
-        for obj in [self._portal, *self.observers, self.active]:
-            if obj is None or id(obj) in seen:
+        for backend in (self._portal, self._evdev, self._xinput, self._x11):
+            if backend is None:
                 continue
-            seen.add(id(obj))
             try:
-                obj.cleanup()
-            except Exception:
-                pass
+                backend.cleanup()
+            except Exception as exc:  # 退出清理：逐个后端记录失败原因，不影响其余后端与守护进程退出
+                print(f"  快捷键: 清理 {type(backend).__name__} 失败：{type(exc).__name__}: {exc}", flush=True)

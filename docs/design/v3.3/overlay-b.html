@@ -1,0 +1,447 @@
+<!doctype html>
+<!--
+  v3.3 截屏原位识别 / 翻译浮窗 · 模板 B「深色标签 · 主题底色」
+  显示的数据：OcrInplaceResponse.blocks[]：bbox / ocr_text / translated_text（现有；bg_color / fg_color 本模板不用，统一主题色）
+             + 【需新增数据：OcrTextBlock.lines = [{bbox, text}] 每行行框与行文字，来源 Tesseract image_to_data 的 line_num 词框；
+               _ocr_layout._split_line_columns 已逐行算出，_merge_paragraph_lines 合并成段时丢弃】
+             + 【现有字段语义变化：ocr_text / translated_text 用 "\n" 保留硬换行，代码缩进转为前导空格（现在 _join_adjacent_lines 用空格拼成一行）】
+  触发的动作：复制（OCR 模式）/ 复制译文 · 复制原文（翻译模式）→ on_copy_text(text)；重试 → on_retry()；
+             Esc 或点击框外空白处 → close() → on_closed()。纯 OCR 不再自动写剪贴板。
+  基于：_ui_desktop/inplace_overlay.py（InplaceTranslateOverlay：第一遍改为主题深色 80% 标签 + 左侧强调线，第二遍统一浅色字；
+       工具栏改为贴在选区底边的标签页菜单，去掉“按住对比原图”）、
+       _ui_desktop/region_selector.py（全屏透明窗口接收框外点击的做法）、_ui_desktop/theme.py、
+       _desktop/capture_flow.py（OCR 模式也打开本浮窗）、_ocr_layout.py + _contracts.py（保留逐行数据）。
+  本页用 <canvas> 绘制浮窗（与 QPainter 操作一一对应），迷你菜单是普通按钮（对应 QFrame + QPushButton）。
+-->
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>v3.3 原位识别/翻译 · 模板 B「深色标签 · 主题底色」</title>
+<style>
+:root {
+  --font-sans: "Noto Sans CJK SC", "PingFang SC", "Microsoft YaHei", "Segoe UI", sans-serif;
+  --font-mono: "JetBrains Mono", "Noto Sans Mono CJK SC", monospace;
+  --bg: #0d1117; --surface: #161b22; --surface-2: #1f2630; --border: #30363d;
+  --text: #e6edf3; --muted: #8b949e; --accent: #58a6ff; --accent-hover: #79c0ff; --ok: #3fb950; --warn: #d29922; --err: #f85149;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: #090c10; color: var(--text); font-family: var(--font-sans); font-size: 14px; line-height: 1.55; }
+header.bar { position: sticky; top: 0; z-index: 10; background: #090c10; border-bottom: 1px solid var(--border); padding: 10px 18px; display: flex; flex-direction: column; gap: 8px; }
+.title { display: flex; gap: 12px; align-items: baseline; flex-wrap: wrap; }
+.title strong { color: var(--accent); font-size: 15px; }
+.title span { color: var(--muted); font-size: 12px; }
+.ctrl { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.ctrl button { font: inherit; font-size: 12px; padding: 4px 11px; border-radius: 999px; border: 1px solid var(--border); background: var(--surface); color: #c9d1d9; cursor: pointer; }
+.ctrl button:hover { border-color: var(--accent); color: var(--accent); }
+.ctrl button.on { background: var(--accent); border-color: var(--accent); color: #090c10; font-weight: 700; }
+.ctrl .sep { width: 1px; height: 18px; background: var(--border); margin: 0 4px; }
+.ctrl .lbl { font-size: 12px; color: var(--muted); }
+main { padding: 14px 18px 40px; display: grid; grid-template-columns: 1200px minmax(320px, 1fr); gap: 14px; align-items: start; }
+@media (max-width: 1600px) { main { grid-template-columns: 1fr; } }
+.stage { position: relative; width: 1200px; height: 780px; border: 1px solid var(--border); border-radius: 10px; overflow: hidden; background: #000; }
+.stage canvas { position: absolute; left: 0; top: 0; }
+.stage .closed { position: absolute; left: 0; right: 0; top: 10px; text-align: center; font-size: 12px; color: var(--muted); pointer-events: none; }
+/* ---- 迷你菜单（对应 QFrame#oviFloatBar + QPushButton，样式全部来自 theme.float_bar_stylesheet 的令牌） ---- */
+.mini { position: absolute; display: flex; align-items: center; gap: 4px; padding: 3px; background: var(--surface); border: 1px solid var(--border); border-radius: 10px; font-size: 12px; white-space: nowrap; }
+.mini button { font: inherit; font-size: 12px; padding: 3px 10px; border-radius: 6px; border: 1px solid transparent; background: transparent; color: var(--text); cursor: pointer; }
+.mini button:hover { border-color: var(--accent); color: var(--accent); }
+.mini button.done { color: var(--ok); }
+.mini .st { padding: 0 6px 0 8px; display: flex; align-items: center; gap: 6px; color: var(--accent); font-weight: 600; }
+.mini .st.err { color: var(--err); }
+.mini .kbd { color: var(--muted); padding: 0 8px 0 4px; font-size: 11px; }
+.mini .div { width: 1px; height: 16px; background: var(--border); }
+/* 模板 B：菜单做成贴在选区底边左侧的标签页（上边 2px 强调色接住选区外框） */
+.mini.tab { border-radius: 0 0 8px 8px; border-top: 2px solid var(--accent); padding: 4px; }
+.mini.tab.err { border-top-color: var(--err); }
+.mini .chip { font-size: 11px; font-weight: 700; color: var(--accent); background: rgba(56, 139, 253, .16); border-radius: 4px; padding: 1px 7px; margin: 0 4px 0 2px; }
+.mini.err .chip { color: var(--err); background: rgba(248, 81, 73, .18); }
+.spin { width: 11px; height: 11px; border: 2px solid var(--accent); border-right-color: transparent; border-radius: 50%; animation: spin .9s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+.side { display: flex; flex-direction: column; gap: 12px; }
+.card { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 12px 16px; font-size: 13px; }
+.card h3 { margin: 0 0 8px; font-size: 14px; }
+.card ul { margin: 0; padding-left: 18px; color: #c9d1d9; }
+.card li { margin: 3px 0; }
+.card code { font-family: var(--font-mono); font-size: 12px; color: #79c0ff; }
+.new { color: var(--warn); font-weight: 700; }
+pre.box { margin: 0; font-family: var(--font-mono); font-size: 12px; line-height: 1.5; color: #c9d1d9; background: #0b0f14; border: 1px solid var(--border); border-radius: 8px; padding: 8px 12px; white-space: pre; overflow: auto; max-height: 300px; }
+pre.box .n { color: var(--warn); }
+.wide { grid-column: 1 / -1; display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 12px; }
+</style>
+</head>
+<body>
+<header class="bar">
+  <div class="title">
+    <strong>模板 B「深色标签 · 主题底色」</strong>
+    <span>每个识别段落盖一块统一的深色半透明标签（80%）+ 左侧蓝色细线，浅色字逐行排 · 一眼看出“哪里被识别了” · 菜单是贴在选区底边的标签页 · 加载时有扫描光带</span>
+  </div>
+  <div class="ctrl">
+    <button id="btn-auto" class="on">▶ 自动循环</button>
+    <span class="sep"></span><span class="lbl">模式</span>
+    <button data-mode="ocr">纯 OCR（Ctrl+Alt+O）</button>
+    <button data-mode="translate">截屏翻译（Ctrl+Alt+X）</button>
+    <span class="sep"></span><span class="lbl">状态</span>
+    <button data-phase="loading">加载中</button>
+    <button data-phase="result">结果</button>
+    <button data-phase="error">失败（可重试）</button>
+    <span class="sep"></span>
+    <span class="lbl">在画面里：点菜单复制 · 点框外空白处或按 Esc 关闭</span>
+  </div>
+</header>
+
+<main>
+  <div class="stage" id="stage">
+    <canvas id="screen" width="1200" height="780"></canvas>
+    <canvas id="overlay" width="1200" height="780"></canvas>
+    <div class="closed" id="closed-tip" hidden>浮窗已关闭 · 点上方任一模式或状态按钮重新打开</div>
+    <div class="mini" id="mini"></div>
+  </div>
+
+  <div class="side">
+    <div class="card">
+      <h3>剪贴板（点击复制后显示实际写入的文本）</h3>
+      <pre class="box" id="clip">（尚未复制）</pre>
+    </div>
+    <div class="card">
+      <h3>浮窗收到的数据（代码块这一段）</h3>
+      <pre class="box" id="data"></pre>
+    </div>
+  </div>
+
+  <div class="wide">
+    <div class="card">
+      <h3>显示的数据</h3>
+      <ul>
+        <li>现有：选区 <code>screen_rect</code>、截图 <code>cropped_png</code>（画在最底层，保证对位）、<code>blocks[].bbox / ocr_text / translated_text</code>、整段 <code>text / ocr_text</code>（复制用）</li>
+        <li>本模板不用 <code>bg_color / fg_color</code>：标签统一用主题深色、文字统一浅色，浅色底和深色底观感一致</li>
+        <li><span class="new">需新增数据：</span><code>blocks[].lines = [{bbox, text}]</code>，每行的行框和文字。来源：Tesseract <code>image_to_data</code> 的 <code>line_num</code> 词框，<code>_ocr_layout._split_line_columns</code> 已逐行算出，<code>_merge_paragraph_lines</code> 合并成段时丢弃</li>
+        <li><span class="new">现有字段语义变化：</span><code>ocr_text / translated_text</code> 用 <code>\n</code> 保留硬换行（菜单项、代码行），段内软换行合并；代码缩进转成前导空格（后端按行框 x 偏移 ÷ 平均字宽换算）。现在 <code>_join_adjacent_lines</code> 用空格拼成一行</li>
+        <li>不需要新字段区分“代码 / 段落”：缩进靠每行行框的 x 坐标保持</li>
+      </ul>
+    </div>
+    <div class="card">
+      <h3>触发的动作</h3>
+      <ul>
+        <li>纯 OCR：<b>复制</b> → <code>on_copy_text(ocr_text)</code>；不再自动写剪贴板（<code>capture_flow._run_ocr_worker</code> 改为打开本浮窗）</li>
+        <li>截屏翻译：<b>复制译文</b> → <code>on_copy_text(text)</code>；<b>复制原文</b> → <code>on_copy_text(ocr_text)</code></li>
+        <li>失败：<b>重试</b> → <code>on_retry()</code>（现有）</li>
+        <li>关闭：<b>Esc</b> 或 <b>点击框外空白处</b> → <code>close()</code> → <code>on_closed()</code>；点框内不关闭（防误触）</li>
+        <li>复制后按钮显示“✓ 已复制” 1.5 秒，浮窗不关闭</li>
+      </ul>
+    </div>
+    <div class="card">
+      <h3>基于哪些现有文件改造</h3>
+      <ul>
+        <li><code>_ui_desktop/inplace_overlay.py</code>：两遍绘制保留（先标签、后文字），标签改为 <code>BG_DARK_HEX</code> × 80% + 左侧 2px <code>ACCENT_HEX</code>；文字统一 <code>STABLE_TEXT_HEX</code> 逐行排；工具栏改为贴边标签页，去掉“按住对比原图”；放不下时上翻（标签页翻到选区顶边）</li>
+        <li><code>_ui_desktop/region_selector.py</code>：同样的全屏透明窗口，用来接住框外点击</li>
+        <li><code>_ui_desktop/theme.py</code>：菜单沿用 <code>float_bar_stylesheet()</code> 的颜色；新增令牌 <code>OVERLAY_LABEL_ALPHA = 0.80</code></li>
+        <li><code>_desktop/capture_flow.py</code>：OCR 模式与翻译模式共用本浮窗（模式参数决定菜单按钮）</li>
+        <li><code>_ocr_layout.py</code> + <code>_contracts.py</code>：<code>OcrTextBlock</code> 加 <code>lines</code></li>
+      </ul>
+    </div>
+    <div class="card">
+      <h3>QPainter 实现要点</h3>
+      <ul>
+        <li>浮窗改为覆盖整屏的透明窗口（与框选器相同）：框内画截图 + 贴片，框外全透明但接收点击 → 关闭；<code>keyPressEvent</code> 收 Esc</li>
+        <li>标签：<code>drawRoundedRect(块外框 + 6/4px, 4, 4)</code> 填 <code>QColor(13,17,23,204)</code>，再 <code>fillRect</code> 左侧 2px 强调线；先画全部标签，再画全部文字</li>
+        <li>OCR：每行文字画在自己的行框里，字号 = 行框高 ÷ 系数，基线 = 行框顶 + 0.78 × 行框高（系数按 Tesseract 行框实测校准）</li>
+        <li>翻译：见右侧“排版规则”；折行用 <code>QFontMetrics.horizontalAdvance</code> 按字累加</li>
+        <li>加载中：80px 高的 <code>QLinearGradient</code> 光带（透明 → 强调色 22% → 50% 亮边）从上往下扫，1.4s 一轮，裁剪到选区，16ms QTimer</li>
+        <li>失败：外框转红色，选区铺 6% 红色，标签页上边线转红，显示原因 + 重试</li>
+      </ul>
+    </div>
+    <div class="card">
+      <h3>排版规则（逐行槽位，OCR 与翻译共用一套）</h3>
+      <ul>
+        <li>每个原文行是一个“槽位”：位置 = 行框左上角，高度 = 行框高</li>
+        <li>OCR：第 i 行文字放第 i 个槽位，换行、缩进、段间距天然保留</li>
+        <li>行宽对齐：某行要画的文字与原行相同（OCR 的全部行、翻译里没变的代码行 / 文件名）时，按原行框宽度微调字距（<code>QFont.setLetterSpacing</code>，限 −10%～+30% 字号），字落在原字的位置上，不会在行尾露出原文“回声”</li>
+        <li>翻译：译文按 <code>\n</code> 切成硬行；每个硬行从下一个空槽位开始，用该槽位的 x（保留缩进）、原文字号，在段落右边界内折行，折出的部分依次占用后面的槽位</li>
+        <li>段落整段翻译 → 一个硬行，从第一行开始排；代码 / 菜单 → 硬行数与原行数相同，一行对一行</li>
+        <li>槽位用完仍有文字：按原行距继续向下排，标签随之加高（不确定点：是否先降字号，见报告）</li>
+      </ul>
+    </div>
+  </div>
+</main>
+
+<script>
+'use strict';
+/* ================= 1. 令牌（_ui_desktop/theme.py） ================= */
+const C = { accent: '#58a6ff', err: '#f85149', ok: '#3fb950', text: '#e6edf3', muted: '#8b949e' };
+const SANS = '"Noto Sans CJK SC","PingFang SC","Microsoft YaHei","Segoe UI",sans-serif';
+const LABEL_BG = '#0d1117', LABEL_ALPHA = 0.80, LABEL_FG = '#f8fafc', LABEL_PAD_X = 6, LABEL_PAD_Y = 4, FS_FROM_H = 0.98, BASE_RATIO = 0.76;
+const BOX = { x: 40, y: 64, w: 1120, h: 640 };
+function hex(h) { const n = parseInt(h.slice(1), 16); return [n >> 16 & 255, n >> 8 & 255, n & 255]; }
+function rgba(h, a) { const [r, g, b] = hex(h); return `rgba(${r},${g},${b},${a})`; }
+const clamp01 = x => x < 0 ? 0 : x > 1 ? 1 : x;
+const prog = (t, t0, d) => 1 - Math.pow(1 - clamp01((t - t0) / d), 3);
+
+/* ================= 2. 模拟截图：浅色文档（菜单列 + 两段英文）+ 深色编辑器（缩进代码 + 状态行） ================= */
+const UI = '"DejaVu Sans",sans-serif', MONO = '"DejaVu Sans Mono",monospace';
+const SRC = [
+  { bg: '#f1f5f9', fg: '#334155', font: `15px ${UI}`, fs: 15, lines: [[56, 104, 'Overview']], tr: '概览' },
+  { bg: '#f1f5f9', fg: '#334155', font: `15px ${UI}`, fs: 15, lines: [[56, 146, 'Installation']], tr: '安装', join: '\n' },
+  { bg: '#f1f5f9', fg: '#334155', font: `15px ${UI}`, fs: 15, lines: [[56, 188, 'Configuration']], tr: '配置', join: '\n' },
+  { bg: '#f1f5f9', fg: '#334155', font: `15px ${UI}`, fs: 15, lines: [[56, 230, 'Keyboard shortcuts']], tr: '键盘快捷键', join: '\n' },
+  { bg: '#f1f5f9', fg: '#334155', font: `15px ${UI}`, fs: 15, lines: [[56, 272, 'Troubleshooting']], tr: '故障排查', join: '\n' },
+  { bg: '#f1f5f9', fg: '#334155', font: `15px ${UI}`, fs: 15, lines: [[56, 314, 'Release notes']], tr: '版本说明', join: '\n' },
+  { bg: '#ffffff', fg: '#0f172a', font: `bold 26px ${UI}`, fs: 26, lines: [[312, 114, 'Getting started with local OCR']], tr: '本地 OCR 入门' },
+  { bg: '#ffffff', fg: '#334155', font: `17px ${UI}`, fs: 17, lines: [
+    [312, 160, 'Select any region of the screen and the text inside it is'],
+    [312, 188, 'recognized on your machine. Line breaks, indentation and'],
+    [312, 216, 'paragraph spacing are kept, so the result reads like the'],
+    [312, 244, 'original instead of collapsing into one long line.']],
+    tr: '框选屏幕上的任意区域，其中的文字会在本机完成识别。换行、缩进和段落间距都会保留，因此结果读起来和原文一样，不会挤成很长的一行。' },
+  { bg: '#ffffff', fg: '#334155', font: `17px ${UI}`, fs: 17, lines: [
+    [312, 288, 'Translation keeps the position too: each paragraph is'],
+    [312, 316, 'translated as a whole and laid out from its first line,'],
+    [312, 344, 'using the original font size and line spacing.']],
+    tr: '翻译同样保持位置：每个段落整体翻译，并从该段第一行开始，按原文的字号和行距排版。' },
+  { bg: '#1e293b', fg: '#cbd5e1', font: `13px ${UI}`, fs: 13, lines: [[64, 452, 'start.py']], tr: 'start.py' },
+  { bg: '#0f172a', fg: '#e2e8f0', font: `15px ${MONO}`, fs: 15, comment0: true, lines: [
+    [64, 506, '# Start the service and wait until the model is ready'],
+    [64, 530, 'def start(port=8080):'],
+    [64, 554, '    server = Server(port)'],
+    [64, 578, '    if not server.ready():'],
+    [64, 602, '        server.wait(timeout=30)'],
+    [64, 626, '    return server']],
+    tr: '# 启动服务并等待模型就绪\ndef start(port=8080):\n    server = Server(port)\n    if not server.ready():\n        server.wait(timeout=30)\n    return server', hard: true },
+  { bg: '#0f172a', fg: '#86efac', font: `14px ${UI}`, fs: 14, lines: [[64, 676, 'Ready. Listening on port 8080 — press Ctrl+C to stop.']], tr: '就绪。正在监听 8080 端口——按 Ctrl+C 停止。' },
+];
+const sctx = document.getElementById('screen').getContext('2d');
+function drawScreen() {
+  const g = sctx.createLinearGradient(0, 0, 1200, 780); g.addColorStop(0, '#1b2433'); g.addColorStop(1, '#2d2240');
+  sctx.fillStyle = g; sctx.fillRect(0, 0, 1200, 780);
+  sctx.save(); sctx.beginPath(); sctx.roundRect(20, 16, 1160, 740, 10); sctx.clip();
+  sctx.fillStyle = '#e5e7eb'; sctx.fillRect(20, 16, 1160, 36);
+  sctx.fillStyle = '#475569'; sctx.font = `600 13px ${UI}`; sctx.fillText('Local OCR — Docs', 40, 39);
+  sctx.fillStyle = '#f1f5f9'; sctx.fillRect(20, 52, 260, 380);
+  sctx.fillStyle = '#ffffff'; sctx.fillRect(280, 52, 900, 380);
+  sctx.fillStyle = '#e2e8f0'; sctx.fillRect(56, 120, 200, 1);
+  sctx.fillStyle = '#1e293b'; sctx.fillRect(20, 432, 1160, 30);
+  sctx.fillStyle = '#0f172a'; sctx.fillRect(48, 432, 100, 30);
+  sctx.fillStyle = '#0f172a'; sctx.fillRect(20, 462, 1160, 300);
+  sctx.fillStyle = '#1e293b'; sctx.fillRect(20, 650, 1160, 1);
+  sctx.restore();
+  for (const b of SRC) {
+    sctx.font = b.font;
+    b.lines.forEach(([x, base, s], i) => { sctx.fillStyle = (b.comment0 && i === 0) ? '#94a3b8' : b.fg; sctx.fillText(s, x, base); });
+  }
+}
+
+/* ================= 3. 模拟后端返回（OcrInplaceResponse；坐标相对选区左上角） ================= */
+const mctx = document.createElement('canvas').getContext('2d');
+function buildResponse() {
+  const blocks = SRC.map(b => {
+    mctx.font = b.font;
+    const lines = b.lines.map(([x, base, s]) => {
+      const lead = s.length - s.trimStart().length, text = s.trimStart();
+      const lx = x + mctx.measureText(s.slice(0, lead)).width;
+      return { bbox: [Math.round(lx - BOX.x), Math.round(base - BASE_RATIO * b.fs - BOX.y), Math.round(mctx.measureText(text).width), Math.round(FS_FROM_H * b.fs)], text };
+    });
+    const x0 = Math.min(...lines.map(l => l.bbox[0])), y0 = Math.min(...lines.map(l => l.bbox[1]));
+    const x1 = Math.max(...lines.map(l => l.bbox[0] + l.bbox[2])), y1 = Math.max(...lines.map(l => l.bbox[1] + l.bbox[3]));
+    const ocr = b.hard ? b.lines.map(l => l[2]).join('\n') : lines.map(l => l.text).join(' ');
+    return { bbox: [x0, y0, x1 - x0, y1 - y0], ocr_text: ocr, translated_text: b.tr, bg_color: b.bg, fg_color: b.fg, lines, _join: b.join || '\n\n' };
+  });
+  const joinAll = key => blocks.map((b, i) => (i ? b._join : '') + b[key]).join('');
+  return { ok: true, text: joinAll('translated_text'), ocr_text: joinAll('ocr_text'), image_width: BOX.w, image_height: BOX.h, blocks };
+}
+const RESP = buildResponse();
+
+/* ================= 4. 排版：逐行槽位（OCR 与翻译共用） ================= */
+const CJK = /[⺀-鿿豈-﫿＀-￯　-〿]/;
+const NO_LINE_START = /[，。、；：！？）》」』,.!?;:)\]—]/;
+function tokenize(text) {
+  const out = []; let i = 0;
+  while (i < text.length) {
+    let e = i + 1;
+    if (CJK.test(text[i])) { while (e < text.length && NO_LINE_START.test(text[e])) e++; }
+    else if (text[i] !== ' ') { while (e < text.length && text[e] !== ' ' && !CJK.test(text[e])) e++; }
+    out.push(text.slice(i, e)); i = e;
+  }
+  return out;
+}
+function wrap(text, maxW) {
+  const rows = []; let cur = '', w = 0;
+  for (const tok of tokenize(text)) {
+    const tw = mctx.measureText(tok).width;
+    if (w > 0 && w + tw > maxW && tok !== ' ') { rows.push(cur.trimEnd()); cur = ''; w = 0; if (tok === ' ') continue; }
+    cur += tok; w += tw;
+  }
+  if (cur.trim()) rows.push(cur.trimEnd());
+  return rows;
+}
+const fsOf = l => Math.round(l.bbox[3] / FS_FROM_H);
+/* 返回要画的行：{text, x, y(行框顶), h, fs, fitW}，坐标为选区内坐标；
+   fitW：该行文字与原行相同（OCR 全部行、翻译里未变的代码行）时，按原行框宽度调字距，让字落在原字的位置上 */
+function layoutBlock(b, mode) {
+  const L = b.lines;
+  if (mode === 'ocr') return L.map(l => ({ text: l.text, x: l.bbox[0], y: l.bbox[1], h: l.bbox[3], fs: fsOf(l), fitW: l.bbox[2] }));
+  const pitch = L.length > 1 ? (L[L.length - 1].bbox[1] - L[0].bbox[1]) / (L.length - 1) : L[0].bbox[3] * 1.6;
+  const right = b.bbox[0] + b.bbox[2], fs = fsOf(L[0]);
+  const slot = r => r < L.length ? { x: L[r].bbox[0], y: L[r].bbox[1], h: L[r].bbox[3] } : { x: b.bbox[0], y: L[L.length - 1].bbox[1] + (r - L.length + 1) * pitch, h: L[L.length - 1].bbox[3] };
+  mctx.font = `${fs}px ${SANS}`;
+  const out = []; let r = 0;
+  for (const hard of b.translated_text.split('\n')) {
+    const s0 = slot(r), maxW = Math.max(right - s0.x, 40);
+    const rows = wrap(hard.trimStart(), maxW);
+    const same = rows.length === 1 && r < L.length && rows[0] === L[r].text;
+    rows.forEach((txt, k) => { const s = k === 0 ? s0 : slot(r); out.push({ text: txt, x: k === 0 ? s0.x : b.bbox[0], y: s.y, h: s.h, fs, fitW: same ? L[r].bbox[2] : null }); r++; });
+    if (!rows.length) r++;
+  }
+  return out;
+}
+/* 字距微调：对应 QFont.setLetterSpacing(AbsoluteSpacing, ls)，范围限制在 -10%～+30% 字号 */
+function letterSpacing(r) {
+  if (!r.fitW) return 0;
+  mctx.font = `${r.fs}px ${SANS}`;
+  const n = [...r.text].length; if (n < 2) return 0;
+  return Math.max(-.1 * r.fs, Math.min(.3 * r.fs, (r.fitW - mctx.measureText(r.text).width) / (n - 1)));
+}
+function rowWidth(r) { mctx.font = `${r.fs}px ${SANS}`; return r.fitW || mctx.measureText(r.text).width; }
+function extent(b, rows) {
+  let x0 = b.bbox[0], y0 = b.bbox[1], x1 = b.bbox[0] + b.bbox[2], y1 = b.bbox[1] + b.bbox[3];
+  for (const r of rows) { x1 = Math.max(x1, r.x + rowWidth(r)); y1 = Math.max(y1, r.y + r.h); }
+  return [x0, y0, x1, y1];
+}
+
+/* ================= 5. 浮窗状态与绘制（对应 InplaceTranslateOverlay.paintEvent） ================= */
+const S = { mode: 'ocr', phase: 'loading', openAt: 0, phaseAt: 0, closed: false, closedAt: 0, copied: null, copiedAt: 0 };
+const ERR = { ocr: '识别失败：没有识别到文字', translate: '翻译失败：本地翻译模型连接超时' };
+const octx = document.getElementById('overlay').getContext('2d');
+function paintOverlay(t) {
+  octx.clearRect(0, 0, 1200, 780);
+  if (S.closed) return;
+  octx.save();
+  octx.globalAlpha = prog(t, S.openAt, 140);
+  // 选区外框：1px 实线，失败转红
+  octx.lineWidth = 1; octx.strokeStyle = S.phase === 'error' ? C.err : C.accent;
+  octx.strokeRect(BOX.x - .5, BOX.y - .5, BOX.w + 1, BOX.h + 1);
+  if (S.phase === 'loading') {
+    // 扫描光带：80px 渐变从上往下扫，1.4s 一轮，裁剪到选区
+    const band = 80, y = BOX.y - band + (((t - S.phaseAt) / 1400) % 1) * (BOX.h + band);
+    const g = octx.createLinearGradient(0, y, 0, y + band);
+    g.addColorStop(0, rgba(C.accent, 0)); g.addColorStop(.85, rgba(C.accent, .22)); g.addColorStop(1, rgba(C.accent, .5));
+    octx.save(); octx.beginPath(); octx.rect(BOX.x, BOX.y, BOX.w, BOX.h); octx.clip();
+    octx.fillStyle = g; octx.fillRect(BOX.x, y, BOX.w, band); octx.restore();
+  }
+  if (S.phase === 'error') { octx.fillStyle = rgba(C.err, .06); octx.fillRect(BOX.x, BOX.y, BOX.w, BOX.h); }
+  if (S.phase === 'result') {
+    octx.globalAlpha *= prog(t, S.phaseAt, 180);
+    octx.translate(BOX.x, BOX.y);
+    const laid = RESP.blocks.map(b => ({ b, rows: layoutBlock(b, S.mode) }));
+    // 第一遍：统一深色半透明标签 + 左侧强调线
+    for (const { b, rows } of laid) {
+      const [x0, y0, x1, y1] = extent(b, rows);
+      const lx = x0 - LABEL_PAD_X, ly = y0 - LABEL_PAD_Y, lh = y1 - y0 + LABEL_PAD_Y * 2;
+      octx.beginPath(); octx.roundRect(lx, ly, x1 - x0 + LABEL_PAD_X * 2, lh, 4);
+      octx.fillStyle = rgba(LABEL_BG, LABEL_ALPHA); octx.fill();
+      octx.fillStyle = rgba(C.accent, .9); octx.fillRect(lx, ly, 2, lh);
+    }
+    // 第二遍：统一浅色文字（逐行槽位）
+    octx.textBaseline = 'alphabetic'; octx.fillStyle = LABEL_FG;
+    for (const { rows } of laid) {
+      for (const r of rows) { octx.font = `${r.fs}px ${SANS}`; octx.letterSpacing = `${letterSpacing(r)}px`; octx.fillText(r.text, r.x, r.y + BASE_RATIO * r.fs); }
+    }
+    octx.letterSpacing = '0px';
+  }
+  octx.restore();
+}
+
+/* ================= 6. 迷你菜单（对应 QFrame + QPushButton） ================= */
+const mini = document.getElementById('mini');
+const MENU_TOP = BOX.y + BOX.h;   // 紧贴选区底边，作为标签页
+function btn(label, kind, onClick) {
+  const b = document.createElement('button');
+  const done = S.copied === kind && performance.now() - S.copiedAt < 1500;
+  b.textContent = done ? '✓ 已复制' : label; if (done) b.classList.add('done');
+  b.onclick = e => { e.stopPropagation(); stopAuto(); onClick(); };
+  return b;
+}
+function renderMenu() {
+  mini.innerHTML = ''; mini.hidden = S.closed;
+  mini.style.left = BOX.x - 1 + 'px'; mini.style.top = MENU_TOP + 'px';
+  mini.className = 'mini tab' + (S.phase === 'error' ? ' err' : '');
+  if (S.closed) return;
+  mini.insertAdjacentHTML('beforeend', `<span class="chip">${S.mode === 'ocr' ? 'OCR' : 'EN → 中'}</span>`);
+  if (S.phase === 'loading') {
+    mini.insertAdjacentHTML('beforeend', `<span class="st"><span class="spin"></span>${S.mode === 'ocr' ? '识别中…' : '识别并翻译中…'}</span>`);
+  } else if (S.phase === 'error') {
+    mini.insertAdjacentHTML('beforeend', `<span class="st err">✕ ${ERR[S.mode]}</span>`);
+    mini.appendChild(btn('重试', 'retry', () => retry()));
+  } else if (S.mode === 'ocr') {
+    mini.appendChild(btn('复制', 'all', () => copy('all')));
+  } else {
+    mini.appendChild(btn('复制译文', 'trans', () => copy('trans')));
+    mini.appendChild(btn('复制原文', 'orig', () => copy('orig')));
+  }
+  mini.insertAdjacentHTML('beforeend', '<span class="div"></span><span class="kbd">Esc</span>');
+}
+
+/* ================= 7. 动作（对应 on_copy_text / on_retry / on_closed） ================= */
+const clipEl = document.getElementById('clip');
+function copy(kind) {
+  const text = kind === 'trans' ? RESP.text : RESP.ocr_text;
+  clipEl.textContent = `on_copy_text(…) 写入剪贴板 ${text.length} 字：\n\n${text}`;
+  S.copied = kind; S.copiedAt = performance.now(); renderMenu();
+  setTimeout(renderMenu, 1550);
+}
+function open(mode, phase) { const t = performance.now(); Object.assign(S, { mode, phase, openAt: S.closed ? t : S.openAt, phaseAt: t, closed: false, copied: null }); syncCtrl(); renderMenu(); }
+function setPhase(phase) { Object.assign(S, { phase, phaseAt: performance.now() }); renderMenu(); syncCtrl(); }
+function retry() { setPhase('loading'); if (!auto) setTimeout(() => { if (S.phase === 'loading' && !auto) setPhase('result'); }, 1200); }
+function close(reason) { if (S.closed) return; Object.assign(S, { closed: true, closedAt: performance.now() }); document.getElementById('closed-tip').hidden = false; document.getElementById('closed-tip').textContent = `浮窗已关闭（${reason}）· 点上方任一模式或状态按钮重新打开`; renderMenu(); syncCtrl(); }
+document.getElementById('stage').addEventListener('click', e => {
+  const r = e.currentTarget.getBoundingClientRect(), x = e.clientX - r.left, y = e.clientY - r.top;
+  const inBox = x >= BOX.x && x <= BOX.x + BOX.w && y >= BOX.y && y <= BOX.y + BOX.h;
+  if (!inBox && !S.closed) { stopAuto(); close('点击了框外空白处'); }
+});
+document.addEventListener('keydown', e => { if (e.key === 'Escape' && !S.closed) { stopAuto(); close('按了 Esc'); } });
+
+/* ================= 8. 自动循环脚本 + 手动控制 ================= */
+const SCRIPT = [
+  [0, () => open('ocr', 'loading')], [1600, () => setPhase('result')], [5200, () => copy('all')],
+  [7200, () => close('按了 Esc')], [8000, () => open('translate', 'loading')], [9800, () => setPhase('result')],
+  [13800, () => copy('trans')], [15600, () => copy('orig')], [17400, () => setPhase('loading')], [18400, () => setPhase('error')],
+  [21400, () => setPhase('loading')], [22400, () => setPhase('result')], [24600, () => close('点击了框外空白处')], [25600, null],
+];
+let auto = true, vt = 0, si = 0, last = performance.now();
+function stopAuto() { if (auto) { auto = false; syncCtrl(); } }
+function startAuto() { auto = true; vt = 0; si = 0; S.closed = true; document.getElementById('closed-tip').hidden = true; syncCtrl(); }
+function syncCtrl() {
+  document.getElementById('btn-auto').classList.toggle('on', auto);
+  document.querySelectorAll('[data-mode]').forEach(b => b.classList.toggle('on', !S.closed && b.dataset.mode === S.mode));
+  document.querySelectorAll('[data-phase]').forEach(b => b.classList.toggle('on', !S.closed && b.dataset.phase === S.phase));
+  if (!S.closed) document.getElementById('closed-tip').hidden = true;
+}
+document.getElementById('btn-auto').onclick = startAuto;
+document.querySelectorAll('[data-mode]').forEach(b => b.onclick = () => { stopAuto(); open(b.dataset.mode, S.closed ? 'result' : S.phase); });
+document.querySelectorAll('[data-phase]').forEach(b => b.onclick = () => { stopAuto(); if (S.closed) open(S.mode, b.dataset.phase); else setPhase(b.dataset.phase); });
+document.getElementById('data').innerHTML = (() => {
+  const b = RESP.blocks[10];
+  const j = JSON.stringify({ bbox: b.bbox, ocr_text: b.ocr_text, translated_text: b.translated_text, bg_color: b.bg_color, fg_color: b.fg_color, lines: b.lines }, null, 1)
+    .replace(/\n\s+(\d+|-?\d+)(,?)/g, ' $1$2').replace(/\[\s+/g, '[').replace(/\s+\]/g, ']');
+  return j.replace('"lines"', '<span class="n">"lines"（需新增）</span>').replace(/"(ocr_text|translated_text)"/g, '<span class="n">"$1"（\\n 保留换行）</span>');
+})();
+
+function frame(now) {
+  const dt = Math.min(100, now - last); last = now;
+  if (auto) {
+    vt += dt;
+    while (si < SCRIPT.length && SCRIPT[si][0] <= vt) { const f = SCRIPT[si][1]; if (f) f(); si++; }
+    if (si >= SCRIPT.length) { vt = 0; si = 0; }
+  }
+  paintOverlay(now);
+  requestAnimationFrame(frame);
+}
+(function init() {
+  drawScreen();
+  const q = new URLSearchParams(location.search);
+  if (q.get('mode')) { auto = false; S.closed = true; open(q.get('mode'), q.get('phase') || 'result'); S.openAt = S.phaseAt = -1e6; }
+  syncCtrl(); renderMenu();
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>

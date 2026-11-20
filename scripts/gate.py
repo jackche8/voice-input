@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""分层闸门：logic / business / api / platform / sidecar / integration / ui / ui_desktop。
+"""分层闸门：logic / business / api / platform / hotkey / sidecar / integration / ui / ui_desktop。
 默认 --layer logic，不联网安装，不写入项目 .venv。
---layer all 含 logic,business,api,platform,sidecar,integration,ui,ui_desktop。
+--layer all 含 logic,business,api,platform,hotkey,sidecar,integration,ui,ui_desktop。
 sidecar 默认只跑 mock；官方短链需 SIDECAR_OFFICIAL=1 且显式启动宿主。
 """
 from __future__ import annotations
@@ -46,6 +46,12 @@ LAYERS = {
         "pytest_tmp": ROOT / ".pp" / "tmp" / "platform" / "pytest",
         "export_openapi": False,
     },
+    "hotkey": {
+        "tests": ROOT / "tests" / "hotkey",
+        "gate": ROOT / ".pp" / "gate" / "hotkey",
+        "pytest_tmp": ROOT / ".pp" / "tmp" / "hotkey" / "pytest",
+        "export_openapi": False,
+    },
     "sidecar": {
         "tests": ROOT / "tests" / "sidecar",
         "gate": ROOT / ".pp" / "gate" / "sidecar",
@@ -67,7 +73,7 @@ LAYERS = {
     },
 }
 
-ALL_LAYERS = ("logic", "business", "api", "platform", "sidecar", "integration", "ui", "ui_desktop")
+ALL_LAYERS = ("logic", "business", "api", "platform", "hotkey", "sidecar", "integration", "ui", "ui_desktop")
 
 
 def now() -> str:
@@ -87,9 +93,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--layer",
-        choices=("logic", "business", "api", "platform", "sidecar", "integration", "ui", "ui_desktop", "all"),
+        choices=("logic", "business", "api", "platform", "hotkey", "sidecar", "integration", "ui", "ui_desktop", "all"),
         default="logic",
-        help="logic (default) / business / api / platform / sidecar / integration / ui / ui_desktop; all includes all of these plus the existing node tests/ui entry. Official GPU sidecar stays opt-in.",
+        help="logic (default) / business / api / platform / hotkey / sidecar / integration / ui / ui_desktop; all includes all of these plus the existing node tests/ui entry. Official GPU sidecar stays opt-in.",
     )
     parser.add_argument(
         "--write-openapi-snapshot",
@@ -378,7 +384,7 @@ def write_summary(
         f"bootstrap_install: {bootstrap}",
         "notes:",
         "- Default gate does not install packages; use --bootstrap only to prepare the isolated venv.",
-        "- --layer logic|business|api|platform|sidecar|integration|ui|ui_desktop|all; all includes python layers plus tests/ui/run.js. Official GPU sidecar stays opt-in skip.",
+        "- --layer logic|business|api|platform|hotkey|sidecar|integration|ui|ui_desktop|all; all includes python layers plus tests/ui/run.js. Official GPU sidecar stays opt-in skip.",
         "- logic OpenAPI skeleton keeps empty paths; api layer exports real FastAPI paths to .pp/gate/api/openapi.json.",
         "- Live 4b / long-audio ASR must skip or not be marked green. Mocks are not real models.",
         "- Isolated test env: .pp/tmp/l1/venv-test ; project .venv was not modified.",

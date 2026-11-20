@@ -1,7 +1,7 @@
 """方案 C（Studio 工作站）跨平台桌面 UI 视觉令牌与字体工具。
 
-所有桌面浮窗、红十字框选器、原位遮挡译文层、语音胶囊与双行大字幕条、系统托盘图标
-均从本模块读取颜色、字号与圆角常量，禁止在各组件内散落硬编码色值。
+所有桌面浮窗、红十字框选器、原位遮挡译文层、语音一体底栏、系统托盘图标
+均从本模块读取颜色、字号、圆角与动效常量，禁止在各组件内散落硬编码色值。
 """
 from __future__ import annotations
 
@@ -54,7 +54,7 @@ OVERLAY_OUTLINE_HEX = ACCENT_HEX
 OVERLAY_BANNER_BG_RGBA = (13, 17, 23, 224)
 
 # ---------------------------------------------------------------------------
-# 3. 左下角状态胶囊与底部居中双行大字幕条令牌
+# 3. 语音一体底栏（胶囊 / 字幕条 / 确认卡片三种形态）颜色令牌
 # ---------------------------------------------------------------------------
 CAPSULE_BG_RGBA = (13, 17, 23, 232)
 CAPSULE_BORDER_HEX = "#30363d"
@@ -64,7 +64,6 @@ CAPSULE_MUTED_HEX = "#8b949e"
 STATE_IDLE_HEX = "#8b949e"
 STATE_RECORDING_HEX = "#f85149"
 STATE_POLISHING_HEX = "#58a6ff"
-STATE_BUSY_HEX = "#d29922"
 STATE_OK_HEX = "#3fb950"
 STATE_WARN_HEX = "#d29922"
 STATE_ERROR_HEX = "#f85149"
@@ -76,6 +75,40 @@ TAIL_TEXT_HEX = "#94a3b8"
 # 语义别名，便于不同模块直观引用
 CAPTION_STABLE_TEXT_HEX = STABLE_TEXT_HEX
 CAPTION_TAIL_TEXT_HEX = TAIL_TEXT_HEX
+
+# 一体底栏动效（UI 验收标准 docs/design/v3.3/voice-a.html「动效参数」表）
+VOICE_FRAME_MS = 16
+VOICE_FADE_IN_MS = 180
+VOICE_RISE_PX = 8
+VOICE_MORPH_MS = 200
+VOICE_CONTENT_DELAY_MS = 40
+VOICE_CONTENT_FADE_MS = 180
+VOICE_ROLL_MS = 200
+VOICE_FRESH_MS = 220
+VOICE_COLOR_MS = 200
+VOICE_SWAP_HALF_MS = 130
+VOICE_CHECK_MS = 240
+VOICE_FADE_OUT_MS = 260
+VOICE_SINK_PX = 6
+VOICE_PULSE_PERIOD_MS = 1200
+VOICE_PULSE_MIN_OPACITY = 0.55
+VOICE_SPIN_PERIOD_MS = 900
+VOICE_BREATH_MIN_ALPHA = 115  # 润色描边呼吸 45%–80%
+VOICE_BREATH_SPAN_ALPHA = 89
+VOICE_FIRM_BORDER_ALPHA = 179  # 已输入 / 出错描边 70%
+VOICE_SOFT_BORDER_ALPHA = 153  # 润色 / 待确认描边 60%
+
+# 录音中警告的附加提示行（voice-a.html「附加提示行」规格）
+VOICE_NOTICE_HEIGHT_PX = 24
+VOICE_NOTICE_INSET_PX = 16
+VOICE_NOTICE_PAD_X_PX = 10
+VOICE_NOTICE_RADIUS_PX = 8
+VOICE_NOTICE_RISE_PX = 4
+VOICE_NOTICE_DOT_PX = 7
+VOICE_NOTICE_IN_MS = 160
+VOICE_NOTICE_SHOW_MS = 3000
+VOICE_NOTICE_OUT_MS = 260
+VOICE_NOTICE_BORDER_ALPHA = 153
 
 # ---------------------------------------------------------------------------
 # 4. 字体族、像素字号与圆角几何常量

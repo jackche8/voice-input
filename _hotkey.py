@@ -310,34 +310,43 @@ def normalize_accel(accel: str) -> str:
     return "+".join(parts)
 
 
+# Linux input-event-codes.h 中 KEY_TABLE 与修饰键用到的键码（内核 ABI，固定不变）。直接取数，组合解析不依赖
+# python-evdev，闸门的隔离环境（无 python-evdev）也能跑真实 evdev 后端回放；数值与 evdev.ecodes 同名常量一致，
+# 主键部分由 tests/platform/test_capture_hotkey.py 在装了 python-evdev 的解释器里复核。
+EVDEV_KEY_CODES: dict[str, int] = {
+    "KEY_ESC": 1, "KEY_1": 2, "KEY_2": 3, "KEY_3": 4, "KEY_4": 5, "KEY_5": 6, "KEY_6": 7, "KEY_7": 8,
+    "KEY_8": 9, "KEY_9": 10, "KEY_0": 11, "KEY_MINUS": 12, "KEY_EQUAL": 13, "KEY_BACKSPACE": 14, "KEY_TAB": 15,
+    "KEY_Q": 16, "KEY_W": 17, "KEY_E": 18, "KEY_R": 19, "KEY_T": 20, "KEY_Y": 21, "KEY_U": 22, "KEY_I": 23,
+    "KEY_O": 24, "KEY_P": 25, "KEY_ENTER": 28, "KEY_A": 30, "KEY_S": 31, "KEY_D": 32, "KEY_F": 33, "KEY_G": 34,
+    "KEY_H": 35, "KEY_J": 36, "KEY_K": 37, "KEY_L": 38, "KEY_SEMICOLON": 39, "KEY_GRAVE": 41, "KEY_BACKSLASH": 43,
+    "KEY_Z": 44, "KEY_X": 45, "KEY_C": 46, "KEY_V": 47, "KEY_B": 48, "KEY_N": 49, "KEY_M": 50, "KEY_COMMA": 51,
+    "KEY_DOT": 52, "KEY_SLASH": 53, "KEY_SPACE": 57, "KEY_F1": 59, "KEY_F2": 60, "KEY_F3": 61, "KEY_F4": 62,
+    "KEY_F5": 63, "KEY_F6": 64, "KEY_F7": 65, "KEY_F8": 66, "KEY_F9": 67, "KEY_F10": 68, "KEY_F11": 87,
+    "KEY_F12": 88, "KEY_DELETE": 111,
+}
+EVDEV_MODIFIER_CODES: dict[str, frozenset[int]] = {
+    "ctrl": frozenset({29, 97}),  # KEY_LEFTCTRL / KEY_RIGHTCTRL
+    "alt": frozenset({56, 100}),  # KEY_LEFTALT / KEY_RIGHTALT
+    "shift": frozenset({42, 54}),  # KEY_LEFTSHIFT / KEY_RIGHTSHIFT
+    "super": frozenset({125, 126}),  # KEY_LEFTMETA / KEY_RIGHTMETA
+}
+
+
 def parse_hotkey_evdev(hotkey_str: str) -> dict:
     """解析快捷键字符串为 evdev 格式 (内核级，Wayland 兼容)。
 
     返回: {'trigger': evdev_keycode, 'modifiers': [set_of_keycodes, ...]}
+    严格解析：不认识的修饰键或主键直接报错（GNOME 实际绑定可能带 Hyper/Meta 等，少算一个修饰键会误判按住）。
     """
-    from evdev import ecodes
-
     parts = hotkey_str.lower().strip().split("+")
-
-    mod_map = {
-        "ctrl": {ecodes.KEY_LEFTCTRL, ecodes.KEY_RIGHTCTRL},
-        "alt": {ecodes.KEY_LEFTALT, ecodes.KEY_RIGHTALT},
-        "shift": {ecodes.KEY_LEFTSHIFT, ecodes.KEY_RIGHTSHIFT},
-        "super": {ecodes.KEY_LEFTMETA, ecodes.KEY_RIGHTMETA},
-    }
-
-    modifiers = []
-    for mod in parts[:-1]:
-        if mod in mod_map:
-            modifiers.append(mod_map[mod])
-
-    trigger_name = parts[-1]
+    *mods, trigger_name = parts
+    unknown = [mod for mod in mods if mod not in EVDEV_MODIFIER_CODES]
+    if unknown:
+        raise ValueError(f"无法解析为 evdev 组合：不认识的修饰键 {unknown}（{hotkey_str!r}）")
     name = KEY_TABLE.get(canonical_key(trigger_name))
     if name is None:
-        raise ValueError(f"Unknown evdev key: {trigger_name}")
-    trigger = getattr(ecodes, name.evdev)
-
-    return {"trigger": trigger, "modifiers": modifiers}
+        raise ValueError(f"无法解析为 evdev 组合：不认识的主键 {trigger_name!r}（{hotkey_str!r}）")
+    return {"trigger": EVDEV_KEY_CODES[name.evdev], "modifiers": [set(EVDEV_MODIFIER_CODES[mod]) for mod in mods]}
 
 
 WIN32_MODIFIERS = {
