@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from _ui_desktop import theme
 from _ui_desktop.caption_bar import compute_trailing_two_lines
-from _ui_desktop.inplace_overlay import InplaceTranslateOverlay, RenderedPatchInfo
+from _ui_desktop.inplace_overlay import InplaceTranslateOverlay
 from _ui_desktop.region_selector import RedCrosshairSelector
 from _ui_desktop.tray import StudioTrayIcon, render_status_icon, render_status_image
 from _ui_desktop.voice_hud import VoiceHudOverlay
@@ -17,7 +17,6 @@ from _ui_desktop.voice_hud import VoiceHudOverlay
 __all__ = [
     "InplaceTranslateOverlay",
     "RedCrosshairSelector",
-    "RenderedPatchInfo",
     "StudioTrayIcon",
     "VoiceHudOverlay",
     "compute_trailing_two_lines",

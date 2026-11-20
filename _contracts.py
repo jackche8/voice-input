@@ -497,16 +497,29 @@ class OcrTranslateResponse(BaseModel):
     target_lang: str
 
 
+class OcrTextLine(BaseModel):
+    """一条可见文字行；坐标已还原放大倍数与留白。"""
+
+    model_config = ConfigDict(extra="forbid")
+    bbox: tuple[int, int, int, int] = Field(description="(x, y, width, height) 像素坐标，相对于所提交图片左上角")
+    text: str = Field(min_length=1, description="行内文字，不含缩进空格")
+    soft_wrap: bool = Field(default=False, description="True = 本行是上一行的自动折行续行；块内首行恒为 False")
+
+
 class OcrTextBlock(BaseModel):
-    """识别到的单个文字区域及其局部采样背景/前景色，供原位遮挡译文浮窗直接渲染。"""
+    """同列紧邻的若干行组成的文字块及其局部采样背景/前景色，供原位浮窗逐行绘制与排版。"""
 
     model_config = ConfigDict(extra="forbid")
     bbox: tuple[int, int, int, int] = Field(
-        description="(x, y, width, height) 像素坐标，相对于所提交图片左上角"
+        description="(x, y, width, height) 像素坐标，相对于所提交图片左上角；= 全部行框的并集"
     )
-    ocr_text: str
-    translated_text: str = ""
-    bg_color: str = Field(default="#ffffff", description="采样自文字框外围边缘的不透明背景色 #RRGGBB")
+    lines: list[OcrTextLine] = Field(min_length=1, description="逐行绘制与全部文本派生的唯一来源")
+    ocr_text: str = Field(description="逐行原文，保留可见换行与相对块左缘的缩进（_ocr_text.block_display_text）")
+    translated_text: str = Field(
+        default="",
+        description="各硬行段译文按原缩进逐行拼回（_ocr_text.block_translated_text）；raw 模式 = ocr_text",
+    )
+    bg_color: str = Field(default="#ffffff", description="半透明贴片底色 #RRGGBB，采样自文字框外围")
     fg_color: str = Field(default="#0f172a", description="高对比度前景文字色 #RRGGBB")
 
 
@@ -826,6 +839,7 @@ def contract_models() -> tuple[type[BaseModel], ...]:
         TranslateRequest,
         TranslateResponse,
         OcrTranslateResponse,
+        OcrTextLine,
         OcrTextBlock,
         OcrInplaceResponse,
         HistoryRecord,
@@ -917,6 +931,7 @@ __all__ = [
     "LogicError",
     "OcrInplaceResponse",
     "OcrTextBlock",
+    "OcrTextLine",
     "OcrTranslateResponse",
     "PolishRequest",
     "PolishResponse",

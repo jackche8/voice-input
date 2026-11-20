@@ -115,6 +115,18 @@ class WaylandRig:
     def failures(self) -> list[str]:
         return [e for e in self.errors if e]
 
+    def kill_reader(self, monkeypatch) -> None:
+        """读线程运行中遇到意外异常：在测试线程里直接跑读线程主体到它退出。"""
+
+        def broken_read():
+            raise RuntimeError("boom")
+
+        self.devices[KB].read = broken_read
+        monkeypatch.setattr(hotkey_evdev, "select", type("S", (), {"select": staticmethod(lambda r, w, x, t: (list(r), [], []))}))
+        evdev = self.manager._evdev
+        evdev._running = True
+        evdev._monitor()
+
 
 def test_any_release_order_stops_once_and_never_double_starts(timers) -> None:
     rig = WaylandRig()
@@ -199,9 +211,9 @@ def test_other_device_disconnect_does_not_end_but_holding_device_does_and_mouse_
         rig.key(code, 1, ms)
     rig.activate("voice", 1020)
     rig.key(BTN_LEFT, 1, 1100, path=MOUSE)
-    rig.manager._evdev._drop_device(MOUSE)  # 无线鼠标掉线
+    rig.manager._evdev._drop_device(MOUSE, 1150)  # 无线鼠标掉线
     assert rig.rec.events == ["v_start"]
-    rig.manager._evdev._drop_device(KB)  # 按住组合的键盘断开 = 物理上不再按住
+    rig.manager._evdev._drop_device(KB, 1200)  # 按住组合的键盘断开 = 物理上不再按住
     assert rig.rec.events == ["v_start", "v_stop"]
 
 
@@ -233,17 +245,29 @@ def test_unparseable_actual_binding_is_reported_and_other_combos_still_work(time
 
 def test_reader_failure_reaches_on_error(timers, monkeypatch) -> None:
     rig = WaylandRig()
-    device = rig.devices[KB]
-
-    def broken_read():
-        raise RuntimeError("boom")
-
-    device.read = broken_read
-    monkeypatch.setattr(hotkey_evdev, "select", type("S", (), {"select": staticmethod(lambda r, w, x, t: (list(r), [], []))}))
-    evdev = rig.manager._evdev
-    evdev._running = True
-    evdev._monitor()
+    rig.kill_reader(monkeypatch)
     assert rig.failures() == ["evdev 读线程意外退出：RuntimeError: boom"]
+
+
+def test_source_failure_while_recording_stops_the_recording(timers, monkeypatch) -> None:
+    rig = WaylandRig()
+    for code, ms in ((CTRL, 1000), (ALT, 1010), (Z, 1020)):
+        rig.key(code, 1, ms)
+    rig.activate("voice", 1020)
+    rig.kill_reader(monkeypatch)  # 之后再也收不到松开
+    assert rig.rec.events == ["v_start", "v_stop"]
+    assert rig.manager.dispatcher.voice_active is False
+
+
+def test_failures_are_kept_per_kind_and_source_exit_survives_binding_recovery(timers, monkeypatch) -> None:
+    rig = WaylandRig(actual={**GNOME, "screenshot": "HYPER+X"})
+    rig.kill_reader(monkeypatch)
+    binding, source = "screenshot='hyper+x'", "evdev 读线程意外退出：RuntimeError: boom"
+    assert binding in rig.errors[-1] and source in rig.errors[-1]  # 两种失败同时可见
+    rig.portal.change(GNOME)  # 用户在 GNOME 里把截图键改回可解析的绑定：只撤销绑定这一种
+    assert rig.errors[-1] == source
+    rig.portal.change(GNOME)  # 合并原因没变：不重复上报
+    assert rig.errors.count(source) == 1
 
 
 def test_x11_trigger_release_ends_and_modifiers_are_released_only_when_it_stopped_recording(timers) -> None:

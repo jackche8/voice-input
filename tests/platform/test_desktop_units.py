@@ -52,10 +52,12 @@ class FakeSelector:
 
 
 class FakeInplaceOverlay:
-    def __init__(self, png, rect, *, loading, on_copy_text, on_retry, on_closed) -> None:
+    def __init__(self, png, rect, *, mode, virtual_rect, on_copy_text, on_retry, on_closed) -> None:
         self.png = png
         self.rect = rect
-        self.loading = loading
+        self.mode = mode
+        self.virtual_rect = virtual_rect
+        self.loading = True  # 创建即加载态
         self.on_copy_text = on_copy_text
         self.on_retry = on_retry
         self.on_closed = on_closed
@@ -69,7 +71,7 @@ class FakeInplaceOverlay:
         self.loading = True
         self.error = None
 
-    def set_result(self, blocks: list[OcrTextBlock], full_translated_text: str = "", full_ocr_text: str = "") -> None:
+    def set_result(self, blocks: list[OcrTextBlock], full_translated_text: str, full_ocr_text: str) -> None:
         self.loading = False
         self.error = None
         self.blocks = list(blocks)
@@ -94,7 +96,6 @@ def _make_capture_harness(api, *, capture_fn=None, copy_fn=None):
     selectors: list[FakeSelector] = []
     overlays: list[FakeInplaceOverlay] = []
     copied: list[str] = []
-    toasts: list[tuple[str, str]] = []
     region_calls: list[tuple[tuple[int, int, int, int], tuple[int, int, int, int] | None]] = []
 
     def open_selector(rect, mode_label, on_selected, on_cancelled):
@@ -102,15 +103,8 @@ def _make_capture_harness(api, *, capture_fn=None, copy_fn=None):
         selectors.append(sel)
         return sel
 
-    def open_overlay(png, rect, *, loading, on_copy_text, on_retry, on_closed):
-        ov = FakeInplaceOverlay(
-            png,
-            rect,
-            loading=loading,
-            on_copy_text=on_copy_text,
-            on_retry=on_retry,
-            on_closed=on_closed,
-        )
+    def open_overlay(png, rect, **kwargs):
+        ov = FakeInplaceOverlay(png, rect, **kwargs)
         overlays.append(ov)
         return ov
 
@@ -127,7 +121,6 @@ def _make_capture_harness(api, *, capture_fn=None, copy_fn=None):
         open_selector=open_selector,
         open_inplace_overlay=open_overlay,
         copy_clipboard=copy_fn or default_copy,
-        notify_toast=lambda msg, kind: toasts.append((msg, kind)),
         api=api,
         status=status,
         invoke_ui=lambda fn: fn(),
@@ -136,7 +129,25 @@ def _make_capture_harness(api, *, capture_fn=None, copy_fn=None):
         spawn=lambda fn: fn(),
     )
     flow._test_region_calls = region_calls  # type: ignore[attr-defined]
-    return flow, status, posted, selectors, overlays, copied, toasts
+    return flow, status, posted, selectors, overlays, copied
+
+
+def _ocr_payload(text: str, target_lang: str) -> dict:
+    """/api/v1/ocr-inplace 的单块响应（契约 OcrInplaceResponse；raw 时译文 = 原文）。"""
+    return {
+        "ok": True,
+        "text": text,
+        "ocr_text": text,
+        "target_lang": target_lang,
+        "image_width": 200,
+        "image_height": 80,
+        "blocks": [{
+            "bbox": [4, 6, 100, 24],
+            "lines": [{"bbox": [4, 6, 100, 24], "text": text, "soft_wrap": False}],
+            "ocr_text": text,
+            "translated_text": text,
+        }],
+    }
 
 
 # ------------------------------------------------------------------ CaptureFlow
@@ -162,6 +173,7 @@ def test_capture_flow_translate_reuses_selector_and_renders_inplace_blocks():
                 "blocks": [
                     {
                         "bbox": [4, 6, 100, 24],
+                        "lines": [{"bbox": [4, 6, 100, 24], "text": "你好世界", "soft_wrap": False}],
                         "ocr_text": "你好世界",
                         "translated_text": "Hello World",
                         "bg_color": "#112233",
@@ -171,7 +183,7 @@ def test_capture_flow_translate_reuses_selector_and_renders_inplace_blocks():
             }
 
     api = Api()
-    flow, status, posted, selectors, overlays, copied, _toasts = _make_capture_harness(api)
+    flow, status, posted, selectors, overlays, copied = _make_capture_harness(api)
 
     flow.trigger_translate()
     assert len(selectors) == 1
@@ -184,15 +196,15 @@ def test_capture_flow_translate_reuses_selector_and_renders_inplace_blocks():
     assert len(overlays) == 1
     ov = overlays[0]
     assert ov.loading is False and ov.error is None
+    assert ov.mode == "translate" and ov.virtual_rect == (0, 0, 1920, 1080)
     assert ov.rect == (100, 200, 300, 120)
     assert len(ov.blocks) == 1 and isinstance(ov.blocks[0], OcrTextBlock)
     assert ov.blocks[0].bg_color == "#112233" and ov.full_text == "Hello World" and ov.full_ocr == "你好世界"
     assert flow._test_region_calls == [((100, 200, 300, 120), (0, 0, 1920, 1080))]  # type: ignore[attr-defined]
     assert api.calls == [("en", "region-png")]
-    assert [p["event"] for p in posted] == ["busy", "idle"]
 
-    # 工具栏复制按钮走平台剪贴板
-    ov.on_copy_text(ov.full_text)
+    # 菜单「复制译文」走平台剪贴板，并把写入结果交回浮窗
+    assert ov.on_copy_text(ov.full_text) is True
     assert copied == ["Hello World"]
 
     # 重试按钮重新触发 ocr_inplace
@@ -204,7 +216,7 @@ def test_capture_flow_translate_reuses_selector_and_renders_inplace_blocks():
     assert ov.closed is True and flow.overlay_active() is False
 
 
-def test_capture_flow_translate_error_is_visible_on_overlay_and_status():
+def test_capture_flow_translate_error_shows_only_the_reason_on_the_overlay():
     class FailingApi:
         def get_config(self) -> dict:
             return {"translate_target_lang": "zh"}
@@ -212,204 +224,108 @@ def test_capture_flow_translate_error_is_visible_on_overlay_and_status():
         def ocr_inplace(self, png: bytes, *, target_lang: str, lang=None) -> dict:
             raise ApiError(503, ErrorCode.translate_failed.value, "Ollama 17947 未启动")
 
-    flow, status, posted, selectors, overlays, _copied, _toasts = _make_capture_harness(FailingApi())
+    flow, status, posted, selectors, overlays, _copied = _make_capture_harness(FailingApi())
     flow.trigger_translate()
     selectors[0].on_selected((10, 20, 200, 90))
     status.drain()
 
     assert overlays[0].loading is False
-    assert overlays[0].error == "Ollama 17947 未启动"
-    assert posted[-1]["event"] == "error"
-    assert posted[-1]["error"] == ErrorCode.translate_failed.value
-    assert "Ollama 17947" in posted[-1]["message"]
+    assert overlays[0].error == "Ollama 17947 未启动"  # 只传原因，「翻译失败：」前缀由浮窗按模式加
 
 
-def test_capture_flow_pure_ocr_reuses_same_selector_and_copies_with_toast():
+def test_capture_flow_ocr_opens_the_same_overlay_and_copies_only_on_request():
+    """T16：纯 OCR 打开同一个浮窗（mode=ocr、target_lang=raw），不自动写剪贴板；菜单复制写原文全文并返回成败。"""
+
     class OcrApi:
         def __init__(self) -> None:
             self.target_langs: list[str] = []
 
         def ocr_inplace(self, png: bytes, *, target_lang: str, lang=None) -> dict:
             self.target_langs.append(target_lang)
-            return {
-                "ok": True,
-                "text": "跨平台纯OCR",
-                "ocr_text": "跨平台纯OCR",
-                "target_lang": "raw",
-                "image_width": 100,
-                "image_height": 40,
-                "blocks": [],
-            }
+            return _ocr_payload("跨平台纯OCR", "raw")
 
+    results = iter([True, False])
+
+    def copy(text: str) -> bool:
+        copies.append(text)
+        outcome = next(results, None)
+        if outcome is None:
+            raise RuntimeError("xclip 不可用")
+        return outcome
+
+    copies: list[str] = []
     api = OcrApi()
-    flow, status, posted, selectors, overlays, copied, toasts = _make_capture_harness(api)
-
+    flow, status, posted, selectors, overlays, _copied = _make_capture_harness(api, copy_fn=copy)
     flow.trigger_ocr()
-    assert len(selectors) == 1
-    assert selectors[0].mode_label == "纯 OCR 识别 · 自动复制"
-
+    assert selectors[0].mode_label == "纯 OCR 识别"
     selectors[0].on_selected((10, 10, 100, 40))
+    ov = overlays[0]
+    assert ov.mode == "ocr" and api.target_langs == ["raw"]
+    assert ov.full_ocr == "跨平台纯OCR" and ov.error is None
+    assert copies == []  # 不自动复制
+    assert [ov.on_copy_text(ov.full_ocr) for _ in range(3)] == [True, False, False]  # 成功 / 返回失败 / 抛异常
+    assert copies == ["跨平台纯OCR"] * 3
     status.drain()
-    assert overlays == []  # 纯 OCR 不弹翻译浮窗
-    assert flow._test_region_calls == [((10, 10, 100, 40), (0, 0, 1920, 1080))]  # type: ignore[attr-defined]
-    assert api.target_langs == ["raw"]
-    assert copied == ["跨平台纯OCR"]
-    assert toasts == [("已复制 OCR 文本（7 字）", "ok")]
-    assert [p["event"] for p in posted] == ["busy", "idle"]
+    assert posted == []  # 复制失败只在浮窗显示，不发 status 事件
 
 
-def test_capture_flow_pure_ocr_toast_survives_async_sse_busy_and_idle(monkeypatch):
-    """P0-2 回归：真实 PlatformStatus (20ms HTTP→SSE 延迟) + QtUiBridge + 真实 VoiceHudOverlay。
-
-    断言纯 OCR 完成后 250ms 内，字数 Toast「已复制 OCR 文本（7 字）」始终保持可见，
-    不被迟到的 busy 或 idle SSE 事件冲掉，且托盘最终回到 idle。
-    """
-    import os
-    from PySide6.QtWidgets import QApplication
-
-    from _desktop.ui_bridge import QtUiBridge
-    from _ui_desktop import VoiceHudOverlay
-
-    app = QApplication.instance()
-    if app is None:
-        monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
-        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-        app = QApplication([])
-
-    for delivery_mode in ("slow_http", "async_sse"):
-        hud = VoiceHudOverlay(available_screen_rect=(0, 0, 1280, 800))
-        bridge = QtUiBridge()
-        tray_states: list[str] = []
-        posted_events: list[str] = []
-        dispatched_events: list[str] = []
-        pending_timers: list[threading.Timer] = []
-
-        class FakeTray:
-            def set_state(self, state: str) -> None:
-                tray_states.append(state)
-
-        tray = FakeTray()
-
-        def _dispatch(ev: dict) -> None:
-            dispatched_events.append(str(ev.get("event") or ""))
-            dispatch_product_event(ev, hud=hud, tray=tray)
-
-        def post_platform_event(ev: dict) -> None:
-            posted_events.append(str(ev.get("event") or ""))
-            if delivery_mode == "slow_http":
-                time.sleep(0.02)
-                bridge.post(lambda _ev=dict(ev): _dispatch(_ev))
-            else:
-                # 真实 SSE 为单条有序流，按投递序号错开定时器防止两条同毫秒 Timer 竞态倒序
-                delay = 0.02 * len(posted_events)
-                timer = threading.Timer(delay, lambda _ev=dict(ev): bridge.post(lambda: _dispatch(_ev)))
-                timer.daemon = True
-                pending_timers.append(timer)
-                timer.start()
-
-        status = PlatformStatus(post_platform_event, start_thread=True)
-
-        class FastOcrApi:
-            def ocr_inplace(self, png: bytes, *, target_lang: str, lang=None) -> dict:
-                del png, lang
-                assert target_lang == "raw"
-                return {
-                    "ok": True,
-                    "text": "跨平台纯OCR",
-                    "ocr_text": "跨平台纯OCR",
-                    "target_lang": "raw",
-                    "blocks": [],
-                }
-
-        selectors: list[FakeSelector] = []
-        selector_ready = threading.Event()
-        toast_shown = threading.Event()
-        copied: list[str] = []
-
-        def open_selector(rect, mode_label, on_selected, on_cancelled):
-            sel = FakeSelector(rect, mode_label, on_selected, on_cancelled)
-            selectors.append(sel)
-            selector_ready.set()
-            return sel
-
-        def notify_toast(msg: str, kind: str) -> None:
-            hud.show_toast(msg, kind=kind)
-            toast_shown.set()
-
-        flow = CaptureFlow(
-            capture_region=lambda rect, vrect: b"crop-ocr",
-            open_selector=open_selector,
-            open_inplace_overlay=lambda *a, **kw: (_ for _ in ()).throw(AssertionError("纯 OCR 不应弹浮窗")),
-            copy_clipboard=lambda text: (copied.append(text) or True),
-            notify_toast=notify_toast,
-            api=FastOcrApi(),
-            status=status,
-            invoke_ui=bridge.post,
-            get_virtual_rect=lambda: (0, 0, 1280, 800),
-            capture_delay_s=0.0,
-        )
-
-        try:
-            flow.trigger_ocr()
-            deadline = time.monotonic() + 2.0
-            while not selector_ready.is_set() and time.monotonic() < deadline:
-                app.processEvents()
-                time.sleep(0.005)
-            assert selector_ready.is_set() and len(selectors) == 1
-
-            # 立刻完成框选，故意令 _start_capture 的 busy 与 _ocr_worker 的 idle 在 20ms 后才到 SSE
-            selectors[0].on_selected((10, 10, 100, 40))
-
-            deadline = time.monotonic() + 2.0
-            while not toast_shown.is_set() and time.monotonic() < deadline:
-                app.processEvents()
-                time.sleep(0.005)
-            assert toast_shown.is_set()
-            assert copied == ["跨平台纯OCR"]
-
-            # 250ms 观察窗口内持续处理 Qt 事件：滞后到达的 busy / idle 均绝不可冲掉 Toast
-            watch_end = time.monotonic() + 0.25
-            while time.monotonic() < watch_end:
-                app.processEvents()
-                assert hud.isVisible() is True, (delivery_mode, hud.mode, hud.capsule_text, dispatched_events)
-                assert hud.mode == "toast", (delivery_mode, hud.mode, hud.capsule_text, dispatched_events)
-                assert hud.capsule_text == "已复制 OCR 文本（7 字）", (delivery_mode, hud.capsule_text)
-                time.sleep(0.01)
-
-            app.processEvents()
-            assert posted_events == ["busy", "idle"], (delivery_mode, posted_events)
-            assert dispatched_events == ["busy", "idle"], (delivery_mode, dispatched_events)
-            assert tray_states[-1] == "idle", (delivery_mode, tray_states)
-
-            # 非空闲/非忙碌的实时高优事件（如新一轮录音）仍应立刻切出 Toast
-            dispatch_product_event({"event": "recording"}, hud=hud, tray=tray)
-            assert hud.mode == "recording"
-            assert tray_states[-1] == "recording"
-        finally:
-            for timer in pending_timers:
-                timer.cancel()
-            status.close()
-            hud.close()
-            hud.deleteLater()
-            app.processEvents()
-
-
-def test_capture_flow_ocr_failure_and_cancel_are_visible():
+def test_capture_flow_ocr_failure_shows_in_the_overlay_and_cancel_closes_everything():
     class EmptyOcrApi:
         def ocr_inplace(self, png: bytes, *, target_lang: str, lang=None) -> dict:
-            return {"ok": True, "text": "", "ocr_text": "   ", "target_lang": "raw", "blocks": []}
+            raise ApiError(503, ErrorCode.ocr_failed.value, "没有识别到文字")
 
-    flow, status, posted, selectors, _overlays, copied, toasts = _make_capture_harness(EmptyOcrApi())
+    flow, status, posted, selectors, overlays, copied = _make_capture_harness(EmptyOcrApi())
     flow.trigger_ocr()
     selectors[0].on_cancelled()
-    status.drain()
-    assert posted[-1]["event"] == "idle" and flow.overlay_active() is False
+    assert flow.overlay_active() is False and overlays == []
 
     flow.trigger_ocr()
     selectors[-1].on_selected((0, 0, 50, 50))
+    assert overlays[0].mode == "ocr" and overlays[0].error == "没有识别到文字"
+    assert copied == []
+
+
+def test_capture_flows_send_no_busy_or_idle_and_only_overlay_less_failures_send_error():
+    """T17：翻译与 OCR 全流程（框选、取消、截屏、加载、成功、重试失败、关闭）不发 busy/idle；
+    只有没有浮窗可显示的失败（框选器打不开、浮窗打不开；截屏失败见下一条用例）才发 error。"""
+    replies = iter(["ok", "fail"] * 2)
+
+    class Api:
+        def get_config(self) -> dict:
+            return {"translate_target_lang": "zh"}
+
+        def ocr_inplace(self, png: bytes, *, target_lang: str, lang=None) -> dict:
+            if next(replies) == "fail":
+                raise ApiError(503, ErrorCode.translate_failed.value, "Ollama 未响应")
+            return _ocr_payload("Hello", target_lang)
+
+    flow, status, posted, selectors, overlays, _copied = _make_capture_harness(Api())
+    for trigger in (flow.trigger_translate, flow.trigger_ocr):
+        trigger()
+        selectors[-1].on_cancelled()
+        trigger()
+        selectors[-1].on_selected((0, 0, 100, 40))  # 截屏 → 加载 → 成功
+        overlays[-1].on_retry()  # 重试 → 失败（只在浮窗显示）
+        assert overlays[-1].error == "Ollama 未响应"
+        overlays[-1].close()
     status.drain()
-    assert copied == [] and toasts == []
-    assert posted[-1]["event"] == "error" and posted[-1]["error"] == ErrorCode.ocr_failed.value
+    assert posted == []
+
+    def broken(*_args, **_kwargs):
+        raise RuntimeError("no display")
+
+    working_selector = flow.open_selector
+    flow.open_selector = broken
+    flow.trigger_translate()
+    flow.open_selector = working_selector
+    flow.open_inplace_overlay = broken
+    flow.trigger_ocr()
+    selectors[-1].on_selected((0, 0, 100, 40))
+    status.drain()
+    assert [(p["event"], p["message"]) for p in posted] == [
+        ("error", "框选器无法打开：no display"),
+        ("error", "原位浮窗无法打开：no display"),
+    ]
 
 
 def test_capture_flow_direct_region_capture_and_repeat_storm_guard():
@@ -420,35 +336,30 @@ def test_capture_flow_direct_region_capture_and_repeat_storm_guard():
 
         def ocr_inplace(self, png: bytes, *, target_lang: str, lang=None) -> dict:
             self.seen_pngs.append(png)
-            return {"ok": True, "text": "直接选区OCR", "ocr_text": "直接选区OCR", "target_lang": target_lang, "blocks": []}
+            return _ocr_payload("直接选区OCR", target_lang)
 
     api = Api()
-    flow, status, posted, selectors, _overlays, copied, toasts = _make_capture_harness(api)
+    flow, status, posted, selectors, overlays, copied = _make_capture_harness(api)
 
-    # 连续触发 20 次（模拟长按快捷键连发）→ 仅开 1 个框选器、0 次抓屏、0 次 busy
+    # 连续触发 20 次（模拟长按快捷键连发）→ 仅开 1 个框选器、0 次抓屏
     for _ in range(20):
         flow.trigger_ocr()
-    status.drain()
     assert len(selectors) == 1
     assert flow._test_region_calls == []  # type: ignore[attr-defined]
-    assert posted == []
 
     # 透明框选器松手仅回传逻辑坐标 → 单路径触发 1 次 capture_region
     selectors[0].on_selected((120, 240, 360, 90))
     status.drain()
     assert flow._test_region_calls == [((120, 240, 360, 90), (0, 0, 1920, 1080))]  # type: ignore[attr-defined]
     assert api.seen_pngs == [b"region-png"]
-    assert copied == ["直接选区OCR"]
-    assert toasts == [("已复制 OCR 文本（7 字）", "ok")]
+    assert len(overlays) == 1 and overlays[0].full_ocr == "直接选区OCR"
 
 
 def test_capture_screen_failure_is_visible():
     def boom(_rect, _vrect):
         raise RuntimeError("Portal 拒绝授权")
 
-    flow, status, posted, selectors, overlays, _copied, _toasts = _make_capture_harness(
-        api=object(), capture_fn=boom
-    )
+    flow, status, posted, selectors, overlays, _copied = _make_capture_harness(api=object(), capture_fn=boom)
     flow.trigger_translate()
     assert len(selectors) == 1
     selectors[0].on_selected((10, 20, 200, 100))
@@ -486,7 +397,7 @@ def test_capture_flow_reentrant_close_no_deadlock_and_generation_isolation():
         def set_loading(self) -> None:
             pass
 
-        def set_result(self, blocks, full_translated_text="", full_ocr_text="") -> None:
+        def set_result(self, blocks, full_translated_text, full_ocr_text) -> None:
             pass
 
         def set_error(self, message: str) -> None:
@@ -508,8 +419,8 @@ def test_capture_flow_reentrant_close_no_deadlock_and_generation_isolation():
             flow.trigger_translate()
         return sel
 
-    def open_overlay(_png, _rect, *, loading, on_copy_text, on_retry, on_closed):
-        del loading, on_copy_text, on_retry
+    def open_overlay(_png, _rect, *, mode, virtual_rect, on_copy_text, on_retry, on_closed):
+        del mode, virtual_rect, on_copy_text, on_retry
         ov = ReentrantOverlay(on_closed)
         overlay_handles.append(ov)
         # 模拟浮窗打开途中被 Esc / close_overlay 取消，令当前代次过期
@@ -521,7 +432,6 @@ def test_capture_flow_reentrant_close_no_deadlock_and_generation_isolation():
         open_selector=open_selector,
         open_inplace_overlay=open_overlay,
         copy_clipboard=lambda _t: True,
-        notify_toast=lambda _m, _k: None,
         api=object(),
         status=status,
         invoke_ui=ui_queue.append,
@@ -555,12 +465,10 @@ def test_capture_flow_reentrant_close_no_deadlock_and_generation_isolation():
     ui_queue.pop(0)()
     assert len(overlay_handles) == 1 and overlay_handles[0].closed is True
     assert flow.overlay_active() is False
-    status.drain()
-    assert posted[-1]["event"] == "idle"
 
 
-def test_capture_flow_close_overlay_during_capturing_resets_idle():
-    """P1-4 回归：在 _capturing 延迟等待或抓屏阶段调用 close_overlay，状态必须回到 idle 不卡 busy。"""
+def test_capture_flow_close_overlay_during_capturing_drops_the_capture():
+    """P1-4 回归：在 _capturing 延迟等待或抓屏阶段调用 close_overlay，这次截屏作废、不弹浮窗。"""
     status, posted = _status()
     selectors: list[FakeSelector] = []
     overlays: list[FakeInplaceOverlay] = []
@@ -579,7 +487,6 @@ def test_capture_flow_close_overlay_during_capturing_resets_idle():
             overlays.append(FakeInplaceOverlay(*a, **kw)) or overlays[-1]
         ),
         copy_clipboard=lambda _t: True,
-        notify_toast=lambda _m, _k: None,
         api=object(),
         status=status,
         invoke_ui=lambda fn: fn(),
@@ -594,26 +501,22 @@ def test_capture_flow_close_overlay_during_capturing_resets_idle():
     status.drain()
     assert region_calls == []
     assert overlays == []
-    assert [p["event"] for p in posted] == ["busy", "idle"]
     assert flow._capturing is False
 
-    # 也在 capture_region 执行中取消，同样回到 idle 且不弹出浮窗
-    posted.clear()
+    # 也在 capture_region 执行中取消，同样不弹出浮窗
     flow._sleep = lambda _d: None
     flow.capture_region = lambda r, v: (flow.close_overlay(), b"late-png")[1]
     flow.trigger_translate()
     selectors[-1].on_selected((10, 20, 120, 80))
-    status.drain()
     assert overlays == []
-    assert [p["event"] for p in posted] == ["busy", "idle"]
 
 
 def test_ui_bridge_configure_qt_platform_env_and_open_live_selector(monkeypatch):
-    """P2-4：覆盖 configure_qt_platform_env 与 open_live_selector 的单屏/多屏与参数契约。"""
+    """P2-4：覆盖 configure_qt_platform_env、open_live_selector 与 open_translate_overlay 的单屏/多屏与参数契约。"""
     import os
     import sys
 
-    from _desktop.ui_bridge import configure_qt_platform_env, open_live_selector
+    from _desktop.ui_bridge import configure_qt_platform_env, open_live_selector, open_translate_overlay
 
     # 1. Linux + DISPLAY 且未显式指定 QT_QPA_PLATFORM → 自动设为 xcb
     monkeypatch.setattr(sys, "platform", "linux")
@@ -678,6 +581,20 @@ def test_ui_bridge_configure_qt_platform_env_and_open_live_selector(monkeypatch)
     multi_app = type("MultiApp", (), {"screens": lambda self: [object(), object()]})()
     open_live_selector(multi_app, DummySelector, (-1920, 0, 3840, 1080), "纯 OCR 识别", on_sel, on_cancel)
     assert calls == ["show", "raise_", "activateWindow"]
+
+    # 6. open_translate_overlay：全屏透明浮窗与框选器同一显示方式；模式、虚拟桌面几何与回调按契约 D 透传
+    class DummyOverlay(DummySelector):
+        def __init__(self, png, rect, **kw) -> None:
+            seen_kwargs.append({"png": png, "rect": rect, **kw})
+
+    callbacks = {"on_copy_text": lambda _t: True, "on_retry": lambda: None, "on_closed": lambda: None}
+    for app_, expected in ((single_app, "showFullScreen"), (multi_app, "show")):
+        calls.clear()
+        ov = open_translate_overlay(app_, DummyOverlay, b"png", (10, 20, 30, 40), mode="ocr",
+                                    virtual_rect=(0, 0, 1920, 1080), **callbacks)
+        assert isinstance(ov, DummyOverlay) and calls == [expected, "raise_", "activateWindow"]
+        assert seen_kwargs[-1] == {"png": b"png", "rect": (10, 20, 30, 40), "mode": "ocr",
+                                   "virtual_geometry": (0, 0, 1920, 1080), **callbacks}
 
 
 # ------------------------------------------------------------------ VoiceFlow

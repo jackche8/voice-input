@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING
 import httpx
 
 from _contracts import SetupCapability
+from _ocr import default_ocr_languages
 
 if TYPE_CHECKING:  # 运行时不导入：setup_actions 反向依赖本模块
     from _linux.conflicts import ConflictScan
@@ -200,7 +201,7 @@ def probe_capabilities(
         lang_error = None
     except Exception as exc:  # pytesseract/tesseract 缺失时原因直接展示
         langs, lang_error = set(), f"{type(exc).__name__}: {exc}"
-    for code, label in (("chi_sim", "OCR 简体中文"), ("eng", "OCR 英文")):
+    for code, label in default_ocr_languages():
         caps.append(
             SetupCapability(
                 id=f"ocr_{code}",

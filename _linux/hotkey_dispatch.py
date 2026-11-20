@@ -53,7 +53,10 @@ class HotkeyDispatcher:
             GLib.idle_add(self.ctx.actions.close_overlay)
 
     def source_failed(self, reason: str) -> bool:
-        print(f"  快捷键: [ERROR] {reason}", flush=True)
+        """事件源退出后再也收不到结束：正在录音就先复位并停止，再上报失败。"""
+        if self.state.voice_active:
+            self.state.reset("voice")
+            self.ctx.actions.voice_stop()
         self.on_error(reason)
         return False
 

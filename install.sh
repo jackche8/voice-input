@@ -97,12 +97,13 @@ echo -e "${YELLOW}[1/6] 检查系统依赖...${NC}"
 
 MISSING_PKGS=()
 
-# OCR 引擎与中英文语言包
+# OCR 引擎与简体、繁体、英文语言包（与 _ocr.DEFAULT_OCR_LANG 一致）
 if ! command -v tesseract &>/dev/null; then
-    MISSING_PKGS+=(tesseract-ocr tesseract-ocr-chi-sim tesseract-ocr-eng)
+    MISSING_PKGS+=(tesseract-ocr tesseract-ocr-chi-sim tesseract-ocr-chi-tra tesseract-ocr-eng)
 else
     TESS_LANGS="$(tesseract --list-langs 2>/dev/null || true)"
     echo "$TESS_LANGS" | grep -qx "chi_sim" || MISSING_PKGS+=(tesseract-ocr-chi-sim)
+    echo "$TESS_LANGS" | grep -qx "chi_tra" || MISSING_PKGS+=(tesseract-ocr-chi-tra)
     echo "$TESS_LANGS" | grep -qx "eng" || MISSING_PKGS+=(tesseract-ocr-eng)
 fi
 

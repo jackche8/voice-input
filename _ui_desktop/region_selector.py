@@ -48,7 +48,7 @@ class RedCrosshairSelector(QWidget):
         self._on_cancelled = on_cancelled
         self._finished: bool = False
 
-        vx, vy, vw, vh = self._resolve_virtual_geometry(virtual_geometry)
+        vx, vy, vw, vh = theme.resolve_virtual_geometry(virtual_geometry)
         self._origin_x: int = vx
         self._origin_y: int = vy
 
@@ -77,24 +77,6 @@ class RedCrosshairSelector(QWidget):
             mono=False,
             weight=QFont.Weight.DemiBold,
         )
-
-    def _resolve_virtual_geometry(
-        self, virtual_geometry: tuple[int, int, int, int] | None
-    ) -> tuple[int, int, int, int]:
-        if virtual_geometry is not None:
-            vx, vy, vw, vh = (int(v) for v in virtual_geometry)
-            if vw <= 0 or vh <= 0:
-                raise ValueError(f"virtual_geometry 宽高必须大于 0，收到 {virtual_geometry!r}")
-            return vx, vy, vw, vh
-
-        platform_name = (QGuiApplication.platformName() or "").lower()
-        if platform_name not in {"offscreen", "minimal"}:
-            screen = QGuiApplication.primaryScreen()
-            if screen is not None:
-                vg = screen.virtualGeometry()
-                if vg.width() > 0 and vg.height() > 0:
-                    return vg.x(), vg.y(), vg.width(), vg.height()
-        return 0, 0, 1920, 1080
 
     @staticmethod
     def _initial_cursor_pos(vx: int, vy: int, vw: int, vh: int) -> QPoint:

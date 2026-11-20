@@ -5,11 +5,15 @@ import io
 import wave
 
 from _contracts import (
+    ErrorCode,
+    LogicError,
     OcrTextBlock,
+    OcrTextLine,
     RecognizeSessionCreate,
     SessionFinalEvent,
     SttResponse,
 )
+from _ocr_text import join_block_texts
 
 
 def make_wav_bytes(
@@ -87,7 +91,7 @@ def fixture_ocr_layout(
     image_bytes: bytes, **_kwargs
 ) -> tuple[int, int, str, list[OcrTextBlock]]:
     if image_bytes == b"empty-image":
-        return 320, 180, "", []
+        raise LogicError(ErrorCode.ocr_failed, "没有识别到文字")  # 与 extract_ocr_layout 同一契约
     try:
         raw_text = image_bytes.decode("utf-8").strip()
     except UnicodeDecodeError:
@@ -96,6 +100,7 @@ def fixture_ocr_layout(
     blocks = [
         OcrTextBlock(
             bbox=(12, 16 + idx * 36, 200, 28),
+            lines=[OcrTextLine(bbox=(12, 16 + idx * 36, 200, 28), text=line)],
             ocr_text=line,
             translated_text="",
             bg_color="#111827" if idx % 2 else "#ffffff",
@@ -103,4 +108,4 @@ def fixture_ocr_layout(
         )
         for idx, line in enumerate(lines)
     ]
-    return 320, 180, "\n".join(lines), blocks
+    return 320, 180, join_block_texts([block.ocr_text for block in blocks]), blocks

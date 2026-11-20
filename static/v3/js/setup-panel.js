@@ -7,8 +7,8 @@
 
   var HOTKEY_ROWS = [
     { name: "hotkey_voice", label: "语音输入快捷键", title: "语音输入（按住说话）", sub: "" },
-    { name: "hotkey_screenshot", label: "截图翻译快捷键", title: "截图翻译", sub: "红十字准星框选区域，原位背景遮挡渲染译文" },
-    { name: "hotkey_ocr", label: "纯 OCR 识别快捷键", title: "纯 OCR 识别", sub: "红十字准星框选区域，提取文字并自动复制" },
+    { name: "hotkey_screenshot", label: "截图翻译快捷键", title: "截图翻译", sub: "红十字准星框选区域，译文半透明贴回原位" },
+    { name: "hotkey_ocr", label: "纯 OCR 识别快捷键", title: "纯 OCR 识别", sub: "红十字准星框选区域，识别文字原位显示，菜单复制" },
     { name: "hotkey_repeat", label: "重复上次输入快捷键", title: "重复上次输入", sub: "润色失败或焦点切走时，用它补发" }
   ];
 

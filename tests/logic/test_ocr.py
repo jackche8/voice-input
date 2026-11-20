@@ -13,15 +13,23 @@ from _contracts import ErrorCode, LogicError
 from _ocr import (
     DEFAULT_OCR_LANG,
     OCR_BORDER_PX,
-    clean_cjk_spaces,
+    OCR_UPSCALE_MAX_PIXELS,
     clear_language_cache,
+    default_ocr_languages,
     get_cached_languages,
     image_to_text,
+    prepare_ocr_image,
 )
+from _ocr_text import clean_cjk_spaces
 
 
-def test_default_ocr_lang_is_chi_sim_plus_eng():
-    assert DEFAULT_OCR_LANG == "chi_sim+eng"
+def test_default_languages_and_their_capability_labels_come_from_one_constant():
+    assert DEFAULT_OCR_LANG == "chi_sim+chi_tra+eng"
+    assert default_ocr_languages() == [
+        ("chi_sim", "OCR 简体中文"),
+        ("chi_tra", "OCR 繁体中文"),
+        ("eng", "OCR 英文"),
+    ]
 
 
 def test_empty_image_rejected():
@@ -62,9 +70,10 @@ def test_success_and_empty_result_with_mocks():
 
 
 def test_cjk_adjacent_spaces_removed_preserving_english_and_newlines():
-    raw = "你 好  世\t界\n使 用 Python 3 编 程\n第 二 段 文 字"
+    raw = "你 好  世\t界\n使 用 Python 3 编 程\n第 二 段 文 字\n权 重 ， 并 核 对 。\n權重 , 並 核 對 .\nHello , world ."
     cleaned = clean_cjk_spaces(raw)
-    assert cleaned == "你好世界\n使用 Python 3 编程\n第二段文字"
+    # 紧挨中日韩字的半角标点两侧空白也去掉；英文里的半角标点与空格原样
+    assert cleaned == "你好世界\n使用 Python 3 编程\n第二段文字\n权重，并核对。\n權重,並核對.\nHello , world ."
 
     out = image_to_text(
         _tiny_png(),
@@ -75,53 +84,41 @@ def test_cjk_adjacent_spaces_removed_preserving_english_and_newlines():
     assert out == "人工智能   AI 助手"
 
 
-def test_transparent_rgba_compositing_and_12px_border():
-    # 浅色前景字 + 透明底 → 自动合成深底 #111827 并加四周 12px 留白
-    light_fg = Image.new("RGBA", (60, 30), (0, 0, 0, 0))
-    draw1 = ImageDraw.Draw(light_fg)
-    draw1.rectangle([10, 8, 50, 22], fill=(248, 250, 252, 255))
-    buf1 = io.BytesIO()
-    light_fg.save(buf1, format="PNG")
+def test_preprocess_composites_transparency_then_grays_upscales_and_pads():
+    # 浅色前景字 + 透明底 → 合成深底 #111827；深色前景字 + 透明底 → 合成白底；再转灰度、放大 2×、四周留白
+    for fg, canvas in (((248, 250, 252, 255), (17, 24, 39)), ((15, 23, 42, 255), (255, 255, 255))):
+        src = Image.new("RGBA", (60, 30), (0, 0, 0, 0))
+        ImageDraw.Draw(src).rectangle([10, 8, 50, 22], fill=fg)
+        buf = io.BytesIO()
+        src.save(buf, format="PNG")
+        orig, ocr_img, scale = prepare_ocr_image(buf.getvalue())
+        canvas_l = Image.new("RGB", (1, 1), canvas).convert("L").getpixel((0, 0))
+        assert orig.mode == "RGB" and orig.size == (60, 30) and orig.getpixel((2, 2)) == canvas
+        assert scale == 2 and ocr_img.mode == "L"
+        assert ocr_img.size == (120 + 2 * OCR_BORDER_PX, 60 + 2 * OCR_BORDER_PX)
+        assert ocr_img.getpixel((0, 0)) == canvas_l  # 留白与合成底色一致
+        assert ocr_img.getpixel((OCR_BORDER_PX + 4, OCR_BORDER_PX + 4)) == canvas_l
+        # 原图 (30, 15) 的前景像素在 OCR 图里位于 (留白 + 2×30, 留白 + 2×15)
+        fg_l = Image.new("RGB", (1, 1), fg[:3]).convert("L").getpixel((0, 0))
+        assert ocr_img.getpixel((OCR_BORDER_PX + 60, OCR_BORDER_PX + 30)) == fg_l
 
-    seen_imgs: list[Image.Image] = []
+
+def test_selection_too_large_for_the_ocr_budget_is_not_upscaled():
+    side = int((OCR_UPSCALE_MAX_PIXELS / 4) ** 0.5) + 1  # 放大后像素刚好超过上限
+    buf = io.BytesIO()
+    Image.new("RGB", (side, side), "white").save(buf, format="PNG")
+    _orig, ocr_img, scale = prepare_ocr_image(buf.getvalue())
+    assert scale == 1 and ocr_img.size == (side + 2 * OCR_BORDER_PX, side + 2 * OCR_BORDER_PX)
+
+    seen: list[tuple[int, int]] = []
 
     def spy_runner(img: Image.Image, lang: str, timeout: int = 0) -> str:
         assert timeout == 15
-        seen_imgs.append(img.copy())
-        return "LIGHT"
+        seen.append(img.size)
+        return "OK"
 
-    assert (
-        image_to_text(
-            buf1.getvalue(),
-            lang="eng",
-            get_languages=lambda: ["eng"],
-            image_to_string=spy_runner,
-        )
-        == "LIGHT"
-    )
-    padded_dark = seen_imgs[0]
-    assert padded_dark.mode == "RGB"
-    assert padded_dark.size == (60 + 2 * OCR_BORDER_PX, 30 + 2 * OCR_BORDER_PX)
-    assert padded_dark.getpixel((0, 0)) == (17, 24, 39)  # #111827
-    assert padded_dark.getpixel((OCR_BORDER_PX + 2, OCR_BORDER_PX + 2)) == (17, 24, 39)
-
-    # 深色前景字 + 透明底 → 自动合成白底 #ffffff 并加四周 12px 留白
-    dark_fg = Image.new("RGBA", (60, 30), (0, 0, 0, 0))
-    draw2 = ImageDraw.Draw(dark_fg)
-    draw2.rectangle([10, 8, 50, 22], fill=(15, 23, 42, 255))
-    buf2 = io.BytesIO()
-    dark_fg.save(buf2, format="PNG")
-    seen_imgs.clear()
-    image_to_text(
-        buf2.getvalue(),
-        lang="eng",
-        get_languages=lambda: ["eng"],
-        image_to_string=spy_runner,
-    )
-    padded_light = seen_imgs[0]
-    assert padded_light.size == (84, 54)
-    assert padded_light.getpixel((0, 0)) == (255, 255, 255)
-    assert padded_light.getpixel((OCR_BORDER_PX + 2, OCR_BORDER_PX + 2)) == (255, 255, 255)
+    assert image_to_text(_tiny_png(), lang="eng", get_languages=lambda: ["eng"], image_to_string=spy_runner) == "OK"
+    assert seen == [(16 + 2 * OCR_BORDER_PX, 16 + 2 * OCR_BORDER_PX)]  # image_to_text 走同一预处理（8×8 → 2×）
 
 
 def test_tesseract_timeout_maps_to_error_code_timeout():

@@ -187,7 +187,7 @@ Write-Host "  翻译主页: https://127.0.0.1:17945/" -ForegroundColor Green
 Write-Host "  设置页面: https://127.0.0.1:17945/setup" -ForegroundColor Green
 Write-Host "  Ctrl+Alt+Z   按住说话，松开自动输入" -ForegroundColor Green
 Write-Host "  Ctrl+Alt+X   截屏原位翻译（红色十字框选）" -ForegroundColor Green
-Write-Host "  Ctrl+Alt+O   纯 OCR 识别自动复制" -ForegroundColor Green
+Write-Host "  Ctrl+Alt+O   纯 OCR 原位识别（菜单复制）" -ForegroundColor Green
 Write-Host "  Ctrl+Alt+R   重复输入上一次文本" -ForegroundColor Green
 Write-Host "  日志目录:   $LogDir" -ForegroundColor Green
 Write-Host "========================================" -ForegroundColor Green

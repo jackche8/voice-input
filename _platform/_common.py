@@ -16,6 +16,7 @@ from pathlib import Path
 
 from _capture import SAMPLE_RATE, PcmSink
 from _contracts import SetupCapability
+from _ocr import default_ocr_languages
 from _platform.protocol import FocusTarget, PasteResult
 
 DEFAULT_BEEP_SAMPLE_RATE = SAMPLE_RATE
@@ -177,7 +178,7 @@ def probe_ocr_capabilities(
     *,
     missing_prefix: str = "tesseract 缺少",
 ) -> list[SetupCapability]:
-    """公共 OCR 语言包能力自检（chi_sim / eng）。"""
+    """公共 OCR 语言包能力自检（默认识别语言逐项，见 `_ocr.default_ocr_languages`）。"""
     if ocr_languages is None:
         return []
     try:
@@ -186,7 +187,7 @@ def probe_ocr_capabilities(
     except Exception as exc:
         langs, err = set(), str(exc)
     caps: list[SetupCapability] = []
-    for code, label in (("chi_sim", "OCR 简体中文"), ("eng", "OCR 英文")):
+    for code, label in default_ocr_languages():
         caps.append(
             SetupCapability(
                 id=f"ocr_{code}",

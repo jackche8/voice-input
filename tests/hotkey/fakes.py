@@ -102,7 +102,8 @@ class FakeEvdevDevice:
         return list(self.active)
 
     def read(self):
-        events, self.queue = self.queue, []
+        # 与 python-evdev 2.0.0 一致：一次最多读 64 个（input.c:95），其余留在缓冲
+        events, self.queue = self.queue[:64], self.queue[64:]
         return iter(events)
 
     def close(self) -> None:
@@ -193,6 +194,11 @@ class FakePortal:
         bind_req = next(path for path in self.responses if path.startswith("/req/bind/"))
         sids = self.bind_calls[-1]
         self.responses.pop(bind_req)(0, {"shortcuts": [(sid, {"trigger": actual[sid.split("_", 1)[0]]}) for sid in sids]})
+
+    def change(self, actual: dict[str, str]) -> None:
+        """GNOME 设置里改键：发 ShortcutsChanged（动作 → 新触发器文字）。"""
+        sids = self.bind_calls[-1]
+        self.signals["ShortcutsChanged"]("/session/1", [(sid, {"trigger": actual[sid.split("_", 1)[0]]}) for sid in sids])
 
     def activate(self, action: str, t_ms: int) -> None:
         sid = next(sid for sid in self.bind_calls[-1] if sid.startswith(f"{action}_"))

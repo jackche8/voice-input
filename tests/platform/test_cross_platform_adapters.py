@@ -208,7 +208,7 @@ def test_linux_adapter_capture_focus_inject_and_hotkeys():
         ibus=IBusCommitter(None, available=False),
         janitor=ModifierJanitor(session_type="x11", kb=None, key=None, xdotool=""),
         hotkey_manager_cls=_FakeMgr,
-        ocr_languages=lambda: ["chi_sim", "eng"],
+        ocr_languages=lambda: ["chi_sim", "chi_tra", "eng"],
     )
     mismatch = adapter_inj.inject_text(
         "hello", target=FocusTarget(focus_id="999", app_id="other", is_terminal=False, is_self=False)
@@ -342,7 +342,7 @@ def test_windows_adapter_focus_terminals_sendinput_clipboard_hotkeys_and_autosta
             listeners.append(_FakeListener(on_press, on_release)) or listeners[-1]
         ),
         sleep=sleeps.append,
-        ocr_languages=lambda: ["chi_sim", "eng"],
+        ocr_languages=lambda: ["chi_sim", "chi_tra", "eng"],
         reg_api=_FakeWinReg,
     )
 
@@ -518,7 +518,7 @@ def test_macos_adapter_bundles_paste_hotkeys_plist_and_permissions(tmp_path: Pat
         ),
         sleep=sleeps.append,
         temp_dir=tmp_path / "mac_tmp",
-        ocr_languages=lambda: ["chi_sim", "eng"],
+        ocr_languages=lambda: ["chi_sim", "chi_tra", "eng"],
     )
 
     # 1. 区域抓屏（透传 virtual_rect，且不再存在废弃 capture_fullscreen）

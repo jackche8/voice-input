@@ -23,7 +23,7 @@ class FakeWorld:
         "org.freedesktop.portal.Screenshot": 2,
         "org.freedesktop.portal.GlobalShortcuts": 1,
     })
-    langs: list[str] = field(default_factory=lambda: ["eng", "chi_sim", "osd"])
+    langs: list[str] = field(default_factory=lambda: ["eng", "chi_sim", "chi_tra", "osd"])
     keyboards: list[str] | Exception = field(default_factory=lambda: ["/dev/input/event5"])
 
     def capabilities(self, session: str) -> list[SetupCapability]:

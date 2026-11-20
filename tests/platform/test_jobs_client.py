@@ -45,6 +45,7 @@ class _FakeTransport(httpx.BaseTransport):
                     "blocks": [
                         {
                             "bbox": [10, 10, 120, 30],
+                            "lines": [{"bbox": [10, 10, 120, 30], "text": "Hello World", "soft_wrap": False}],
                             "ocr_text": "Hello World",
                             "translated_text": "你好世界",
                             "bg_color": "#ffffff",

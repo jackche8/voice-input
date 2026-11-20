@@ -10,12 +10,17 @@ from _contracts import (
     ErrorCode,
     LogicError,
     OcrTextBlock,
+    OcrTextLine,
     PolishRequest,
     TranslateRequest,
 )
 from _ollama import DEFAULT_OLLAMA_BASE_URL, OllamaClient
 from _polish import polish_text
 from _translate import translate_blocks, translate_text
+
+
+def _one_line_block(bbox, text: str, **colors) -> OcrTextBlock:
+    return OcrTextBlock(bbox=bbox, lines=[OcrTextLine(bbox=bbox, text=text)], ocr_text=text, **colors)
 
 
 def _chat_ok(content: str) -> httpx.Response:
@@ -210,7 +215,7 @@ def test_polish_blocks_short_utterance_expansion_below_four_chars(short_raw: str
         rogue_client.close()
 
 
-def test_polish_and_translate_compatible_with_two_arg_test_double():
+def test_polish_and_translate_text_compatible_with_two_arg_test_double():
     class TwoArgDouble:
         def __init__(self, reply: str) -> None:
             self.reply = reply
@@ -230,14 +235,6 @@ def test_polish_and_translate_compatible_with_two_arg_test_double():
         TranslateRequest(text="hello world", target_lang="zh"), model="m", client=double_t
     )
     assert res_t.text == "你好世界"
-
-    double_b = TwoArgDouble('["设置", "退出"]')
-    blocks = [
-        OcrTextBlock(bbox=(0, 0, 10, 10), ocr_text="Settings"),
-        OcrTextBlock(bbox=(0, 20, 10, 10), ocr_text="Quit"),
-    ]
-    res_b = translate_blocks(blocks, target_lang="zh", client=double_b, model="m")
-    assert [b.translated_text for b in res_b] == ["设置", "退出"]
 
 
 def test_polish_success_and_empty_input():
@@ -286,53 +283,98 @@ def test_translate_success_sends_think_false_and_source_text_boundary():
     client.close()
 
 
-def test_translate_blocks_raw_passthrough_and_batch_json_validation():
-    src_blocks = [
-        OcrTextBlock(
-            bbox=(10, 12, 80, 20),
-            ocr_text="File",
-            bg_color="#1e293b",
-            fg_color="#f8fafc",
-        ),
-        OcrTextBlock(
-            bbox=(10, 40, 120, 20),
-            ocr_text="Open Folder",
-            bg_color="#1e293b",
-            fg_color="#f8fafc",
-        ),
+def _chat_reply(content: str, done_reason: str = "stop") -> httpx.Response:
+    return httpx.Response(
+        200, json={"message": {"role": "assistant", "content": content}, "done_reason": done_reason}
+    )
+
+
+def _batch_items(request: httpx.Request) -> list[str]:
+    content = json.loads(request.content.decode("utf-8"))["messages"][1]["content"]
+    return json.loads(content.split("<source_text>\n", 1)[1].rsplit("\n</source_text>", 1)[0])
+
+
+CODE_LINES = [
+    OcrTextLine(bbox=(10, 10, 88, 16), text="def main():"),
+    OcrTextLine(bbox=(42, 30, 88, 16), text="run()  # go"),
+]
+PARAGRAPH_LINES = [
+    OcrTextLine(bbox=(10, 60, 320, 16), text="The installer downloads the model weights and"),
+    OcrTextLine(bbox=(10, 80, 200, 16), text="verifies every checksum.", soft_wrap=True),
+    OcrTextLine(bbox=(10, 100, 120, 16), text="Then it starts."),
+]
+
+
+def test_translate_blocks_hard_segments_as_items():
+    def forbid_http(request: httpx.Request) -> httpx.Response:
+        raise AssertionError("没有块时不得调用 Ollama")
+
+    with OllamaClient(transport=httpx.MockTransport(forbid_http)) as no_call_client:
+        assert translate_blocks([], target_lang="zh", client=no_call_client) == []
+
+    # 翻译项 = 硬行段：段落的软换行拼成一项，代码逐行一项；块译文按原缩进逐行拼回
+    requests: list[tuple[dict, list[str]]] = []
+
+    def reply(request: httpx.Request) -> httpx.Response:
+        requests.append((json.loads(request.content.decode("utf-8")), _batch_items(request)))
+        return _chat_reply(json.dumps(["def main():", "run()  # 开始", "安装程序下载模型权重并核对每个校验值。", "然后启动。"]))
+
+    blocks = [
+        OcrTextBlock(bbox=(10, 10, 96, 36), lines=CODE_LINES, ocr_text="def main():\n    run()  # go"),
+        OcrTextBlock(bbox=(10, 60, 320, 56), lines=PARAGRAPH_LINES, ocr_text="…"),
+    ]
+    with OllamaClient(transport=httpx.MockTransport(reply)) as client:
+        done = translate_blocks(blocks, target_lang="zh", client=client)
+    assert len(requests) == 1
+    body, items = requests[0]
+    assert items == [
+        "def main():",
+        "run()  # go",
+        "The installer downloads the model weights and verifies every checksum.",
+        "Then it starts.",
+    ]
+    schema = {"type": "array", "items": {"type": "string"}, "minItems": 4, "maxItems": 4}
+    assert body["format"] == schema  # 结构化输出：条数恰为本批项数
+    assert [b.translated_text for b in done] == [
+        "def main():\n    run()  # 开始",
+        "安装程序下载模型权重并核对每个校验值。\n然后启动。",
     ]
 
-    # raw 直通：不发起任何 HTTP 调用
-    def forbid_http(request: httpx.Request) -> httpx.Response:
-        raise AssertionError("raw target_lang must not call Ollama")
 
-    no_call_client = OllamaClient(transport=httpx.MockTransport(forbid_http))
-    raw_res = translate_blocks(src_blocks, target_lang="raw", client=no_call_client)
-    assert [b.translated_text for b in raw_res] == ["File", "Open Folder"]
-    assert raw_res[0].bg_color == "#1e293b" and raw_res[0].fg_color == "#f8fafc"
-    assert translate_blocks([], target_lang="zh", client=no_call_client) == []
-    no_call_client.close()
+def test_translate_blocks_split_into_token_budget_batches_in_order():
+    words = "alpha beta gamma delta epsilon zeta eta theta iota kappa".split()
+    lines = [OcrTextLine(bbox=(10, 10 + 20 * i, 300, 16), text=" ".join(words) + f" {i}") for i in range(60)]
+    block = OcrTextBlock(bbox=(10, 10, 300, 1200), lines=lines, ocr_text="…")
+    seen: list[list[str]] = []
 
-    # 多块单次 JSON 数组批量请求（兼容 markdown fence 包裹）
-    batch_requests: list[dict] = []
+    def reply(request: httpx.Request) -> httpx.Response:
+        items = _batch_items(request)
+        seen.append(items)
+        assert json.loads(request.content)["format"]["minItems"] == len(items)
+        return _chat_reply(json.dumps([f"译{item.rsplit(' ', 1)[1]}" for item in items]))
 
-    def batch_ok(request: httpx.Request) -> httpx.Response:
-        batch_requests.append(json.loads(request.content.decode("utf-8")))
-        return _chat_ok('```json\n["文件", "打开文件夹"]\n```')
+    with OllamaClient(transport=httpx.MockTransport(reply)) as client:
+        done = translate_blocks([block], target_lang="zh", client=client)
+    assert len(seen) >= 2  # 60 项约 1000 token，超出单批预算
+    assert [item for batch in seen for item in batch] == [line.text for line in lines]  # 顺序不乱、不丢不重
+    assert done[0].translated_text.split("\n") == [f"译{i}" for i in range(60)]
 
-    ok_client = OllamaClient(transport=httpx.MockTransport(batch_ok))
-    done_blocks = translate_blocks(src_blocks, target_lang="zh", client=ok_client)
-    assert len(batch_requests) == 1
-    assert [b.translated_text for b in done_blocks] == ["文件", "打开文件夹"]
-    assert [b.ocr_text for b in done_blocks] == ["File", "Open Folder"]
-    ok_client.close()
 
-    # 异常响应（非 JSON / 数量不符 / 元素为空 / 元素非字符串）必须显式抛 translate_failed
-    for bad_reply in ('not json', '["只有一项"]', '["文件", "   "]', '["文件", 123]', '{"a": 1}'):
-        bad_client = OllamaClient(
-            transport=httpx.MockTransport(lambda _r, text=bad_reply: _chat_ok(text))
-        )
+@pytest.mark.parametrize(
+    "content, done_reason, needle",
+    [
+        ("not json", "stop", "不是合法 JSON"),
+        ('["只有一项"]', "stop", "数量不匹配"),
+        ('["文件", "   "]', "stop", "译文为空"),
+        ('["文件", 123]', "stop", "不是字符串"),
+        ('["文件", "打开\\n文件夹"]', "stop", "含换行"),
+        ('["文件", "打开', "length", "本批输出被截断"),
+    ],
+)
+def test_translate_blocks_batch_failures_are_explicit(content: str, done_reason: str, needle: str):
+    src_blocks = [_one_line_block((10, 12, 80, 20), "File"), _one_line_block((10, 40, 120, 20), "Open Folder")]
+    with OllamaClient(transport=httpx.MockTransport(lambda _r: _chat_reply(content, done_reason))) as client:
         with pytest.raises(LogicError) as err:
-            translate_blocks(src_blocks, target_lang="zh", client=bad_client)
-        assert err.value.code == ErrorCode.translate_failed
-        bad_client.close()
+            translate_blocks(src_blocks, target_lang="zh", client=client)
+    assert err.value.code == ErrorCode.translate_failed
+    assert needle in err.value.message

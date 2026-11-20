@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import inspect
 import io
-import re
 import subprocess
 import threading
 from collections.abc import Callable
@@ -13,18 +12,32 @@ import numpy as np
 from PIL import Image, ImageOps
 
 from _contracts import ErrorCode, LogicError
+from _ocr_text import clean_cjk_spaces
 
-DEFAULT_OCR_LANG = "chi_sim+eng"
+DEFAULT_OCR_LANG = "chi_sim+chi_tra+eng"
 DEFAULT_OCR_LANGS = DEFAULT_OCR_LANG
+# 默认识别语言的能力项标签：设置页与各平台能力自检都经 default_ocr_languages() 从 DEFAULT_OCR_LANG 派生
+OCR_LANG_LABELS = {"chi_sim": "OCR 简体中文", "chi_tra": "OCR 繁体中文", "eng": "OCR 英文"}
 OCR_BORDER_PX = 12
 OCR_TIMEOUT_S = 15
+OCR_UPSCALE = 2
+# 放大后像素上限（8.6-C 方法：预算 B = 0.8 × OCR_TIMEOUT_S = 12s，取 2× 耗时 ≤ B 的样本里最大的放大后像素数，
+# 且小于 2× 耗时 > B 的样本里最小的放大后像素数）。O1 实测（默认语言 chi_sim+chi_tra+eng，image_to_data 三次取最快，
+# 样本见 tests/logic/ocr_samples.py）：1280×860 深底小字 2× 4.37s、1920×1080 正文 2× 2.55s、1920×1080 繁体 2× 5.12s、
+# 3440×1440 密集正文 2× 10.66s（另测五次 10.08–10.26s；加 chi_tra 前一次 chi_sim+eng 测得 11.95s，随负载波动），全部 ≤ B，
+# 没有超预算的样本 → 上限取 3440×1440 的放大后像素数
+OCR_UPSCALE_MAX_PIXELS = 3440 * 1440 * 4
 
 _LIGHT_CANVAS_RGB = (255, 255, 255)  # #ffffff
 _DARK_CANVAS_RGB = (17, 24, 39)      # #111827
-_CJK_SPACE_RE = re.compile(r"(?<=[\u4e00-\u9fff])\s+(?=[\u4e00-\u9fff])")
 
 _lang_cache_lock = threading.Lock()
 _cached_languages: tuple[str, ...] | None = None
+
+
+def default_ocr_languages() -> list[tuple[str, str]]:
+    """默认识别语言逐项（语言包代码, 能力项标签），顺序同 DEFAULT_OCR_LANG。"""
+    return [(code, OCR_LANG_LABELS[code]) for code in DEFAULT_OCR_LANG.split("+")]
 
 
 def clear_language_cache() -> None:
@@ -52,14 +65,6 @@ def get_cached_languages() -> list[str]:
             ) from exc
         _cached_languages = langs
         return list(langs)
-
-
-def clean_cjk_spaces(text: str) -> str:
-    """消除相邻汉字间的多余空白，同时保留英文词间空格与多行换行结构。"""
-    if not text:
-        return ""
-    lines = [_CJK_SPACE_RE.sub("", line).strip() for line in text.splitlines()]
-    return "\n".join(lines).strip()
 
 
 def _missing_language(message: str) -> bool:
@@ -136,11 +141,13 @@ def prepare_ocr_image(
     image_bytes: bytes,
     *,
     border_px: int = OCR_BORDER_PX,
-) -> tuple[Image.Image, Image.Image]:
-    """返回 (合成后不透明原尺寸 RGB 图, 四周加 border_px 留白的 OCR 输入图)。
+) -> tuple[Image.Image, Image.Image, int]:
+    """返回 (合成后不透明原尺寸 RGB 图（供采色）, 灰度 + 放大 + 四周 border_px 留白的 OCR 输入图, 实际倍数)。
 
     透明图（RGBA / LA / P）按前景像素明度自动合成到白底 #ffffff 或深底 #111827，
-    避免浅色前景字在白底消失或深色字在黑底消失。
+    避免浅色前景字在白底消失或深色字在黑底消失。屏幕小字与深底浅字放大后识别明显更好；
+    放大后像素超过 OCR_UPSCALE_MAX_PIXELS 的大选区用 1×（否则超出识别超时预算）。
+    OCR 坐标还原：x_原图 = (x_ocr - border_px) / 倍数。
     """
     try:
         raw_img = Image.open(io.BytesIO(image_bytes))
@@ -172,12 +179,14 @@ def prepare_ocr_image(
         orig_rgb = raw_img.convert("RGB")
         border_fill = _edge_border_fill(orig_rgb)
 
-    padded_rgb = (
-        ImageOps.expand(orig_rgb, border=border_px, fill=border_fill)
-        if border_px > 0
-        else orig_rgb
-    )
-    return orig_rgb, padded_rgb
+    width, height = orig_rgb.size
+    scale = OCR_UPSCALE if (width * OCR_UPSCALE) * (height * OCR_UPSCALE) <= OCR_UPSCALE_MAX_PIXELS else 1
+    gray = orig_rgb.convert("L")
+    if scale > 1:
+        gray = gray.resize((width * scale, height * scale), Image.Resampling.BICUBIC)
+    gray_fill = Image.new("RGB", (1, 1), border_fill).convert("L").getpixel((0, 0))
+    ocr_img = ImageOps.expand(gray, border=border_px, fill=gray_fill) if border_px > 0 else gray
+    return orig_rgb, ocr_img, scale
 
 
 def invoke_ocr_runner(
@@ -208,7 +217,7 @@ def image_to_text(
     image_to_string: Callable[..., str] | None = None,
     get_languages: Callable[[], list[str]] | None = None,
 ) -> str:
-    """从图片字节识别文本。默认 chi_sim+eng，缺语言包显式失败。"""
+    """从图片字节识别文本。默认 DEFAULT_OCR_LANG，缺语言包显式失败。"""
     if not image_bytes:
         raise LogicError(ErrorCode.invalid_request, "OCR 图像不能为空")
 
@@ -225,9 +234,9 @@ def image_to_text(
         runner = _default_runner
 
     ensure_ocr_languages(lang, get_languages)
-    _orig_rgb, padded_rgb = prepare_ocr_image(image_bytes, border_px=OCR_BORDER_PX)
+    _orig_rgb, ocr_img, _scale = prepare_ocr_image(image_bytes, border_px=OCR_BORDER_PX)
     try:
-        text = invoke_ocr_runner(runner, padded_rgb, lang=lang, timeout_s=OCR_TIMEOUT_S)
+        text = invoke_ocr_runner(runner, ocr_img, lang=lang, timeout_s=OCR_TIMEOUT_S)
     except Exception as exc:
         raise_ocr_error(exc)
 
@@ -241,9 +250,12 @@ __all__ = [
     "DEFAULT_OCR_LANG",
     "DEFAULT_OCR_LANGS",
     "OCR_BORDER_PX",
+    "OCR_LANG_LABELS",
     "OCR_TIMEOUT_S",
-    "clean_cjk_spaces",
+    "OCR_UPSCALE",
+    "OCR_UPSCALE_MAX_PIXELS",
     "clear_language_cache",
+    "default_ocr_languages",
     "ensure_ocr_languages",
     "get_cached_languages",
     "image_to_text",

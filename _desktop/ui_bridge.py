@@ -47,29 +47,32 @@ def open_live_selector(
         on_selected=on_selected,
         on_cancelled=on_cancelled,
     )
-    if len(app.screens()) <= 1:
-        sel.showFullScreen()
-    else:
-        sel.show()
-    sel.raise_()
-    sel.activateWindow()
-    return sel
+    return _show_over_desktop(app, sel)
 
 
-def open_translate_overlay(overlay_cls, png, rect, *, loading, on_copy_text, on_retry, on_closed):
-    """打开原位背景遮挡翻译浮窗并置顶激活。"""
+def open_translate_overlay(app, overlay_cls, png, rect, *, mode, virtual_rect, on_copy_text, on_retry, on_closed):
+    """打开原位浮窗（全屏透明窗，与框选器同一显示方式，点框外由本窗消费并关闭）。"""
     ov = overlay_cls(
         png,
         rect,
-        loading=loading,
+        mode=mode,
+        virtual_geometry=virtual_rect,
         on_copy_text=on_copy_text,
         on_retry=on_retry,
         on_closed=on_closed,
     )
-    ov.show()
-    ov.raise_()
-    ov.activateWindow()
-    return ov
+    return _show_over_desktop(app, ov)
+
+
+def _show_over_desktop(app, widget):
+    """单屏 showFullScreen（不被顶栏/Dock 压扁），多屏按虚拟桌面几何 show；置顶并激活。"""
+    if len(app.screens()) <= 1:
+        widget.showFullScreen()
+    else:
+        widget.show()
+    widget.raise_()
+    widget.activateWindow()
+    return widget
 
 
 class QtUiBridge(QObject):

@@ -4,9 +4,13 @@ import math
 import struct
 from pathlib import Path
 
+import pytest
+
+from _ocr_layout import extract_ocr_layout
 from _v3_app import build_sandbox_runtime, create_app
 from tests.api.conftest import TEST_TOKEN, lan_client, lan_headers, local_client, local_headers
 from tests.api.providers import fixture_ocr_layout, fixture_transcribe, make_text_wav, make_wav_bytes
+from tests.logic.ocr_samples import all_samples, bbox_close, fonts_missing, text_similar
 
 
 def _sine_pcm16(sample_rate: int, *, duration_s: float = 0.05, channels: int = 1) -> bytes:
@@ -153,9 +157,10 @@ def test_ocr_inplace_translated_and_raw_modes(app, tmp_path: Path):
     assert body["ok"] is True
     assert body["target_lang"] == "en"
     assert body["image_width"] == 320 and body["image_height"] == 180
-    assert body["ocr_text"] == "第一行\n第二行"
-    assert body["text"] == "[en]第一行\n[en]第二行"
+    assert body["ocr_text"] == "第一行\n\n第二行"  # 全文块间空一行
+    assert body["text"] == "[en]第一行\n\n[en]第二行"
     assert len(body["blocks"]) == 2
+    assert body["blocks"][0]["lines"] == [{"bbox": [12, 16, 200, 28], "text": "第一行", "soft_wrap": False}]
     assert body["blocks"][0]["translated_text"] == "[en]第一行"
     assert body["blocks"][1]["translated_text"] == "[en]第二行"
     assert body["blocks"][0]["bg_color"] == "#ffffff"
@@ -184,9 +189,38 @@ def test_ocr_inplace_translated_and_raw_modes(app, tmp_path: Path):
     assert raw.status_code == 200, raw.text
     raw_body = raw.json()
     assert raw_body["target_lang"] == "raw"
-    assert raw_body["text"] == "原文A\n原文B"
+    assert raw_body["text"] == raw_body["ocr_text"] == "原文A\n\n原文B"
     assert [b["translated_text"] for b in raw_body["blocks"]] == ["原文A", "原文B"]
     assert translate_calls == []
+
+
+def test_ocr_inplace_real_layout_returns_truth_lines_and_blank_line_full_text(tmp_path: Path):
+    """T14 真实链路：生成器样本 → 真实 extract_ocr_layout 的 sandbox app → POST /api/v1/ocr-inplace（raw）。"""
+    pytesseract = pytest.importorskip("pytesseract")
+    try:
+        if "eng" not in pytesseract.get_languages(config=""):
+            pytest.skip("本机未安装 tesseract eng 语言包")
+    except Exception as exc:
+        pytest.skip(f"无法查询 tesseract 语言包: {exc}")
+    if fonts_missing():
+        pytest.skip(fonts_missing())
+    sample = all_samples()["light_paragraph"]
+    rt = build_sandbox_runtime(root=tmp_path / "real-ocr", token=TEST_TOKEN, ocr_layout=extract_ocr_layout)
+    res = local_client(create_app(rt)).post(
+        "/api/v1/ocr-inplace",
+        data={"target_lang": "raw", "lang": "eng"},  # 显式 lang：链路不依赖默认语言包是否齐全
+        files={"image": ("s.png", sample.png, "image/png")},
+        headers=local_headers(),
+    )
+    assert res.status_code == 200, res.text
+    body = res.json()
+    lines = [(index, line) for index, block in enumerate(body["blocks"]) for line in block["lines"]]
+    assert len(lines) == len(sample.lines)
+    for (index, line), truth in zip(lines, sample.lines):
+        assert index == truth.block and line["soft_wrap"] == truth.soft_wrap, (truth.text, line)
+        assert bbox_close(tuple(line["bbox"]), truth.bbox) and text_similar(line["text"], truth.text), (truth, line)
+    assert body["ocr_text"] == body["text"] == "\n\n".join(block["ocr_text"] for block in body["blocks"])
+    assert all("\n\n" not in block["ocr_text"] for block in body["blocks"])
 
 
 def test_ocr_inplace_empty_and_missing_capability(app, tmp_path: Path):

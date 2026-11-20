@@ -17,6 +17,7 @@ from _contracts import (
     TranslateRequest,
     TranslateResponse,
 )
+from _ocr_text import join_block_texts
 from _v3.limits import AUDIO_UPLOAD_NOTE, IMAGE_UPLOAD_NOTE, read_single_form_file
 from _v3.runtime import Runtime, decode_uploaded_audio
 
@@ -119,65 +120,26 @@ def build_capability_router(runtime: Runtime) -> APIRouter:
         ocr_kwargs: dict[str, Any] = {}
         if lang:
             ocr_kwargs["lang"] = lang
+        # ocr_layout 的契约：识别不到文字即抛 ocr_failed，否则块非空、全文由块派生（块间空一行）
         width, height, ocr_text, blocks = await asyncio.to_thread(
             runtime.ocr_layout,
             payload,
             **ocr_kwargs,
         )
-        clean_ocr = (ocr_text or "").strip()
-        if not clean_ocr and not blocks:
-            raise LogicError(ErrorCode.ocr_failed, "OCR 未识别到文字")
-        if not clean_ocr and blocks:
-            clean_ocr = "\n".join(b.ocr_text for b in blocks if b.ocr_text.strip()).strip()
-            if not clean_ocr:
-                raise LogicError(ErrorCode.ocr_failed, "OCR 未识别到文字")
         if norm_target.lower() == "raw":
-            raw_blocks = [
-                block.model_copy(update={"translated_text": block.ocr_text})
-                for block in blocks
-            ]
-            return OcrInplaceResponse(
-                text=clean_ocr,
-                ocr_text=clean_ocr,
-                target_lang="raw",
-                image_width=width,
-                image_height=height,
-                blocks=raw_blocks,
-            )
-        if blocks:
+            norm_target = "raw"
+            blocks = [block.model_copy(update={"translated_text": block.ocr_text}) for block in blocks]
+        else:
             if runtime.translate_blocks is None:
                 raise LogicError(ErrorCode.translate_failed, "分块翻译能力不可用")
-            translated_blocks = await asyncio.to_thread(
-                runtime.translate_blocks,
-                blocks,
-                target_lang=norm_target,
-            )
-            full_text = "\n".join(
-                block.translated_text for block in translated_blocks if block.translated_text.strip()
-            ).strip()
-            if not full_text:
-                raise LogicError(ErrorCode.translate_failed, "译文为空，不得把原文当作译文")
-            return OcrInplaceResponse(
-                text=full_text,
-                ocr_text=clean_ocr,
-                target_lang=norm_target,
-                image_width=width,
-                image_height=height,
-                blocks=translated_blocks,
-            )
-        if runtime.translate is None:
-            raise LogicError(ErrorCode.translate_failed, "翻译能力不可用")
-        translated = await asyncio.to_thread(
-            runtime.translate,
-            TranslateRequest(text=clean_ocr, target_lang=norm_target),
-        )
+            blocks = await asyncio.to_thread(runtime.translate_blocks, blocks, target_lang=norm_target)
         return OcrInplaceResponse(
-            text=translated.text,
-            ocr_text=clean_ocr,
+            text=join_block_texts([block.translated_text for block in blocks]),
+            ocr_text=ocr_text,
             target_lang=norm_target,
             image_width=width,
             image_height=height,
-            blocks=[],
+            blocks=blocks,
         )
 
     return router

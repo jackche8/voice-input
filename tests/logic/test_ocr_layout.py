@@ -1,4 +1,4 @@
-"""_ocr_layout 排版提取、12px 坐标还原、分列合段与 2~5px 环形背景色采样单测。"""
+"""_ocr_layout 排版提取：留白与放大倍数的坐标还原、分列成行、块带行列表，及 2~5px 环形背景色采样单测。"""
 from __future__ import annotations
 
 import io
@@ -18,7 +18,7 @@ def _png_bytes(img: Image.Image) -> bytes:
     return buf.getvalue()
 
 
-def test_coordinate_restoration_column_split_paragraph_merge_and_noise_filter():
+def test_coordinates_undo_padding_and_upscale_and_blocks_carry_lines():
     # 原图 320x200：上半区深底 #1e293b，下半区浅底 #f1f5f9
     img = Image.new("RGB", (320, 200), (241, 245, 249))
     draw = ImageDraw.Draw(img)
@@ -26,44 +26,31 @@ def test_coordinate_restoration_column_split_paragraph_merge_and_noise_filter():
     # 在第一个文字框内部及 1px 紧贴边缘故意画白色像素，验证 2~5px 环形采样不受字形边缘污染
     draw.rectangle([19, 19, 101, 65], fill=(255, 255, 255))
 
-    pad = OCR_BORDER_PX  # 12px
+    pad, scale = OCR_BORDER_PX, 2
 
-    def fake_data_runner(padded_img: Image.Image, lang: str, timeout: int = 0) -> dict:
+    def at(v: int) -> int:  # 原图坐标 → OCR 输入图坐标（放大后再加留白）
+        return pad + scale * v
+
+    def fake_data_runner(ocr_img: Image.Image, lang: str, timeout: int = 0) -> dict:
         assert timeout == 15
-        assert padded_img.size == (320 + 2 * pad, 200 + 2 * pad)
+        assert ocr_img.mode == "L" and ocr_img.size == (320 * scale + 2 * pad, 200 * scale + 2 * pad)
         # 模拟：
-        # 1) 段落 1 第 1、2 行相邻中文（应合并为同一块，且去汉字间空格）
-        # 2) 同一行右侧大间距（x=220）独立列按钮文字（应分列拆开）
+        # 1) 第 1、2 行相邻中文（同一块、逐行保留，去汉字间空格）
+        # 2) 同一行右侧大间距（x=220）独立列 "Settings"（分列拆开、自成一块）
         # 3) 低置信度噪点（conf=8 与单符号噪点 '|' conf=30，应被过滤）
-        # 4) 下半区浅底段落 2 的两行英文（应合并为带空格的英文块）
+        # 4) 下半区浅底两行英文（同一块、逐行保留）
+        xs, ys = [20, 42, 220, 20, 150, 5, 24, 24], [20, 20, 20, 44, 44, 70, 120, 142]
+        ws, hs = [18, 18, 70, 80, 20, 4, 50, 52], [18, 18, 18, 20, 18, 18, 18, 18]
         return {
-            "level": [5, 5, 5, 5, 5, 5, 5, 5],
+            "level": [5] * 8,
             "page_num": [1] * 8,
             "block_num": [1, 1, 1, 1, 1, 1, 2, 2],
-            "par_num": [1, 1, 1, 1, 1, 1, 1, 1],
+            "par_num": [1] * 8,
             "line_num": [1, 1, 1, 2, 2, 3, 1, 2],
-            "left": [
-                20 + pad,   # "你"
-                42 + pad,   # "好"
-                220 + pad,  # 同行右侧大间距列 "Settings"
-                20 + pad,   # 第 2 行 "世界"
-                150 + pad,  # 低置信度噪点
-                5 + pad,    # 单符号低置信度边框噪点
-                24 + pad,   # 段落 2 行 1 "Hello"
-                24 + pad,   # 段落 2 行 2 "world"
-            ],
-            "top": [
-                20 + pad,
-                20 + pad,
-                20 + pad,
-                44 + pad,
-                44 + pad,
-                70 + pad,
-                120 + pad,
-                142 + pad,
-            ],
-            "width": [18, 18, 70, 80, 20, 4, 50, 52],
-            "height": [18, 18, 18, 20, 18, 18, 18, 18],
+            "left": [at(x) for x in xs],
+            "top": [at(y) for y in ys],
+            "width": [scale * w for w in ws],
+            "height": [scale * h for h in hs],
             "conf": [92, 90, 88, 95, 8, 30, 91, 89],
             "text": ["你", "好", "Settings", "世 界", "noise", "|", "Hello", "world"],
         }
@@ -75,32 +62,48 @@ def test_coordinate_restoration_column_split_paragraph_merge_and_noise_filter():
         languages_fn=lambda: ["chi_sim", "eng"],
     )
     assert (w, h) == (320, 200)
-    assert len(blocks) == 3
+    assert [[(line.bbox, line.text, line.soft_wrap) for line in b.lines] for b in blocks] == [
+        [((20, 20, 40, 18), "你好", False), ((20, 44, 80, 20), "世界", False)],
+        [((220, 20, 70, 18), "Settings", False)],
+        [((24, 120, 50, 18), "Hello", False), ((24, 142, 52, 18), "world", False)],
+    ]
+    assert [(b.bbox, b.ocr_text, b.bg_color, b.fg_color) for b in blocks] == [
+        ((20, 20, 80, 44), "你好\n世界", "#1e293b", "#f8fafc"),  # 深底采样 + 浅色前景
+        ((220, 20, 70, 18), "Settings", "#1e293b", "#f8fafc"),
+        ((24, 120, 52, 40), "Hello\nworld", "#f1f5f9", "#0f172a"),  # 浅底采样 + 深色前景
+    ]
+    assert full_text == "你好\n世界\n\nSettings\n\nHello\nworld"  # 块间空一行，噪点已滤掉
 
-    # 块 0：合并后的两行中文，坐标已扣减 12px 留白，深底采样 #1e293b + 浅色前景 #f8fafc
-    b0 = blocks[0]
-    assert b0.ocr_text == "你好世界"
-    assert b0.bbox == (20, 20, 80, 44)
-    assert b0.bg_color == "#1e293b"
-    assert b0.fg_color == "#f8fafc"
 
-    # 块 1：同行大间距拆出的右侧独立列
-    b1 = blocks[1]
-    assert b1.ocr_text == "Settings"
-    assert b1.bbox == (220, 20, 70, 18)
-    assert b1.bg_color == "#1e293b"
-    assert b1.fg_color == "#f8fafc"
+def test_line_box_ignores_abnormally_tall_word_boxes_only_in_lines_with_cjk():
+    """含中日韩字的行：Tesseract 给出的约 1.5 倍高异常词框（含被认成半角的逗号）不撑高行框；纯拉丁文行不过滤。"""
+    pad, scale = OCR_BORDER_PX, 2
+    # (x, y, w, h, 词, 行号)：中文行正常字高 16，逗号与「並」是 25 高的异常框；拉丁文行词高 18 与 10 并存
+    words = [
+        (20, 20, 32, 16, "權重", 1), (54, 17, 4, 25, ",", 1), (60, 17, 16, 25, "並", 1), (78, 20, 32, 16, "核對", 1),
+        (20, 70, 80, 18, "config.json", 2), (104, 76, 8, 10, "a", 2), (116, 76, 14, 10, "in", 2),
+    ]
 
-    # 块 2：下半区浅底两行英文合并，保留英文词间空格，浅底 #f1f5f9 + 深色前景 #0f172a
-    b2 = blocks[2]
-    assert b2.ocr_text == "Hello world"
-    assert b2.bbox == (24, 120, 52, 40)
-    assert b2.bg_color == "#f1f5f9"
-    assert b2.fg_color == "#0f172a"
+    def fake_data_runner(_img: Image.Image, lang: str, timeout: int = 0) -> dict:
+        return {
+            "level": [5] * len(words),
+            "line_num": [w[5] for w in words],
+            "left": [pad + scale * w[0] for w in words],
+            "top": [pad + scale * w[1] for w in words],
+            "width": [scale * w[2] for w in words],
+            "height": [scale * w[3] for w in words],
+            "conf": [90] * len(words),
+            "text": [w[4] for w in words],
+        }
 
-    assert "noise" not in full_text
-    assert "|" not in full_text
-    assert full_text == "你好世界\nSettings\nHello world"
+    _w, _h, _text, blocks = extract_ocr_layout(
+        _png_bytes(Image.new("RGB", (400, 120), "white")),
+        lang="chi_tra+eng",
+        runner_data=fake_data_runner,
+        languages_fn=lambda: ["chi_tra", "eng"],
+    )
+    lines = [(line.text, line.bbox) for block in blocks for line in block.lines]
+    assert lines == [("權重,並核對", (20, 20, 90, 16)), ("config.json a in", (20, 70, 110, 18))]
 
 
 def test_ring_color_sampling_luma_boundary_and_tight_crop_fallback():

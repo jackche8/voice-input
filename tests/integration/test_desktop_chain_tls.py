@@ -175,12 +175,10 @@ def test_repeat_resends_to_current_focus(chain):
 def test_platform_status_reaches_product_stream(chain):
     comp, api, bus = chain
     status = PlatformStatus(api.post_platform_event)
-    status.busy()
     from _contracts import ErrorCode
 
     status.error(ErrorCode.dependency_failed, "麦克风打开失败：fake")
     status.drain()
-    bus.wait_for(lambda e: e["event"] == "busy")
     bus.wait_for(lambda e: e["event"] == "error" and e["message"].startswith("麦克风"))
     status.close()
 

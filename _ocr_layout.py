@@ -1,8 +1,8 @@
 """OCR 原位排版提取与局部环形背景色采样（逻辑层原子能力）。
 
-基于 Tesseract `image_to_data` 提取词级框，扣减 12px 预处理留白还原原图坐标，
-过滤低置信度噪点，同行水平大间距分列、同段相邻行合并为语义连贯文字块，
-并采样每块外围 2~5px 环形像素各通道中位数计算不透明背景色与高对比度前景色。
+基于 Tesseract `image_to_data` 提取词级框，扣减预处理留白、除以放大倍数还原原图坐标，
+过滤低置信度噪点，同行水平大间距分列成可见行；行分块与软/硬换行交给 `_ocr_segment`，
+块的文字与全文由 `_ocr_text` 派生；并采样每块外围 2~5px 环形像素各通道中位数计算贴片底色与高对比度前景色。
 """
 from __future__ import annotations
 
@@ -13,17 +13,18 @@ from typing import Any
 import numpy as np
 from PIL import Image
 
-from _contracts import ErrorCode, LogicError, OcrTextBlock
+from _contracts import ErrorCode, LogicError, OcrTextBlock, OcrTextLine
 from _ocr import (
     DEFAULT_OCR_LANG,
     OCR_BORDER_PX,
     OCR_TIMEOUT_S,
-    clean_cjk_spaces,
     ensure_ocr_languages,
     invoke_ocr_runner,
     prepare_ocr_image,
     raise_ocr_error,
 )
+from _ocr_segment import LineSpan, segment_lines
+from _ocr_text import block_display_text, clean_cjk_spaces, is_cjk_or_fullwidth, join_block_texts
 
 MIN_WORD_CONF = 20.0
 MIN_NOISE_SYMBOL_CONF = 38.0
@@ -32,6 +33,10 @@ RING_OUTER_PX = 5
 DARK_FG_COLOR = "#0f172a"
 LIGHT_FG_COLOR = "#f8fafc"
 LUMA_THRESHOLD = 140.0
+# 含中日韩字的行里，Tesseract 对部分词与标点（含被认成半角的逗号）给出约 1.5 倍高的异常词框（实测 16px 字：
+# 正常 16px、异常 24–25.5px，上下各超出 2–7px）；这类行的行框纵向范围只取不超过中日韩词高中位数这一倍数的词。
+# 纯拉丁文行不过滤：有无上伸/下伸字母的词高本来就差约 1.3 倍
+CJK_BOX_HEIGHT_MAX_RATIO = 1.25
 
 
 @dataclass(frozen=True)
@@ -52,46 +57,11 @@ class _WordBox:
         return max(1, self.y1 - self.y0)
 
 
-@dataclass
-class _LineSpan:
-    page_num: int
-    block_num: int
-    par_num: int
-    x0: int
-    y0: int
-    x1: int
-    y1: int
-    line_h: float
-    text: str
-
-
-def _is_cjk_or_fullwidth(ch: str) -> bool:
-    if not ch:
-        return False
-    code = ord(ch)
-    return (
-        0x4E00 <= code <= 0x9FFF
-        or 0x3400 <= code <= 0x4DBF
-        or 0x3000 <= code <= 0x303F
-        or 0xFF00 <= code <= 0xFFEF
-    )
-
-
 def _is_single_symbol_noise(word: str) -> bool:
     if len(word) != 1:
         return False
     ch = word[0]
-    return not (ch.isalnum() or _is_cjk_or_fullwidth(ch))
-
-
-def _join_adjacent_lines(upper: str, lower: str) -> str:
-    if not upper:
-        return lower
-    if not lower:
-        return upper
-    if _is_cjk_or_fullwidth(upper[-1]) or _is_cjk_or_fullwidth(lower[0]):
-        return clean_cjk_spaces(upper + lower)
-    return clean_cjk_spaces(f"{upper} {lower}")
+    return not (ch.isalnum() or is_cjk_or_fullwidth(ch))
 
 
 def _parse_words(
@@ -100,6 +70,7 @@ def _parse_words(
     orig_w: int,
     orig_h: int,
     border_px: int,
+    scale: int,
 ) -> list[_WordBox]:
     texts = data.get("text") or []
     n = len(texts)
@@ -136,10 +107,9 @@ def _parse_words(
         if _is_single_symbol_noise(raw_word) and conf < MIN_NOISE_SYMBOL_CONF:
             continue
         try:
-            raw_x0 = int(lefts[i]) - border_px
-            raw_y0 = int(tops[i]) - border_px
-            raw_x1 = raw_x0 + int(widths[i])
-            raw_y1 = raw_y0 + int(heights[i])
+            left, top = int(lefts[i]) - border_px, int(tops[i]) - border_px
+            raw_x0, raw_y0 = round(left / scale), round(top / scale)
+            raw_x1, raw_y1 = round((left + int(widths[i])) / scale), round((top + int(heights[i])) / scale)
         except (TypeError, ValueError):
             continue
         x0 = max(0, min(orig_w, raw_x0))
@@ -165,15 +135,22 @@ def _parse_words(
     return words
 
 
-def _split_line_columns(words: list[_WordBox]) -> list[_LineSpan]:
-    """将同一行内水平大间距的词拆分为独立列片段。"""
+def _vertical_extent(group: list[_WordBox]) -> tuple[int, int]:
+    cjk_heights = [w.height for w in group if any(is_cjk_or_fullwidth(ch) for ch in w.text)]
+    limit = CJK_BOX_HEIGHT_MAX_RATIO * float(np.median(cjk_heights)) if cjk_heights else float("inf")
+    core = [w for w in group if w.height <= limit]
+    return min(w.y0 for w in core), max(w.y1 for w in core)
+
+
+def _split_line_columns(words: list[_WordBox]) -> list[LineSpan]:
+    """将同一行内水平大间距的词拆分为独立列片段（每段一条可见行，带词框）。"""
     by_line: dict[tuple[int, int, int, int], list[_WordBox]] = {}
     for w in words:
         key = (w.page_num, w.block_num, w.par_num, w.line_num)
         by_line.setdefault(key, []).append(w)
 
-    spans: list[_LineSpan] = []
-    for (page_n, block_n, par_n, _line_n), line_words in by_line.items():
+    spans: list[LineSpan] = []
+    for line_words in by_line.values():
         ordered = sorted(line_words, key=lambda item: (item.x0, item.y0))
         groups: list[list[_WordBox]] = [[ordered[0]]]
         for w in ordered[1:]:
@@ -188,78 +165,18 @@ def _split_line_columns(words: list[_WordBox]) -> list[_LineSpan]:
             text = clean_cjk_spaces(" ".join(item.text for item in grp))
             if not text:
                 continue
-            x0 = min(item.x0 for item in grp)
-            y0 = min(item.y0 for item in grp)
-            x1 = max(item.x1 for item in grp)
-            y1 = max(item.y1 for item in grp)
-            avg_h = float(np.median([item.height for item in grp]))
+            y0, y1 = _vertical_extent(grp)
             spans.append(
-                _LineSpan(
-                    page_num=page_n,
-                    block_num=block_n,
-                    par_num=par_n,
-                    x0=x0,
+                LineSpan(
+                    x0=min(item.x0 for item in grp),
                     y0=y0,
-                    x1=x1,
+                    x1=max(item.x1 for item in grp),
                     y1=y1,
-                    line_h=max(1.0, avg_h),
                     text=text,
+                    words=tuple((item.x0, item.x1, item.text) for item in grp),
                 )
             )
     return spans
-
-
-def _can_merge_spans(upper: _LineSpan, lower: _LineSpan) -> bool:
-    if (upper.page_num, upper.block_num, upper.par_num) != (
-        lower.page_num,
-        lower.block_num,
-        lower.par_num,
-    ):
-        return False
-    max_h = max(upper.line_h, lower.line_h)
-    min_h = max(1.0, min(upper.line_h, lower.line_h))
-    if max_h > min_h * 1.8:
-        return False
-    v_gap = lower.y0 - upper.y1
-    if v_gap < -0.5 * max_h or v_gap > max(max_h * 1.25, 16.0):
-        return False
-    h_overlap = min(upper.x1, lower.x1) - max(upper.x0, lower.x0)
-    left_aligned = abs(lower.x0 - upper.x0) <= max_h * 2.5
-    return h_overlap > 0 or left_aligned
-
-
-def _merge_paragraph_lines(spans: list[_LineSpan]) -> list[_LineSpan]:
-    """将同段落内垂直紧邻、同列对齐的相邻行合并为语义连贯文字块。"""
-    if not spans:
-        return []
-    ordered = sorted(
-        spans,
-        key=lambda s: (s.page_num, s.block_num, s.par_num, s.y0, s.x0),
-    )
-    merged: list[_LineSpan] = []
-    for span in ordered:
-        target: _LineSpan | None = None
-        for candidate in reversed(merged):
-            if (candidate.page_num, candidate.block_num, candidate.par_num) != (
-                span.page_num,
-                span.block_num,
-                span.par_num,
-            ):
-                break
-            if _can_merge_spans(candidate, span):
-                target = candidate
-                break
-        if target is None:
-            merged.append(span)
-        else:
-            target.x0 = min(target.x0, span.x0)
-            target.y0 = min(target.y0, span.y0)
-            target.x1 = max(target.x1, span.x1)
-            target.y1 = max(target.y1, span.y1)
-            target.line_h = (target.line_h + span.line_h) / 2.0
-            target.text = _join_adjacent_lines(target.text, span.text)
-    merged.sort(key=lambda s: (s.y0, s.x0))
-    return merged
 
 
 def sample_ring_colors(
@@ -312,7 +229,7 @@ def extract_ocr_layout(
     runner_data: Callable[..., dict[str, list[Any]]] | None = None,
     languages_fn: Callable[[], list[str]] | None = None,
 ) -> tuple[int, int, str, list[OcrTextBlock]]:
-    """提取原图宽高、全文 OCR 文本及带局部背景/前景色的分块坐标列表。"""
+    """提取原图宽高、全文 OCR 文本（块间空一行）及带行列表与局部背景/前景色的分块列表。"""
     if not image_bytes:
         raise LogicError(ErrorCode.invalid_request, "OCR 图像不能为空")
 
@@ -336,41 +253,35 @@ def extract_ocr_layout(
         runner = _default_data_runner
 
     ensure_ocr_languages(lang, languages_fn)
-    orig_rgb, padded_rgb = prepare_ocr_image(image_bytes, border_px=OCR_BORDER_PX)
+    orig_rgb, ocr_img, scale = prepare_ocr_image(image_bytes, border_px=OCR_BORDER_PX)
     orig_w, orig_h = orig_rgb.size
 
     try:
-        raw_data = invoke_ocr_runner(runner, padded_rgb, lang=lang, timeout_s=OCR_TIMEOUT_S)
+        raw_data = invoke_ocr_runner(runner, ocr_img, lang=lang, timeout_s=OCR_TIMEOUT_S)
     except Exception as exc:
         raise_ocr_error(exc)
 
     if not isinstance(raw_data, dict):
         raise LogicError(ErrorCode.ocr_failed, "OCR image_to_data 返回结构非法")
 
-    words = _parse_words(raw_data, orig_w=orig_w, orig_h=orig_h, border_px=OCR_BORDER_PX)
-    spans = _merge_paragraph_lines(_split_line_columns(words))
-    if not spans:
+    words = _parse_words(raw_data, orig_w=orig_w, orig_h=orig_h, border_px=OCR_BORDER_PX, scale=scale)
+    block_lines = segment_lines(_split_line_columns(words))
+    if not block_lines:
         raise LogicError(ErrorCode.ocr_failed, "没有识别到文字")
 
     rgb_arr = np.asarray(orig_rgb, dtype=np.uint8)
-    blocks: list[OcrTextBlock] = []
-    for span in spans:
-        bbox = (span.x0, span.y0, max(1, span.x1 - span.x0), max(1, span.y1 - span.y0))
-        bg_color, fg_color = sample_ring_colors(rgb_arr, bbox)
-        blocks.append(
-            OcrTextBlock(
-                bbox=bbox,
-                ocr_text=span.text,
-                translated_text="",
-                bg_color=bg_color,
-                fg_color=fg_color,
-            )
-        )
+    blocks = [_block(lines, rgb_arr) for lines in block_lines]
+    return orig_w, orig_h, join_block_texts([block.ocr_text for block in blocks]), blocks
 
-    full_text = "\n".join(block.ocr_text for block in blocks).strip()
-    if not full_text:
-        raise LogicError(ErrorCode.ocr_failed, "没有识别到文字")
-    return orig_w, orig_h, full_text, blocks
+
+def _block(lines: list[OcrTextLine], rgb_arr: np.ndarray) -> OcrTextBlock:
+    x0 = min(line.bbox[0] for line in lines)
+    y0 = min(line.bbox[1] for line in lines)
+    x1 = max(line.bbox[0] + line.bbox[2] for line in lines)
+    y1 = max(line.bbox[1] + line.bbox[3] for line in lines)
+    bbox = (x0, y0, x1 - x0, y1 - y0)
+    bg_color, fg_color = sample_ring_colors(rgb_arr, bbox)
+    return OcrTextBlock(bbox=bbox, lines=lines, ocr_text=block_display_text(lines), bg_color=bg_color, fg_color=fg_color)
 
 
 __all__ = [

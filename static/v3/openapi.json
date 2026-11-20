@@ -2549,21 +2549,32 @@
             "maxItems": 4,
             "minItems": 4,
             "title": "Bbox",
-            "description": "(x, y, width, height) 像素坐标，相对于所提交图片左上角"
+            "description": "(x, y, width, height) 像素坐标，相对于所提交图片左上角；= 全部行框的并集"
+          },
+          "lines": {
+            "items": {
+              "$ref": "#/components/schemas/OcrTextLine"
+            },
+            "type": "array",
+            "minItems": 1,
+            "title": "Lines",
+            "description": "逐行绘制与全部文本派生的唯一来源"
           },
           "ocr_text": {
             "type": "string",
-            "title": "Ocr Text"
+            "title": "Ocr Text",
+            "description": "逐行原文，保留可见换行与相对块左缘的缩进（_ocr_text.block_display_text）"
           },
           "translated_text": {
             "type": "string",
             "title": "Translated Text",
+            "description": "各硬行段译文按原缩进逐行拼回（_ocr_text.block_translated_text）；raw 模式 = ocr_text",
             "default": ""
           },
           "bg_color": {
             "type": "string",
             "title": "Bg Color",
-            "description": "采样自文字框外围边缘的不透明背景色 #RRGGBB",
+            "description": "半透明贴片底色 #RRGGBB，采样自文字框外围",
             "default": "#ffffff"
           },
           "fg_color": {
@@ -2577,10 +2588,56 @@
         "type": "object",
         "required": [
           "bbox",
+          "lines",
           "ocr_text"
         ],
         "title": "OcrTextBlock",
-        "description": "识别到的单个文字区域及其局部采样背景/前景色，供原位遮挡译文浮窗直接渲染。"
+        "description": "同列紧邻的若干行组成的文字块及其局部采样背景/前景色，供原位浮窗逐行绘制与排版。"
+      },
+      "OcrTextLine": {
+        "properties": {
+          "bbox": {
+            "prefixItems": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "integer"
+              },
+              {
+                "type": "integer"
+              },
+              {
+                "type": "integer"
+              }
+            ],
+            "type": "array",
+            "maxItems": 4,
+            "minItems": 4,
+            "title": "Bbox",
+            "description": "(x, y, width, height) 像素坐标，相对于所提交图片左上角"
+          },
+          "text": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Text",
+            "description": "行内文字，不含缩进空格"
+          },
+          "soft_wrap": {
+            "type": "boolean",
+            "title": "Soft Wrap",
+            "description": "True = 本行是上一行的自动折行续行；块内首行恒为 False",
+            "default": false
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "bbox",
+          "text"
+        ],
+        "title": "OcrTextLine",
+        "description": "一条可见文字行；坐标已还原放大倍数与留白。"
       },
       "OcrTranslateResponse": {
         "properties": {

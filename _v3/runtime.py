@@ -28,6 +28,7 @@ from _history import HistoryStore
 from _history_service import HistoryService
 from _jobs import JobStore, default_jobs_path
 from _jobs_service import JobsService
+from _ocr_text import block_segments, block_translated_text
 from _session_finals import SessionFinalIndex
 from _utterance import UtteranceService
 from _v3.auth import AuthSettings
@@ -49,15 +50,10 @@ def _default_translate_blocks(translate: TranslateFn) -> TranslateBlocksFn:
         norm = (target_lang or "").strip()
         if not norm:
             raise LogicError(ErrorCode.invalid_request, "target_lang 不能为空")
-        if norm.lower() == "raw":
-            return [b.model_copy(update={"translated_text": b.ocr_text}) for b in blocks]
         translated: list[OcrTextBlock] = []
-        for block in blocks:
-            if not block.ocr_text.strip():
-                translated.append(block.model_copy(update={"translated_text": ""}))
-                continue
-            res = translate(TranslateRequest(text=block.ocr_text, target_lang=norm))
-            translated.append(block.model_copy(update={"translated_text": res.text}))
+        for block in blocks:  # 与 _translate.translate_blocks 同一翻译单位：每个硬行段一项，按原缩进拼回
+            texts = [translate(TranslateRequest(text=seg.text, target_lang=norm)).text for seg in block_segments(block.lines)]
+            translated.append(block.model_copy(update={"translated_text": block_translated_text(block.lines, texts)}))
         return translated
 
     return _run

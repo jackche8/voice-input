@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import inspect
 import re
+from dataclasses import dataclass
 from typing import Any
 
 import httpx
@@ -65,6 +66,14 @@ def call_chat(
     return chat_fn(**kwargs)
 
 
+@dataclass(frozen=True)
+class ChatReply:
+    """一次 /api/chat 的结果：文本与结束原因（"stop" 正常结束；"length" 表示输出达到长度上限被截断）。"""
+
+    content: str
+    done_reason: str | None
+
+
 class OllamaClient:
     def __init__(
         self,
@@ -101,7 +110,19 @@ class OllamaClient:
         options: dict[str, Any] | None = None,
         extra: dict[str, Any] | None = None,
     ) -> str:
-        """调用 /api/chat。默认且产品要求 think=false。
+        """调用 /api/chat，只取文本。默认且产品要求 think=false。"""
+        return self.chat_reply(model=model, messages=messages, think=think, options=options, extra=extra).content
+
+    def chat_reply(
+        self,
+        *,
+        model: str,
+        messages: list[dict[str, str]],
+        think: bool = False,
+        options: dict[str, Any] | None = None,
+        extra: dict[str, Any] | None = None,
+    ) -> ChatReply:
+        """调用 /api/chat，返回文本与结束原因。默认且产品要求 think=false；extra 并入请求体（如结构化输出 format）。
 
         失败（超时、非 2xx、非法 JSON、空内容）必须抛 LogicError，
         调用方不得改把原文当成成功返回。
@@ -168,10 +189,12 @@ class OllamaClient:
         content = message.get("content")
         if not isinstance(content, str) or not content.strip():
             raise LogicError(ErrorCode.dependency_failed, "Ollama 响应缺少文本内容")
-        return content.strip()
+        done_reason = data.get("done_reason")
+        return ChatReply(content=content.strip(), done_reason=done_reason if isinstance(done_reason, str) else None)
 
 
 __all__ = [
+    "ChatReply",
     "DEFAULT_OLLAMA_BASE_URL",
     "DEFAULT_TIMEOUT_S",
     "OllamaClient",

@@ -1,7 +1,7 @@
 """跨平台桌面守护进程入口（薄装配层 · PySide6-Essentials，零 GTK / WebKit 依赖）。
 
 所有平台能力来自 `_platform`（Linux / Windows / macOS），原生视图来自 `_ui_desktop`
-（红十字框选器、原位背景遮挡翻译浮窗、状态胶囊与双行大字幕、系统托盘），业务流程来自
+（红十字框选器、原位识别/翻译浮窗、语音一体底栏、系统托盘），业务流程来自
 `_desktop`（录音排队上传、投递循环、截屏翻译与纯 OCR 复用、SSE 断线退避重连）。本文件不含业务规则。
 """
 from __future__ import annotations
@@ -101,9 +101,8 @@ def main() -> None:
         open_selector=lambda rect, mode_label, on_sel, on_cancel: open_live_selector(
             app, RedCrosshairSelector, rect, mode_label, on_sel, on_cancel
         ),
-        open_inplace_overlay=lambda png, rect, **kw: open_translate_overlay(InplaceTranslateOverlay, png, rect, **kw),
+        open_inplace_overlay=lambda png, rect, **kw: open_translate_overlay(app, InplaceTranslateOverlay, png, rect, **kw),
         copy_clipboard=lambda text: platform.write_clipboard_text(text) is None,
-        notify_toast=lambda msg, kind: hud.show_toast(msg, kind=kind),
         api=api,
         status=status,
         invoke_ui=bridge.post,
@@ -201,7 +200,7 @@ def main() -> None:
         api.close()
         event_loop.stop(timeout=0.5)
         hotkey_rig.stop()
-        capture_flow.close_overlay(reset_status=False)
+        capture_flow.close_overlay()
         hud.close()
         tray.close()
         status.close()

@@ -1,7 +1,7 @@
 """平台状态 → 产品事件流（/api/v1/events/platform）。后台串行发送，绝不阻塞 UI 主线程。
 
-产品事件流（GET /api/v1/events）是状态胶囊与网页视图的唯一状态源；平台本地才知道的状态
-（开麦失败、截图中、截图失败、没有可重复的记录）经这里进入同一事件流。
+产品事件流（GET /api/v1/events）是状态胶囊与网页视图的唯一状态源；平台本地才知道的失败
+（开麦失败、截图失败、没有可重复的记录、快捷键组件失败）经这里进入同一事件流。
 """
 from __future__ import annotations
 
@@ -22,12 +22,6 @@ class PlatformStatus:
         if start_thread:
             self._thread = threading.Thread(target=self._run, name="platform-status", daemon=True)
             self._thread.start()
-
-    def busy(self) -> None:
-        self._queue.put({"event": "busy"})
-
-    def idle(self) -> None:
-        self._queue.put({"event": "idle"})
 
     def error(self, code: ErrorCode, message: str) -> None:
         self._queue.put({"event": "error", "error": code.value, "message": message})

@@ -31,6 +31,9 @@ from _linux.hotkey_state import Action
 _LINUX_MOD_KEYCODES = frozenset().union(*EVDEV_MODIFIER_CODES.values())
 _MASK = 0xFFFFFFFF
 RESCAN_INTERVAL_S = 30.0
+# python-evdev 2.0.0 `InputDevice.read()` 单次最多读 64 个事件（input.c:95 `struct input_event event[64]`），
+# 读满说明设备缓冲里可能还有更早入队、本轮没读到的事件
+EVDEV_READ_MAX = 64
 
 Combo = Mapping[str, Any]  # parse_hotkey_evdev 的结果：{"trigger": int, "modifiers": [set[int], ...]}
 
@@ -75,8 +78,9 @@ class EvdevHotkeyGrabber:
                 "未找到可读的键盘设备。请确保用户属于 input 组: sudo usermod -aG input $USER 然后重新登录"
             )
         with self._lock:
-            for dev in devices:
-                self._add_device_locked(dev)
+            added = [dev for dev in devices if self._add_device_locked(dev)]
+        if not added:
+            raise RuntimeError("键盘设备打开后读取当前按键失败（设备已断开）")
 
     # ---- manager 调用 ----------------------------------------------------
     def set_combos(self, combos: Mapping[Action, Combo]) -> None:
@@ -137,7 +141,8 @@ class EvdevHotkeyGrabber:
         """一轮：select → 读完全部就绪设备 → 按事件时间合并处理 → 投递一次进度。
 
         进度取本轮 select 之前的单调时间：内核在入队时打时间戳，凡时间戳早于它的事件在 select 前已在
-        设备缓冲里，select 会报就绪、本轮读到；所以进度不会越过任何尚未读到的事件。
+        设备缓冲里，select 会报就绪、本轮读到；所以进度不会越过任何尚未读到的事件。例外是某设备一次读满
+        （EVDEV_READ_MAX）：剩余事件留到下一轮，本轮不投递进度。
         """
         progress_ms = _now_ms()
         with self._lock:
@@ -150,6 +155,7 @@ class EvdevHotkeyGrabber:
             return
         batch: list[tuple[str, Any]] = []
         lost: list[str] = []
+        read_full = False
         for fd in ready:
             path = by_fd[fd]
             with self._lock:
@@ -157,32 +163,35 @@ class EvdevHotkeyGrabber:
             if dev is None:
                 continue
             try:
-                batch.extend((path, event) for event in dev.read())
+                events = list(dev.read())
             except OSError as exc:
                 print(f"  evdev: 设备断开 {dev.name} ({path}): {exc}", flush=True)
                 lost.append(path)
+                continue
+            read_full = read_full or len(events) >= EVDEV_READ_MAX
+            batch.extend((path, event) for event in events)
         batch.sort(key=lambda item: (item[1].sec, item[1].usec))  # 稳定排序：同一时刻保持各设备内顺序
         for path, event in batch:
             self._handle_event(path, event)
         for path in lost:
-            self._drop_device(path)
+            self._drop_device(path, _now_ms())
+        if read_full:
+            return
         with self._lock:
             # 同一队列、排在本轮全部区间投递之后：主线程处理到它时，早于进度的区间都已记入状态
             GLib.idle_add(self.sink.reader_progress, progress_ms)
 
     def _handle_event(self, path: str, event: Any) -> None:
         if event.type == EV_SYN and event.code == SYN_DROPPED:
-            with self._lock:
-                dev = self._devices.get(path)
-                if dev is not None:
-                    self._pressed[path] = {c for c in dev.active_keys() if c < KEYBOARD_CODE_LIMIT}
-                    self._recompute_locked(_event_ms(event))
+            self._resync(path, _event_ms(event))
             return
         if event.type != EV_KEY or event.code >= KEYBOARD_CODE_LIMIT or event.value == 2:
             return
         t_ms = _event_ms(event)
         with self._lock:
-            keys = self._pressed.setdefault(path, set())
+            keys = self._pressed.get(path)
+            if keys is None:
+                return  # 本轮前面已按断开移除的设备：同批里它剩下的事件不再计入
             if event.value == 1:
                 keys.add(event.code)
             else:
@@ -195,6 +204,23 @@ class EvdevHotkeyGrabber:
         if event.value == 1 and event.code == KEY_ESC:
             self.sink.escape_pressed()
 
+    def _resync(self, path: str, t_ms: int) -> None:
+        """SYN_DROPPED：缓冲溢出丢了事件，按设备当前按键重同步；此时设备已断开则按断开处理。"""
+        with self._lock:
+            dev = self._devices.get(path)
+            if dev is None:
+                return
+            try:
+                self._pressed[path] = {c for c in dev.active_keys() if c < KEYBOARD_CODE_LIMIT}
+            except OSError as exc:
+                failure: OSError | None = exc
+            else:
+                failure = None
+                self._recompute_locked(t_ms)
+        if failure is not None:
+            print(f"  evdev: 设备断开 {dev.name} ({path}): {failure}", flush=True)
+            self._drop_device(path, t_ms)
+
     def _rescan(self) -> None:
         with self._lock:
             known = set(self._devices)
@@ -203,15 +229,15 @@ class EvdevHotkeyGrabber:
             return
         with self._lock:
             for dev in new_devices:
-                self._add_device_locked(dev)
-                print(f"  evdev: 发现键盘 {dev.name} ({dev.path})", flush=True)
+                if self._add_device_locked(dev):
+                    print(f"  evdev: 发现键盘 {dev.name} ({dev.path})", flush=True)
             self._recompute_locked(_now_ms())
 
-    def _drop_device(self, path: str) -> None:
+    def _drop_device(self, path: str, t_ms: int) -> None:
         with self._lock:
             dev = self._devices.pop(path, None)
             self._pressed.pop(path, None)
-            self._recompute_locked(_now_ms())
+            self._recompute_locked(t_ms)
         if dev is not None:
             dev.close()
 
@@ -225,9 +251,17 @@ class EvdevHotkeyGrabber:
             dev.close()
 
     # ---- 锁内辅助 --------------------------------------------------------
-    def _add_device_locked(self, dev: Any) -> None:
+    def _add_device_locked(self, dev: Any) -> bool:
+        """按设备当前按键入列；读当前按键时已断开则关闭跳过（与打开探测途中断开同样处理）。"""
+        try:
+            keys = {c for c in dev.active_keys() if c < KEYBOARD_CODE_LIMIT}
+        except OSError as exc:
+            print(f"  evdev: 跳过已断开的设备 {dev.name} ({dev.path}): {exc}", flush=True)
+            dev.close()
+            return False
         self._devices[dev.path] = dev
-        self._pressed[dev.path] = {c for c in dev.active_keys() if c < KEYBOARD_CODE_LIMIT}
+        self._pressed[dev.path] = keys
+        return True
 
     def _union_locked(self) -> set[int]:
         union: set[int] = set()

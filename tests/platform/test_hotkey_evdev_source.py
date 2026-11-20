@@ -146,6 +146,46 @@ def test_activation_is_reported_only_in_fallback_mode_when_trigger_pressed_last(
     assert sink.calls == [("start", "screenshot", 3020)]
 
 
+def test_reading_current_keys_of_a_vanished_device_counts_as_disconnect(make) -> None:
+    def gone():
+        raise OSError(19, "No such device")
+
+    a, b = FakeDevice("/dev/input/event5"), FakeDevice("/dev/input/event6")
+    grabber, sink = make(a, b)
+    grabber.set_combos({"voice": VOICE})
+    for code, ms in ((CTRL, 1000), (ALT, 1010), (Z, 1020)):
+        grabber._handle_event("/dev/input/event5", _key(code, 1, ms))
+    a.active_keys = gone  # 缓冲溢出后重同步时设备已拔出
+    grabber._handle_event("/dev/input/event5", Ev(EV_SYN, SYN_DROPPED, 0, 2, 0))
+    grabber._handle_event("/dev/input/event5", _key(CTRL, 1, 2100))  # 同批里它剩下的事件不再计入
+    assert sink.calls == [("start", "voice", 1020), ("end", "voice", 2000)]
+    assert a.closed and grabber.any_modifier_down() is False
+    for code, ms in ((CTRL, 3000), (ALT, 3010), (Z, 3020)):  # 读线程照常：另一设备继续上报
+        grabber._handle_event("/dev/input/event6", _key(code, 1, ms))
+    assert sink.calls[-1] == ("start", "voice", 3020)
+
+    late = FakeDevice("/dev/input/event7")
+    late.active_keys = gone  # 重扫打开后、读当前按键前拔出：跳过，不让读线程退出
+    grabber2, _sink2 = make(FakeDevice("/dev/input/event5"), rescan=[late])
+    grabber2._rescan()
+    assert late.closed and "/dev/input/event7" not in grabber2._devices
+
+
+def test_progress_is_withheld_while_a_device_read_comes_back_full(make, monkeypatch) -> None:
+    dev = FakeDevice("/dev/input/event5")
+    grabber, sink = make(dev)
+    grabber.set_combos({"voice": VOICE})
+    # 读线程滞后：缓冲里积压 70 个事件，一次只能读 64 个
+    dev.queue = [_key(C, value, 1000 + i) for i, value in zip(range(70), [1, 0] * 35)]
+    clock = iter([2000, 2500])  # 两轮各取一次本轮开始时间
+    monkeypatch.setattr(hotkey_evdev, "_now_ms", lambda: next(clock))
+    monkeypatch.setattr(hotkey_evdev, "select", _FakeSelect([dev.fd]))
+    grabber._poll_once()
+    assert [entry for entry in sink.log if entry[0] == "progress"] == []  # 剩余事件未读，进度不能越过它们
+    grabber._poll_once()
+    assert [entry for entry in sink.log if entry[0] == "progress"] == [("progress", 2500)]
+
+
 class _FakeSelect:
     """替换读线程模块里的 select：返回预设的就绪 fd，并可在 select 期间模拟新事件入队。"""
 

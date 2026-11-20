@@ -4,6 +4,7 @@ from __future__ import annotations
 import ast
 import os
 import re
+import time
 from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -14,7 +15,7 @@ from PySide6.QtGui import QColor, QGuiApplication, QImage, QPainter
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QSystemTrayIcon, QWidget
 
-from _contracts import OcrTextBlock
+from _contracts import OcrTextBlock, OcrTextLine
 from _ui_desktop import (
     InplaceTranslateOverlay,
     RedCrosshairSelector,
@@ -25,6 +26,8 @@ from _ui_desktop import (
     theme,
 )
 from _ui_desktop.caption_bar import CAPTION_AUTO_HIDE_MS, passive_overlay_flags
+from _ui_desktop.inplace_layout import layout_ocr_block, layout_translated_block
+from _ui_desktop.mini_menu import COPY_OCR, COPY_TRANSLATED
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 UI_DESKTOP_DIR = PROJECT_ROOT / "_ui_desktop"
@@ -86,7 +89,9 @@ def test_theme_tokens_and_ui_layer_purity() -> None:
     assert [f.name for f in py_files] == [
         "__init__.py",
         "caption_bar.py",
+        "inplace_layout.py",
         "inplace_overlay.py",
+        "mini_menu.py",
         "region_selector.py",
         "theme.py",
         "tray.py",
@@ -296,237 +301,259 @@ def test_selector_under_8px_ignored_and_right_click_or_esc_cancels(
 
 
 # ---------------------------------------------------------------------------
-# 3. InplaceTranslateOverlay：100% 不透明遮挡、按住看原图、9px 超高延伸与悬浮栏避让
+# 3. InplaceTranslateOverlay 原位浮窗（UI 验收标准 docs/design/v3.3/overlay-a.html）
 # ---------------------------------------------------------------------------
-def test_inplace_overlay_opaque_occlusion_and_peek_original(qapp: QApplication) -> None:
-    # 构造含醒目红字像素 (#ff0000) 与深色块青字像素 (#38bdf8) 的底图
-    cropped_png = _make_png(
-        320,
-        180,
-        bg_hex="#ffffff",
-        patches=[
-            ((30, 24, 180, 28), "#ff0000"),
-            ((20, 96, 260, 48), "#0f172a"),
-            ((30, 106, 180, 24), "#38bdf8"),
-        ],
+def _ocr_line(x: int, y: int, w: int, h: int, text: str, soft_wrap: bool = False) -> OcrTextLine:
+    return OcrTextLine(bbox=(x, y, w, h), text=text, soft_wrap=soft_wrap)
+
+
+def _ocr_block(lines: list[OcrTextLine], translated_text: str = "", bg: str = "#ffffff", fg: str = "#0f172a") -> OcrTextBlock:
+    x0 = min(line.bbox[0] for line in lines)
+    y0 = min(line.bbox[1] for line in lines)
+    x1 = max(line.bbox[0] + line.bbox[2] for line in lines)
+    y1 = max(line.bbox[1] + line.bbox[3] for line in lines)
+    return OcrTextBlock(
+        bbox=(x0, y0, x1 - x0, y1 - y0),
+        lines=lines,
+        ocr_text="\n".join(line.text for line in lines),
+        translated_text=translated_text,
+        bg_color=bg,
+        fg_color=fg,
     )
-    blocks = [
-        OcrTextBlock(
-            bbox=(30, 24, 180, 28),
-            ocr_text="Region Capture & Translation",
-            translated_text="区域框选与原位翻译",
-            bg_color="#ffffff",
-            fg_color="#0f172a",
-        ),
-        OcrTextBlock(
-            bbox=(30, 106, 180, 24),
-            ocr_text="Verify GPU service",
-            translated_text="检查本地显卡服务",
-            bg_color="#0f172a",
-            fg_color="#e6edf3",
-        ),
+
+
+def _settled_pixel(widget: QWidget, x: int, y: int, frames: int = 3, timeout_ms: int = 2000) -> QColor:
+    """等到该像素连续 frames 帧不再变化（淡入等过渡结束）后返回它的颜色。"""
+    deadline = time.monotonic() + timeout_ms / 1000.0
+    last, same = None, 0
+    while same < frames:
+        assert time.monotonic() < deadline, "像素在超时内没有稳定"
+        QTest.qWait(theme.OVERLAY_FRAME_MS)
+        color = widget.grab().toImage().pixelColor(x, y).rgba()
+        same = same + 1 if color == last else 0
+        last = color
+    return QColor.fromRgba(last)
+
+
+def _wait_until(predicate, timeout_ms: int = 2000) -> bool:
+    """处理 Qt 事件直到条件成立（PySide6 的 QTest 没有 qWaitFor）。"""
+    deadline = time.monotonic() + timeout_ms / 1000.0
+    while not predicate():
+        if time.monotonic() > deadline:
+            return False
+        QTest.qWait(10)
+    return True
+
+
+def _open_overlay(screen_rect: tuple[int, int, int, int], mode: str, **callbacks) -> InplaceTranslateOverlay:
+    overlay = InplaceTranslateOverlay(
+        _make_png(screen_rect[2], screen_rect[3], bg_hex="#808080"),
+        screen_rect,
+        mode=mode,
+        virtual_geometry=(0, 0, 1280, 800),
+        available_screen_rect=(0, 0, 1280, 800),
+        **callbacks,
+    )
+    overlay.show()
+    return overlay
+
+
+def test_inplace_overlay_86_percent_patch_and_ocr_rows_on_line_boxes(qapp: QApplication) -> None:
+    """贴片 ≈ 0.86·采样底色 + 0.14·原图；OCR 模式每行画回自己的行框，字铺满原行宽。"""
+    lines = [_ocr_line(30, 20, 200, 18, "Select any region"), _ocr_line(30, 46, 160, 18, "on your machine", True)]
+    block = _ocr_block(lines)
+    overlay = InplaceTranslateOverlay(
+        _make_png(320, 180, bg_hex="#808080", patches=[((30, 20, 200, 18), "#000000"), ((30, 46, 160, 18), "#000000")]),
+        (100, 100, 320, 180),
+        mode="ocr",
+        virtual_geometry=(0, 0, 1280, 800),
+        available_screen_rect=(0, 0, 1280, 800),
+    )
+    try:
+        overlay.set_result([block], "", block.ocr_text)
+        canvas = overlay.canvas_rect()
+        assert canvas == QRect(100, 100, 320, 180)
+        expected = round(theme.OVERLAY_PATCH_ALPHA + (1 - theme.OVERLAY_PATCH_ALPHA / 255) * 0x80)
+
+        patch = _settled_pixel(overlay, canvas.x() + 27, canvas.y() + 29)
+        assert abs(patch.red() - expected) <= 3, patch.name()
+        assert overlay.grab().toImage().pixelColor(canvas.x() + 5, canvas.y() + 5).name() == "#808080"
+
+        layout = layout_ocr_block(block)
+        assert len({row.font_px for row in layout.rows}) == 1  # 一块字号统一
+        img = overlay.grab().toImage()
+        for line, row in zip(lines, layout.rows):
+            x, y, w, h = line.bbox
+            assert (row.x, row.top, row.height, row.text) == (x, y, h, line.text)
+            assert abs(row.width - w) <= 1
+            dark = [
+                px
+                for py in range(y, y + h)
+                for px in range(canvas.x() + x - 6, canvas.x() + x + w + 6)
+                if max(img.pixelColor(px, canvas.y() + py).getRgb()[:3]) < 90
+            ]
+            assert dark, line.text
+            assert abs(min(dark) - (canvas.x() + x)) <= 4
+            assert abs(max(dark) - (canvas.x() + x + w)) <= 4
+    finally:
+        overlay.close_silent()
+        overlay.deleteLater()
+
+
+def test_inplace_layout_segments_start_at_head_slots_shrink_then_extend(qapp: QApplication) -> None:
+    """第 k 段从第 k 个段首槽位起排、原字号行距；本段槽位放不下先缩到 ≥9px 再下延；行数不符抛错。"""
+    lines = [
+        _ocr_line(10, 10, 400, 18, "Select any region of the screen and the"),
+        _ocr_line(10, 32, 380, 18, "text inside it is recognized.", True),
+        _ocr_line(30, 54, 150, 18, "keep_code(line)"),
     ]
-    overlay = InplaceTranslateOverlay(
-        cropped_png=cropped_png,
-        screen_rect=(100, 100, 320, 180),
-        blocks=blocks,
-        full_translated_text="区域框选与原位翻译\n检查本地显卡服务",
-        full_ocr_text="Region Capture & Translation\nVerify GPU service",
-        available_screen_rect=(0, 0, 1280, 800),
+    bottom = 54 + 18
+
+    fits = layout_translated_block(_ocr_block(lines, "框选屏幕上的任意区域，其中文字会被识别。\n    keep_code(line)"))
+    first, code = fits.rows[0], fits.rows[-1]
+    block_px = first.font_px
+    assert (first.x, first.top) == (10, 10)
+    assert (code.text, code.x, code.top, code.font_px) == ("keep_code(line)", 30, 54, block_px)
+    assert abs(code.width - 150) <= 1
+    assert fits.extent.bottom() <= bottom
+
+    shrunk = layout_translated_block(_ocr_block(lines, "框选屏幕上的任意区域，其中的文字会在本机完成识别，" * 2 + "\nkeep_code(line)"))
+    head_rows = [row for row in shrunk.rows if row.text != "keep_code(line)"]
+    assert len(head_rows) <= 2
+    assert theme.OCR_MIN_FONT_PX <= head_rows[0].font_px < block_px
+    assert {row.top for row in head_rows} <= {10, 32}
+    assert shrunk.extent.bottom() <= bottom  # 不压下一块
+
+    extended = layout_translated_block(_ocr_block(lines, "很长的译文需要向下延伸，" * 30 + "\nkeep_code(line)"))
+    long_rows = [row for row in extended.rows if row.text != "keep_code(line)"]
+    assert {row.font_px for row in long_rows} == {theme.OCR_MIN_FONT_PX}
+    assert len(long_rows) > 2
+    assert extended.extent.bottom() > bottom
+    assert extended.rows[-1].top > 54  # 其后的段随之下移
+
+    with pytest.raises(ValueError, match="硬行段"):
+        layout_translated_block(_ocr_block(lines, "只有一行译文"))
+
+
+def test_inplace_layout_font_size_and_baseline_from_line_ink_on_real_tesseract(qapp: QApplication) -> None:
+    """原字号按行内墨迹换算、块内取中位数，基线由紧框上沿换算：无下行字母行、带括号代码行、中文行、
+    单行无下行字母块，对 ocr_samples 生成的截图跑真实 Tesseract，字号与基线都在真值 ±1px 内。"""
+    pytesseract = pytest.importorskip("pytesseract")
+    from PIL import ImageFont
+
+    from _ocr_layout import extract_ocr_layout
+    from tests.logic.ocr_samples import CJK, CJK_SC, MONO, SANS, all_samples, fonts_missing
+
+    try:
+        langs = set(pytesseract.get_languages(config=""))
+    except Exception as exc:
+        pytest.skip(f"无法查询 tesseract 语言包: {exc}")
+    missing = [lang for lang in ("eng", "chi_sim") if lang not in langs]
+    if missing:
+        pytest.skip(f"本机未安装 tesseract 语言包: {missing}")
+    reason = fonts_missing()
+    if reason:
+        pytest.skip(reason)
+
+    cases = (  # (样本, 真值字体, 真值字号, 字面序号, 识别语言)
+        ("menu", SANS, 14, 0, "eng"),
+        ("code", MONO, 14, 0, "eng"),
+        ("chinese_paragraph", CJK, 16, CJK_SC, "chi_sim+eng"),
+        ("dark_paragraph", SANS, 14, 0, "eng"),  # 第二块是单行、无下行字母
+    )
+    checked = 0
+    for name, path, size, index, lang in cases:
+        sample = all_samples()[name]
+        truth_font = ImageFont.truetype(path, size, index=index)
+        _w, _h, _text, blocks = extract_ocr_layout(sample.png, lang=lang)
+        for block in blocks:
+            for line, row in zip(block.lines, layout_ocr_block(block).rows):
+                center = line.bbox[1] + line.bbox[3] / 2
+                truth = min(sample.lines, key=lambda t: abs(t.bbox[1] + t.bbox[3] / 2 - center))
+                mask, (_dx, dy) = truth_font.getmask2(truth.text, anchor="ls")
+                truth_baseline = truth.bbox[1] - (dy + mask.getbbox()[1])
+                assert abs(row.font_px - size) <= 1, (name, line.text, row.font_px, size)
+                assert abs(row.baseline - truth_baseline) <= 1, (name, line.text, row.baseline, truth_baseline)
+                checked += 1
+    assert checked >= 15
+
+
+def test_inplace_overlay_mini_menu_modes_placement_close_keys_and_copy_feedback(qapp: QApplication) -> None:
+    """菜单按模式与失败重试、下 → 上 → 内避让；点框外关、点框内不关、Esc 关、Ctrl+C 不关；复制按返回值反馈。"""
+    copies: list[str] = []
+    copy_ok = [True]
+    retries: list[int] = []
+    closed: list[int] = []
+
+    def on_copy(text: str) -> bool:
+        copies.append(text)
+        return copy_ok[0]
+
+    block = _ocr_block([_ocr_line(10, 10, 120, 16, "Settings")], translated_text="设置")
+    overlay = _open_overlay(
+        (200, 160, 320, 180),
+        "translate",
+        on_copy_text=on_copy,
+        on_retry=lambda: retries.append(1),
+        on_closed=lambda: closed.append(1),
+        copy_feedback_ms=150,
     )
     try:
-        comp = overlay.render_composited_image()
-        src_red = QColor("#ff0000").rgb()
-        src_cyan = QColor("#38bdf8").rgb()
-        bg_light = QColor("#ffffff").rgb()
-        bg_dark = QColor("#0f172a").rgb()
+        menu = overlay.menu
+        assert menu.status_text() == "识别并翻译中…"
+        assert menu.visible_labels() == []
 
-        # 校验块 1（微扩 2px -> 28..212, 22..54）：原 #ff0000 100% 被遮盖，全部像素 alpha == 255，且绘制出深色译文字形
-        light_fg_pixels = 0
-        for y in range(22, 54):
-            for x in range(28, 212):
-                px = comp.pixelColor(x, y)
-                assert px.alpha() == 255
-                assert px.rgb() != src_red
-                if px.rgb() != bg_light:
-                    light_fg_pixels += 1
-        assert light_fg_pixels > 20
+        overlay.set_error("本地翻译模型连接超时")
+        assert menu.status_text() == "✕ 翻译失败：本地翻译模型连接超时"
+        assert menu.visible_labels() == ["重试"]
+        QTest.mouseClick(menu.button("retry"), Qt.MouseButton.LeftButton)
+        assert retries == [1]
 
-        # 校验块 2（微扩 2px -> 28..212, 104..132）：原 #38bdf8 100% 被遮盖，全部像素 alpha == 255，且绘制出浅色译文字形
-        dark_fg_pixels = 0
-        for y in range(104, 132):
-            for x in range(28, 212):
-                px = comp.pixelColor(x, y)
-                assert px.alpha() == 255
-                assert px.rgb() != src_cyan
-                if px.rgb() != bg_dark:
-                    dark_fg_pixels += 1
-        assert dark_fg_pixels > 20
+        overlay.set_result([block], "设置", "Settings")
+        assert menu.visible_labels() == ["复制译文", "复制原文"]
+        assert overlay.menu_placement == "below"
+        assert menu.geometry().top() > overlay.canvas_rect().bottom()
 
-        # 按住 [按住对比原图] 露出原图，松开恢复译文遮挡
-        overlay.show()
-        QTest.mousePress(overlay.peek_button, Qt.MouseButton.LeftButton)
-        qapp.processEvents()
-        assert overlay.peek_original is True
-        peek_img = overlay.render_composited_image()
-        assert peek_img.pixelColor(50, 35).rgb() == src_red
-        assert peek_img.pixelColor(50, 115).rgb() == src_cyan
+        QTest.mouseClick(menu.button(COPY_TRANSLATED), Qt.MouseButton.LeftButton)
+        assert copies == ["设置"]
+        assert menu.button(COPY_TRANSLATED).text() == "✓ 已复制"
+        copy_ok[0] = False
+        QTest.mouseClick(menu.button(COPY_OCR), Qt.MouseButton.LeftButton)
+        assert copies == ["设置", "Settings"]
+        assert menu.button(COPY_OCR).text() == "复制失败"
+        assert _wait_until(lambda: menu.button(COPY_OCR).text() == "复制原文", 2000)
 
-        QTest.mouseRelease(overlay.peek_button, Qt.MouseButton.LeftButton)
-        qapp.processEvents()
-        assert overlay.peek_original is False
-        restored_img = overlay.render_composited_image()
-        assert restored_img.pixelColor(50, 35).rgb() != src_red
+        QTest.mouseClick(overlay, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, QPoint(300, 200))
+        QTest.keyClick(overlay, Qt.Key.Key_C, Qt.KeyboardModifier.ControlModifier)
+        assert closed == []
+        assert overlay.isVisible() is True
+        QTest.mouseClick(overlay, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, QPoint(5, 5))
+        assert closed == [1]
+        assert overlay.isVisible() is False
     finally:
         overlay.close_silent()
         overlay.deleteLater()
 
-
-def test_inplace_overlay_9px_overflow_extends_opaque_background_downward(
-    qapp: QApplication,
-) -> None:
-    # 构造极矮且靠近底边的文本框 (bh=14)，配长句译文迫使 9px 仍多行换行超高
-    cropped_png = _make_png(180, 90, bg_hex="#f8fafc", patches=[((12, 68, 90, 14), "#ff0000")])
-    long_block = OcrTextBlock(
-        bbox=(12, 68, 90, 14),
-        ocr_text="Short tag",
-        translated_text="这是一段在九像素最小字号下依然需要自动换行向下延伸不透明背景块防止截断的较长译文内容",
-        bg_color="#ffffff",
-        fg_color="#0f172a",
-    )
-    overlay = InplaceTranslateOverlay(
-        cropped_png=cropped_png,
-        screen_rect=(80, 80, 180, 90),
-        blocks=[long_block],
-        available_screen_rect=(0, 0, 1280, 800),
-    )
+    esc_closed: list[int] = []
+    ocr_overlay = _open_overlay((200, 700, 320, 90), "ocr", on_closed=lambda: esc_closed.append(1))
     try:
-        comp = overlay.render_composited_image()
-        assert len(overlay.last_rendered_patches) == 1
-        info = overlay.last_rendered_patches[0]
-        assert info.font_pixel_size == theme.OCR_MIN_FONT_PX == 9
-        assert info.extended_downward is True
-        assert info.patch_rect.height() > 14 + 4
-        assert comp.height() >= info.patch_rect.y() + info.patch_rect.height()
-
-        # 向下延伸出的区域同样必须是 alpha=255 的 100% 不透明像素
-        ext_y = info.patch_rect.y() + info.patch_rect.height() - 3
-        ext_px = comp.pixelColor(info.patch_rect.x() + 4, ext_y)
-        assert ext_px.alpha() == 255
+        ocr_overlay.set_result([block], "", "Settings")
+        assert ocr_overlay.menu.visible_labels() == ["复制"]
+        assert ocr_overlay.menu_placement == "above"
+        assert ocr_overlay.menu.geometry().bottom() < ocr_overlay.canvas_rect().top()
+        QTest.keyClick(ocr_overlay, Qt.Key.Key_Escape)
+        assert esc_closed == [1]
     finally:
-        overlay.close_silent()
-        overlay.deleteLater()
+        ocr_overlay.close_silent()
+        ocr_overlay.deleteLater()
 
-
-def test_inplace_overlay_toolbar_boundary_avoidance_copy_retry_and_close(
-    qapp: QApplication,
-) -> None:
-    png = _make_png(220, 70, bg_hex="#ffffff")
-    copied: list[str] = []
-    retried: list[bool] = []
-    closed: list[bool] = []
-
-    # 1. 屏幕中部 -> 工具栏位于画布下方 (below)
-    ov_mid = InplaceTranslateOverlay(
-        cropped_png=png,
-        screen_rect=(200, 160, 220, 70),
-        full_translated_text="全部译文内容",
-        full_ocr_text="Full OCR Source",
-        on_copy_text=lambda txt: copied.append(txt),
-        on_retry=lambda: retried.append(True),
-        on_closed=lambda: closed.append(True),
-        available_screen_rect=(0, 0, 1280, 800),
-        copy_feedback_ms=100,
-    )
+    tall = _open_overlay((200, 10, 320, 780), "ocr")
     try:
-        ov_mid.show()
-        assert ov_mid.toolbar_placement == "below"
-        assert ov_mid.toolbar_rect().top() > ov_mid.canvas_rect().bottom()
-        # 画布屏幕全局起点严格对齐选区 (200, 160)
-        assert ov_mid.x() + ov_mid.canvas_rect().x() == 200
-        assert ov_mid.y() + ov_mid.canvas_rect().y() == 160
-
-        # 点击 [复制译文]：触发回调、按钮文案变 "✓ 已复制译文"，到期恢复
-        QTest.mouseClick(ov_mid.copy_translated_button, Qt.MouseButton.LeftButton)
-        assert copied == ["全部译文内容"]
-        assert ov_mid.copy_translated_button.text() == "✓ 已复制译文"
-        QTest.qWait(150)
-        assert ov_mid.copy_translated_button.text() == "复制译文"
-
-        # 点击 [复制原文]
-        QTest.mouseClick(ov_mid.copy_ocr_button, Qt.MouseButton.LeftButton)
-        assert copied == ["全部译文内容", "Full OCR Source"]
-        assert ov_mid.copy_ocr_button.text() == "✓ 已复制原文"
-
-        # 加载态与错误态切换 + [重试] 回调
-        ov_mid.set_loading()
-        assert ov_mid.retry_button.isVisible() is False
-        assert ov_mid.copy_translated_button.isEnabled() is False
-
-        ov_mid.set_error("本地翻译服务连接超时")
-        assert ov_mid.retry_button.isVisible() is True
-        QTest.mouseClick(ov_mid.retry_button, Qt.MouseButton.LeftButton)
-        assert retried == [True]
-
-        # Esc 关闭并触发一次 on_closed
-        QTest.keyClick(ov_mid, Qt.Key.Key_Escape)
-        qapp.processEvents()
-        assert closed == [True]
+        assert tall.menu_placement == "inside"
+        assert tall.canvas_rect().contains(tall.menu.geometry())
     finally:
-        ov_mid.close_silent()
-        ov_mid.deleteLater()
-
-    # 2. 紧贴屏幕下边缘 -> 工具栏自动避让翻转到画布上方 (above)，且画布全局坐标不变
-    ov_bottom = InplaceTranslateOverlay(
-        cropped_png=png,
-        screen_rect=(200, 725, 220, 65),
-        full_translated_text="底部测试",
-        available_screen_rect=(0, 0, 1280, 800),
-    )
-    try:
-        assert ov_bottom.toolbar_placement == "above"
-        assert ov_bottom.toolbar_rect().bottom() < ov_bottom.canvas_rect().top()
-        assert ov_bottom.x() + ov_bottom.canvas_rect().x() == 200
-        assert ov_bottom.y() + ov_bottom.canvas_rect().y() == 725
-    finally:
-        ov_bottom.close_silent()
-        ov_bottom.deleteLater()
-
-    # 3. 选区跨越可用屏幕右边缘 (1200 + 120 = 1320 > 1280) 且工具栏宽于画布 -> 画布与工具栏均完整落于窗口内不裁切
-    narrow_png = _make_png(120, 60, bg_hex="#ffffff")
-    ov_right_cross = InplaceTranslateOverlay(
-        cropped_png=narrow_png,
-        screen_rect=(1200, 100, 120, 60),
-        full_translated_text="右边缘跨界防裁切验证",
-        available_screen_rect=(0, 0, 1280, 800),
-    )
-    try:
-        win_bounds = QRect(0, 0, ov_right_cross.width(), ov_right_cross.height())
-        assert win_bounds.contains(ov_right_cross.canvas_rect())
-        assert win_bounds.contains(ov_right_cross.toolbar_rect())
-        assert ov_right_cross.canvas_rect().right() < ov_right_cross.width()
-        assert ov_right_cross.canvas_rect().x() + ov_right_cross.canvas_rect().width() <= ov_right_cross.width()
-        assert ov_right_cross.x() + ov_right_cross.canvas_rect().x() == 1200
-        assert ov_right_cross.y() + ov_right_cross.canvas_rect().y() == 100
-    finally:
-        ov_right_cross.close_silent()
-        ov_right_cross.deleteLater()
-
-    # 4. 选区跨越可用屏幕左边缘 (-30 < 0) -> 画布与工具栏同样不越界裁切
-    ov_left_cross = InplaceTranslateOverlay(
-        cropped_png=narrow_png,
-        screen_rect=(-30, 100, 120, 60),
-        full_translated_text="左边缘跨界防裁切验证",
-        available_screen_rect=(0, 0, 1280, 800),
-    )
-    try:
-        left_bounds = QRect(0, 0, ov_left_cross.width(), ov_left_cross.height())
-        assert left_bounds.contains(ov_left_cross.canvas_rect())
-        assert left_bounds.contains(ov_left_cross.toolbar_rect())
-        assert ov_left_cross.x() + ov_left_cross.canvas_rect().x() == -30
-    finally:
-        ov_left_cross.close_silent()
-        ov_left_cross.deleteLater()
+        tall.close_silent()
+        tall.deleteLater()
 
 
 # ---------------------------------------------------------------------------

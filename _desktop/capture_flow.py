@@ -1,12 +1,10 @@
-"""截屏原位翻译（Ctrl+Alt+X）与纯 OCR 自动复制（Ctrl+Alt+O）统一业务编排。
+"""截屏原位翻译（Ctrl+Alt+X）与纯 OCR（Ctrl+Alt+O）统一业务编排。
 
-两大入口 100% 复用同一套「直接透明全屏红十字框选 → 框选后仅截取选中区域」链路：
-- 按下快捷键：立即弹出透明全屏 `_ui_desktop.RedCrosshairSelector`（不预先全屏截图、零跳动、零闪屏；
-  若正在框选或抓屏中则直接忽略重复触发，防长按连发风暴）；
-- `trigger_translate()`：松手关闭框选器 → 短暂等待合成器卸载遮罩 → 仅截取选区 PNG →
-  打开 `InplaceTranslateOverlay(loading=True)` → 后台 `POST /api/v1/ocr-inplace` 渲染原位背景遮挡译文；
-- `trigger_ocr()`：松手关闭框选器 → 仅截取选区 PNG → 后台 `POST /api/v1/ocr-inplace(target_lang="raw")` →
-  自动写入剪贴板并在 UI 线程展示成功字数 Toast（失败可见报错并落日志）。
+两个入口共用同一条链路：透明全屏红十字框选（正在框选或截屏时忽略重复触发）→ 松手后只截选区 →
+打开同一个原位浮窗（mode=translate / ocr，创建即加载态）→ 后台 `POST /api/v1/ocr-inplace`
+（OCR 模式 target_lang="raw"）→ 浮窗显示结果，或显示失败原因 +「重试」。
+浮窗自己显示加载、结果与失败，本流程不向语音底栏发 busy/idle；只有没有浮窗可显示的失败（框选器打不开、
+截屏失败、浮窗打不开）才发 status.error。复制由浮窗菜单发起，`_handle_copy_text` 返回是否写入成功，浮窗如实显示。
 """
 from __future__ import annotations
 
@@ -16,10 +14,11 @@ from collections.abc import Callable
 from typing import Any, Literal, Protocol
 
 from _contracts import ErrorCode, OcrTextBlock
-from _desktop.api import ApiError, api_error_code, api_error_reason
+from _desktop.api import api_error_code, api_error_reason
 from _desktop.status import PlatformStatus
 
 RectTuple = tuple[int, int, int, int]
+CaptureMode = Literal["translate", "ocr"]
 DEFAULT_CAPTURE_DELAY_S = 0.08
 
 
@@ -30,16 +29,13 @@ class SelectorHandle(Protocol):
 class OverlayHandle(Protocol):
     def set_loading(self) -> None: ...
 
-    def set_result(
-        self,
-        blocks: list[OcrTextBlock],
-        full_translated_text: str = "",
-        full_ocr_text: str = "",
-    ) -> None: ...
+    def set_result(self, blocks: list[OcrTextBlock], full_translated_text: str, full_ocr_text: str) -> None: ...
 
-    def set_error(self, message: str) -> None: ...
+    def set_error(self, message: str) -> None: ...  # 只传原因；浮窗按模式自带「翻译失败：/识别失败：」前缀
 
-    def close(self) -> Any: ...
+    def close(self) -> Any: ...  # 关闭并回调 on_closed
+
+    def close_silent(self) -> None: ...  # 关闭不回调
 
 
 OpenSelector = Callable[
@@ -54,8 +50,9 @@ class OpenInplaceOverlay(Protocol):
         cropped_png: bytes,
         screen_rect: RectTuple,
         *,
-        loading: bool,
-        on_copy_text: Callable[[str], None],
+        mode: CaptureMode,
+        virtual_rect: RectTuple | None,
+        on_copy_text: Callable[[str], bool],  # 返回是否写入成功
         on_retry: Callable[[], None],
         on_closed: Callable[[], None],
     ) -> OverlayHandle: ...
@@ -84,10 +81,10 @@ def _parse_blocks(raw_blocks: Any) -> list[OcrTextBlock]:
 
 
 class CaptureFlow:
-    """截屏原位翻译与纯 OCR 的共享业务编排器（先透明框选，再仅截取选区画面）。"""
+    """截屏原位翻译与纯 OCR 的共享业务编排器（先透明框选，再仅截取选区画面，结果进同一个浮窗）。"""
 
     TRANSLATE_MODE_LABEL = "截屏原位翻译"
-    OCR_MODE_LABEL = "纯 OCR 识别 · 自动复制"
+    OCR_MODE_LABEL = "纯 OCR 识别"
 
     def __init__(
         self,
@@ -96,7 +93,6 @@ class CaptureFlow:
         open_selector: OpenSelector,
         open_inplace_overlay: OpenInplaceOverlay,
         copy_clipboard: Callable[[str], bool],
-        notify_toast: Callable[[str, str], None],
         api: Any,
         status: PlatformStatus,
         invoke_ui: Callable[[Callable[[], None]], None],
@@ -109,7 +105,6 @@ class CaptureFlow:
         self.open_selector = open_selector
         self.open_inplace_overlay = open_inplace_overlay
         self.copy_clipboard = copy_clipboard
-        self.notify_toast = notify_toast
         self.api = api
         self.status = status
         self.invoke_ui = invoke_ui
@@ -127,19 +122,19 @@ class CaptureFlow:
         self._capturing = False
 
     def trigger_translate(self) -> None:
-        """Ctrl+Alt+X：复用红十字框选器，松手后仅截选区并原位渲染背景遮挡译文浮窗。"""
+        """Ctrl+Alt+X：框选后在原位浮窗显示译文。"""
         self._start_capture("translate", self.TRANSLATE_MODE_LABEL)
 
     def trigger_ocr(self) -> None:
-        """Ctrl+Alt+O：复用红十字框选器，松手后仅截选区做纯 OCR 并自动写入剪贴板。"""
+        """Ctrl+Alt+O：框选后在同一个原位浮窗显示识别出的原文（不自动复制，由浮窗菜单复制）。"""
         self._start_capture("ocr", self.OCR_MODE_LABEL)
 
     def overlay_active(self) -> bool:
         with self._lock:
             return self._selector is not None or self._overlay is not None or self._selector_opening
 
-    def close_overlay(self, *, reset_status: bool = True) -> bool:
-        """Esc / 任意键 / 新触发：关闭活跃选区或原位浮窗并失效在途后台请求。"""
+    def close_overlay(self) -> bool:
+        """Esc / 退出：关闭活跃选区或原位浮窗并失效在途后台请求。"""
         with self._lock:
             selector = self._selector
             overlay = self._overlay
@@ -164,15 +159,13 @@ class CaptureFlow:
                 _close_handle(overlay)
 
             self.invoke_ui(_close_ui)
-        if had_active and reset_status:
-            self.status.idle()
         return False
 
     def _is_current(self, gen: int) -> bool:
         with self._lock:
             return self._generation == gen
 
-    def _start_capture(self, mode: Literal["translate", "ocr"], mode_label: str) -> None:
+    def _start_capture(self, mode: CaptureMode, mode_label: str) -> None:
         with self._lock:
             # 根治防风暴：正在打开框选器、正在拖拽或正在截取选区时直接忽略重复触发
             if self._selector is not None or self._selector_opening or self._capturing:
@@ -197,7 +190,6 @@ class CaptureFlow:
                         return
                     self._selector = None
                     self._selector_opening = False
-                self.status.idle()
 
             def _on_selected(rect: RectTuple) -> None:
                 with self._lock:
@@ -206,7 +198,6 @@ class CaptureFlow:
                     self._selector = None
                     self._selector_opening = False
                     self._capturing = True
-                self.status.busy()
                 self._spawn(lambda: self._capture_and_process(gen, mode, rect, vrect))
 
             try:
@@ -241,7 +232,7 @@ class CaptureFlow:
     def _capture_and_process(
         self,
         gen: int,
-        mode: Literal["translate", "ocr"],
+        mode: CaptureMode,
         rect: RectTuple,
         virtual_rect: RectTuple | None,
     ) -> None:
@@ -262,57 +253,50 @@ class CaptureFlow:
                 if self._generation == gen:
                     self._capturing = False
 
-        if mode == "translate":
-            with self._lock:
-                if self._generation != gen:
-                    return
-                self._overlay_opening = True
-            self.invoke_ui(lambda: self._handle_translate_selected(gen, png, rect))
-        else:
-            if not self._is_current(gen):
+        with self._lock:
+            if self._generation != gen:
                 return
-            self._run_ocr_worker(gen, png)
+            self._overlay_opening = True
+        self.invoke_ui(lambda: self._open_overlay(gen, mode, png, rect, virtual_rect))
 
-    def _handle_translate_selected(self, gen: int, cropped_png: bytes, rect: RectTuple) -> None:
+    def _open_overlay(
+        self, gen: int, mode: CaptureMode, cropped_png: bytes, rect: RectTuple, virtual_rect: RectTuple | None
+    ) -> None:
         if not self._is_current(gen):
             return
         overlay_box: dict[str, OverlayHandle | None] = {"handle": None}
 
         def _on_closed() -> None:
-            should_idle = False
             with self._lock:
                 if self._generation == gen and self._overlay is overlay_box["handle"]:
                     self._overlay = None
                     self._generation += 1
-                    should_idle = True
-            if should_idle:
-                self.status.idle()
 
         def _on_retry() -> None:
             handle = overlay_box["handle"]
             if handle is None or not self._is_current(gen):
                 return
             handle.set_loading()
-            self.status.busy()
-            self._spawn(lambda: self._run_inplace_translate(gen, handle, cropped_png))
+            self._spawn(lambda: self._run_inplace(gen, mode, handle, cropped_png))
 
         try:
             overlay = self.open_inplace_overlay(
                 cropped_png,
                 rect,
-                loading=True,
+                mode=mode,
+                virtual_rect=virtual_rect,
                 on_copy_text=self._handle_copy_text,
                 on_retry=_on_retry,
                 on_closed=_on_closed,
             )
         except Exception as exc:
             msg = api_error_reason(exc)
-            print(f"[capture] 原位译文浮窗无法打开: {msg}", flush=True)
+            print(f"[capture] 原位浮窗无法打开: {msg}", flush=True)
             with self._lock:
                 if self._generation == gen:
                     self._overlay_opening = False
             if self._is_current(gen):
-                self.status.error(ErrorCode.dependency_failed, f"原位译文浮窗无法打开：{msg}")
+                self.status.error(ErrorCode.dependency_failed, f"原位浮窗无法打开：{msg}")
             return
 
         overlay_box["handle"] = overlay
@@ -327,83 +311,44 @@ class CaptureFlow:
             _close_handle(overlay)
             return
 
-        self._spawn(lambda: self._run_inplace_translate(gen, overlay, cropped_png))
+        self._spawn(lambda: self._run_inplace(gen, mode, overlay, cropped_png))
 
-    def _run_inplace_translate(self, gen: int, overlay: OverlayHandle, cropped_png: bytes) -> None:
+    def _run_inplace(self, gen: int, mode: CaptureMode, overlay: OverlayHandle, cropped_png: bytes) -> None:
+        """后台：识别（翻译模式再翻译）后把结果或失败原因交给浮窗；浮窗已关或已被新一次截屏取代则丢弃。"""
         try:
-            cfg = self.api.get_config() or {}
-            target_lang = str(cfg.get("translate_target_lang") or "zh").strip() or "zh"
+            target_lang = self._target_lang() if mode == "translate" else "raw"
             resp = self.api.ocr_inplace(cropped_png, target_lang=target_lang)
-            blocks = _parse_blocks(resp.get("blocks"))
-            full_text = str(resp.get("text") or "")
-            full_ocr = str(resp.get("ocr_text") or "")
+            blocks = _parse_blocks(resp["blocks"])
+            full_text, full_ocr = str(resp["text"]), str(resp["ocr_text"])
         except Exception as exc:
             msg = api_error_reason(exc)
-            code = api_error_code(exc, ErrorCode.translate_failed)
-            print(f"[capture] 截屏原位翻译失败 ({code.value}): {msg}", flush=True)
-            if self._is_current(gen):
-                def _apply_err() -> None:
-                    with self._lock:
-                        active = self._generation == gen and self._overlay is overlay
-                    if active:
-                        overlay.set_error(msg)
-
-                self.invoke_ui(_apply_err)
-                self.status.error(code, f"截屏原位翻译失败：{msg}")
+            default = ErrorCode.translate_failed if mode == "translate" else ErrorCode.ocr_failed
+            kind = "翻译" if mode == "translate" else "识别"
+            print(f"[capture] 原位{kind}失败 ({api_error_code(exc, default).value}): {msg}", flush=True)
+            self._apply_to_overlay(gen, overlay, lambda: overlay.set_error(msg))
             return
+        self._apply_to_overlay(gen, overlay, lambda: overlay.set_result(blocks, full_text, full_ocr))
 
+    def _target_lang(self) -> str:
+        cfg = self.api.get_config() or {}
+        return str(cfg.get("translate_target_lang") or "zh").strip() or "zh"
+
+    def _apply_to_overlay(self, gen: int, overlay: OverlayHandle, update: Callable[[], None]) -> None:
         if not self._is_current(gen):
             return
 
-        def _apply_ok() -> None:
+        def _apply() -> None:
             with self._lock:
                 active = self._generation == gen and self._overlay is overlay
             if active:
-                overlay.set_result(blocks, full_text, full_ocr)
+                update()
 
-        self.invoke_ui(_apply_ok)
-        self.status.idle()
+        self.invoke_ui(_apply)
 
-    def _run_ocr_worker(self, gen: int, cropped_png: bytes) -> None:
+    def _handle_copy_text(self, text: str) -> bool:
+        """浮窗菜单复制：返回是否写入成功（浮窗显示「✓ 已复制」或「复制失败」），不发 status 事件。"""
         try:
-            resp = self.api.ocr_inplace(cropped_png, target_lang="raw")
-            ocr_text = str(resp.get("ocr_text") or resp.get("text") or "").strip()
-            if not ocr_text:
-                raise ApiError(503, ErrorCode.ocr_failed.value, "未识别到文字")
+            return bool(self.copy_clipboard(text))
         except Exception as exc:
-            msg = api_error_reason(exc)
-            code = api_error_code(exc, ErrorCode.ocr_failed)
-            print(f"[capture] OCR 识别失败 ({code.value}): {msg}", flush=True)
-            if self._is_current(gen):
-                self.status.error(code, f"OCR 识别失败：{msg}")
-            return
-
-        if not self._is_current(gen):
-            return
-
-        copied = False
-        try:
-            copied = bool(self.copy_clipboard(ocr_text))
-        except Exception as exc:
-            msg = api_error_reason(exc)
-            print(f"[capture] OCR 剪贴板写入异常: {msg}", flush=True)
-            self.status.error(ErrorCode.dependency_failed, f"OCR 文本写入剪贴板失败：{msg}")
-            return
-
-        if not copied:
-            print("[capture] OCR 剪贴板写入返回失败", flush=True)
-            self.status.error(ErrorCode.dependency_failed, "OCR 文本写入剪贴板失败")
-            return
-
-        self.status.idle()
-        toast_msg = f"已复制 OCR 文本（{len(ocr_text)} 字）"
-        self.invoke_ui(lambda: self.notify_toast(toast_msg, "ok"))
-
-    def _handle_copy_text(self, text: str) -> None:
-        try:
-            ok = bool(self.copy_clipboard(text))
-        except Exception as exc:
-            self.status.error(ErrorCode.dependency_failed, f"剪贴板写入失败：{api_error_reason(exc)}")
-            return
-        if not ok:
-            self.status.error(ErrorCode.dependency_failed, "剪贴板写入失败")
+            print(f"[capture] 剪贴板写入异常: {api_error_reason(exc)}", flush=True)
+            return False

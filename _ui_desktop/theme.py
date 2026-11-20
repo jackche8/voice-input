@@ -47,11 +47,23 @@ WARN_SOFT_RGBA = (210, 153, 34, 46)
 ERROR_HEX = "#f85149"
 ERROR_SOFT_RGBA = (248, 81, 73, 46)
 
-# 原位遮挡默认回退前背景色（均按 alpha=255 100% 不透明使用）
-DEFAULT_BLOCK_BG_HEX = "#ffffff"
-DEFAULT_BLOCK_FG_HEX = "#0f172a"
+# 原位识别 / 翻译浮窗（UI 验收标准 docs/design/v3.3/overlay-a.html）
+DEFAULT_BLOCK_BG_HEX = "#ffffff"  # 截图含透明像素时垫底的不透明底色
 OVERLAY_OUTLINE_HEX = ACCENT_HEX
-OVERLAY_BANNER_BG_RGBA = (13, 17, 23, 224)
+OVERLAY_PATCH_ALPHA = 219  # 贴片 = 采样底色 × 86%，原文仍隐约可见
+OVERLAY_PATCH_PAD_X_PX = 4
+OVERLAY_PATCH_PAD_Y_PX = 3
+OVERLAY_PATCH_RADIUS_PX = 3
+OVERLAY_OUTLINE_WIDTH_PX = 1.5
+OVERLAY_DASH_PATTERN_PX = (6.0, 4.0)
+OVERLAY_ANTS_SPEED_PX_S = 25.0  # 加载中虚线外框流动速度
+OVERLAY_OPEN_FADE_MS = 140
+OVERLAY_RESULT_FADE_MS = 180
+OVERLAY_MENU_GAP_PX = 8
+OVERLAY_MENU_INSIDE_PAD_PX = 6
+OVERLAY_FRAME_MS = 16
+OVERLAY_SPINNER_PX = 11
+OVERLAY_SPIN_PERIOD_MS = 900
 
 # ---------------------------------------------------------------------------
 # 3. 语音一体底栏（胶囊 / 字幕条 / 确认卡片三种形态）颜色令牌
@@ -136,8 +148,10 @@ FS_LG = 16
 FS_CAPTION = 19
 
 OCR_MIN_FONT_PX = 9
-OCR_BASE_MIN_FONT_PX = 11
-OCR_HEIGHT_FONT_RATIO = 0.72
+OCR_REFERENCE_FONT_PX = 100  # 换算原字号与基线时测量行内文字紧框所用的参考字号
+OCR_FIT_SPACING_MIN = -0.1  # 与原行文字相同的行按原行宽调字距的范围（× 字号）
+OCR_FIT_SPACING_MAX = 0.3
+OCR_SINGLE_LINE_PITCH_RATIO = 1.5  # 单行块需要下延时的行距（× 行高）
 
 RADIUS_SM = 6
 RADIUS_MD = 10
@@ -179,6 +193,24 @@ def make_font(
     return font
 
 
+def resolve_virtual_geometry(
+    override: tuple[int, int, int, int] | None = None,
+) -> tuple[int, int, int, int]:
+    """全屏透明窗口的虚拟桌面矩形 (x, y, w, h)：显式注入值优先，离屏环境取 1920×1080。"""
+    if override is not None:
+        vx, vy, vw, vh = (int(v) for v in override)
+        if vw <= 0 or vh <= 0:
+            raise ValueError(f"virtual_geometry 宽高必须大于 0，收到 {override!r}")
+        return vx, vy, vw, vh
+    if (QGuiApplication.platformName() or "").lower() not in {"offscreen", "minimal"}:
+        screen = QGuiApplication.primaryScreen()
+        if screen is not None:
+            vg = screen.virtualGeometry()
+            if vg.width() > 0 and vg.height() > 0:
+                return vg.x(), vg.y(), vg.width(), vg.height()
+    return 0, 0, 1920, 1080
+
+
 def resolve_available_screen_rect(
     override: tuple[int, int, int, int] | None = None,
     anchor: QPoint | None = None,
@@ -198,14 +230,14 @@ def resolve_available_screen_rect(
 
 
 def float_bar_stylesheet() -> str:
-    """悬浮工具栏与确认卡片共用的精简 QSS（全部引用本模块令牌）。"""
+    """原位浮窗迷你菜单 QSS（overlay-a.html 迷你菜单；全部引用本模块令牌）。"""
     return (
         f"QFrame#oviFloatBar {{"
         f"  background-color: {SURFACE_HEX};"
         f"  border: 1px solid {BORDER_HEX};"
         f"  border-radius: {RADIUS_MD}px;"
         f"}}"
-        f"QLabel#oviFloatStatus {{"
+        f"QLabel#oviFloatStatus, QLabel#oviFloatError {{"
         f"  color: {ACCENT_HEX};"
         f"  font-size: {FS_XS}px;"
         f"  font-weight: 600;"
@@ -214,30 +246,36 @@ def float_bar_stylesheet() -> str:
         f"}}"
         f"QLabel#oviFloatError {{"
         f"  color: {ERROR_HEX};"
-        f"  font-size: {FS_XS}px;"
-        f"  font-weight: 600;"
+        f"}}"
+        f"QLabel#oviFloatHint {{"
+        f"  color: {TEXT_MUTED_HEX};"
+        f"  font-size: {FS_MONO_TAG}px;"
         f"  background: transparent;"
         f"  border: none;"
         f"}}"
+        f"QFrame#oviFloatDivider {{"
+        f"  background-color: {BORDER_HEX};"
+        f"  border: none;"
+        f"}}"
         f"QPushButton {{"
-        f"  background-color: {SURFACE_2_HEX};"
+        f"  background-color: transparent;"
         f"  color: {TEXT_PRIMARY_HEX};"
-        f"  border: 1px solid {BORDER_HEX};"
+        f"  border: 1px solid transparent;"
         f"  border-radius: {RADIUS_SM}px;"
-        f"  padding: 3px 9px;"
+        f"  padding: 3px 10px;"
         f"  font-size: {FS_XS}px;"
         f"}}"
         f"QPushButton:hover {{"
         f"  border-color: {ACCENT_HEX};"
         f"  color: {ACCENT_HEX};"
         f"}}"
-        f"QPushButton:pressed {{"
-        f"  background-color: {ACCENT_HEX};"
-        f"  border-color: {ACCENT_HEX};"
-        f"  color: {BG_DARK_HEX};"
-        f"}}"
         f"QPushButton:disabled {{"
         f"  color: {TEXT_MUTED_HEX};"
-        f"  border-color: {BORDER_HEX};"
+        f"}}"
+        f'QPushButton[feedback="ok"] {{'
+        f"  color: {OK_HEX};"
+        f"}}"
+        f'QPushButton[feedback="fail"] {{'
+        f"  color: {ERROR_HEX};"
         f"}}"
     )

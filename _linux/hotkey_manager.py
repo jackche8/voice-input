@@ -4,7 +4,8 @@ Wayland：evdev 必需（按下区间的唯一来源）；门户 GlobalShortcuts
 门户不可用或失败时 evdev 回退为自行判定开始（按配置绑定）。XInput 只做 XTEST 卡键清理，不进状态机。
 X11：XGrabKey 独占；失败回退 evdev + XInput（只收 XTEST 来源）。
 组件失败（evdev 打不开、实际绑定解析不了、事件源意外退出、全部后端不可用）只经 on_error 上报，不抛异常，
-守护进程其余功能照常；之后恢复正常时 on_error(None)。
+守护进程其余功能照常。失败按种类分别记录、合并成一条原因上报：只有「实际绑定解析不了」会随改键恢复，
+其余为终态（本进程内不再恢复）；全部恢复时 on_error(None)。
 """
 from __future__ import annotations
 
@@ -18,6 +19,9 @@ from _linux.hotkey_portal import PortalGlobalShortcutsGrabber, normalize_portal_
 from _linux.hotkey_state import ACTIONS, Action, HotkeyPressState
 from _linux.hotkey_x11 import HotkeyGrabber
 from _linux.hotkey_xinput import XInputHotkeyGrabber
+
+# 组件失败种类。BINDINGS 随 GNOME 改键重算、可恢复；其余为终态
+EVDEV_UNAVAILABLE, BINDINGS, SOURCE_EXITED, NO_BACKEND = "evdev_unavailable", "bindings", "source_exited", "no_backend"
 
 
 class HotkeyManager:
@@ -36,7 +40,11 @@ class HotkeyManager:
     ) -> None:
         self.ctx = ctx
         self.on_error = on_error
-        self.dispatcher = HotkeyDispatcher(ctx, HotkeyPressState(), on_error=on_error)
+        self._failures: dict[str, str] = {}
+        self._reported: str | None = None
+        self.dispatcher = HotkeyDispatcher(
+            ctx, HotkeyPressState(), on_error=lambda reason: self._report(SOURCE_EXITED, reason)
+        )
         self._evdev_factory = evdev_factory
         self._portal_factory = portal_factory
         self._portal_available = portal_available
@@ -70,7 +78,7 @@ class HotkeyManager:
         try:
             self._evdev = self._evdev_factory(self.ctx, self.dispatcher)
         except Exception as exc:
-            self._fail(f"Wayland 下快捷键需要读取键盘设备（evdev），当前不可用：{exc}")
+            self._report(EVDEV_UNAVAILABLE, f"Wayland 下快捷键需要读取键盘设备（evdev），当前不可用：{exc}")
             return
         self._evdev.start()
         print("  快捷键: evdev 已启动（按下区间来源）", flush=True)
@@ -135,7 +143,7 @@ class HotkeyManager:
         self.dispatcher.voice_hotkey = canonical.get("voice") or self.ctx.bindings.voice
 
     def _install_combos(self, hotkeys: Mapping[Action, str]) -> None:
-        """解析并下发给 evdev：能解析的照常生效；有解析不了的动作就按组件失败上报，全部可用时报恢复。"""
+        """解析并下发给 evdev：能解析的照常生效；有解析不了的动作就按组件失败上报，全部可用时撤销这一种失败。"""
         combos: dict[Action, dict] = {}
         failed: list[str] = []
         for action, hotkey in hotkeys.items():
@@ -147,10 +155,7 @@ class HotkeyManager:
             except ValueError as exc:
                 failed.append(f"{action}={hotkey!r}（{exc}）")
         self._evdev.set_combos(combos)
-        if failed:
-            self._fail("快捷键实际绑定无法解析为键码：" + "；".join(failed))
-        else:
-            self.on_error(None)
+        self._report(BINDINGS, "快捷键实际绑定无法解析为键码：" + "；".join(failed) if failed else None)
 
     def _configured(self, action: Action) -> str:
         return (getattr(self.ctx.bindings, action) or "").strip()
@@ -188,15 +193,23 @@ class HotkeyManager:
             self._xinput.start()
             names.append("xinput")
         if not names:
-            self._fail("所有快捷键抓取方式均不可用（XGrabKey、evdev、XInput）")
+            self._report(NO_BACKEND, "所有快捷键抓取方式均不可用（XGrabKey、evdev、XInput）")
             return
         self.backend_name = "+".join(names)
         print("  快捷键: 启用观察器回退（按键未独占，可能仍会传给应用）", flush=True)
 
     # ---- 共用 -------------------------------------------------------------
-    def _fail(self, reason: str) -> None:
-        print(f"  快捷键: [ERROR] {reason}", flush=True)
-        self.on_error(reason)
+    def _report(self, kind: str, reason: str | None) -> None:
+        """记录或撤销一种失败；合并后的原因有变化才上报（status 负责保留与重连重发）。"""
+        if reason is None:
+            self._failures.pop(kind, None)
+        else:
+            print(f"  快捷键: [ERROR] {reason}", flush=True)
+            self._failures[kind] = reason
+        combined = "；".join(self._failures.values()) or None
+        if combined != self._reported:
+            self._reported = combined
+            self.on_error(combined)
 
     def cleanup(self) -> None:
         if self._closed:
