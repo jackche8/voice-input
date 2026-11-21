@@ -161,9 +161,11 @@
     );
 
     /* WCAG 2.1 运行时计算样式对比度校验辅助函数 */
-    function parseRgb(str) {
-      const m = String(str || "").match(/rgba?\((\d+),\s*(\d+),\s*(\d+)/);
-      return m ? [Number(m[1]), Number(m[2]), Number(m[3])] : null;
+    function parseColor(str) {
+      const m = String(str || "").match(/^rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)(?:\s*,\s*([0-9.]+))?\s*\)$/);
+      if (!m) return null;
+      const alpha = m[4] === undefined ? 1 : Number(m[4]);
+      return { rgb: [Number(m[1]), Number(m[2]), Number(m[3])], alpha: alpha };
     }
     function lum(rgb) {
       const c = rgb.map(function (v) {
@@ -172,14 +174,17 @@
       });
       return 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
     }
+    function pairRatio(fgStr, bgStr) {
+      const fg = parseColor(fgStr);
+      const bg = parseColor(bgStr);
+      if (!fg || !bg || fg.alpha < 1 || bg.alpha < 1) return 0;
+      const l1 = lum(fg.rgb);
+      const l2 = lum(bg.rgb);
+      return (Math.max(l1, l2) + 0.05) / (Math.min(l1, l2) + 0.05);
+    }
     function wcagRatio(el) {
       const cs = window.getComputedStyle(el);
-      const fg = parseRgb(cs.color);
-      const bg = parseRgb(cs.backgroundColor);
-      if (!fg || !bg) return 0;
-      const l1 = lum(fg);
-      const l2 = lum(bg);
-      return (Math.max(l1, l2) + 0.05) / (Math.min(l1, l2) + 0.05);
+      return pairRatio(cs.color, cs.backgroundColor);
     }
 
     /* ---------- 2. 内置设置面板状态与 6 子标签验收 ---------- */
@@ -276,6 +281,76 @@
     shotSelect.value = "en";
     shotSelect.dispatchEvent(new Event("change", { bubbles: true }));
     assert(targetLangChanges.length === 1 && targetLangChanges[0] === "en", "截图翻译目标语言切换走 onChangeTargetLang 回调");
+
+    /* 暗/亮双主题下校验全站 3 处 <select> 与 <option> 的 colorScheme 及主题对比度 */
+    function readSelectMetrics(el) {
+      if (!el || !el.options || !el.options.length) return null;
+      const cs = window.getComputedStyle(el);
+      const ocs = window.getComputedStyle(el.options[0]);
+      const bgParsed = parseColor(cs.backgroundColor);
+      const optBgParsed = parseColor(ocs.backgroundColor);
+      return {
+        colorScheme: cs.colorScheme,
+        bg: cs.backgroundColor,
+        fg: cs.color,
+        bgOpaque: !!bgParsed && bgParsed.alpha === 1,
+        bgLum: bgParsed ? lum(bgParsed.rgb) : -1,
+        ratio: pairRatio(cs.color, cs.backgroundColor),
+        optBg: ocs.backgroundColor,
+        optFg: ocs.color,
+        optBgOpaque: !!optBgParsed && optBgParsed.alpha === 1,
+        optBgLum: optBgParsed ? lum(optBgParsed.rgb) : -1,
+        optRatio: pairRatio(ocs.color, ocs.backgroundColor)
+      };
+    }
+    function snapshotAllSelects() {
+      homeRoot.querySelector('button[data-panel="translate"]').click();
+      const tr = readSelectMetrics(homeRoot.querySelector('select[data-role="translate-target-lang"]'));
+      homeRoot.querySelector('button[data-panel="ocr"]').click();
+      const ocr = readSelectMetrics(homeRoot.querySelector('select[data-role="ocr-target-lang"]'));
+      homeRoot.querySelector('button[data-panel="setup"]').click();
+      home.setSetupTab("shot");
+      const shot = readSelectMetrics(setupPane.querySelector("select.field"));
+      return [
+        { name: "工作台翻译目标语言", m: tr },
+        { name: "工作台 OCR 模式", m: ocr },
+        { name: "设置页翻译目标语言", m: shot }
+      ];
+    }
+    assert(document.documentElement.dataset.theme === "dark", "双态 select 校验前处于暗色主题");
+    const darkSelects = snapshotAllSelects();
+    homeRoot.querySelector('button[data-action="toggle-theme"]').click();
+    home.setState({ theme: document.documentElement.dataset.theme });
+    assert(document.documentElement.dataset.theme === "light", "双态 select 校验已切换至亮色主题");
+    const lightSelects = snapshotAllSelects();
+    for (let si = 0; si < darkSelects.length; si += 1) {
+      const label = darkSelects[si].name;
+      const dm = darkSelects[si].m;
+      const lm = lightSelects[si].m;
+      assert(
+        !!dm && dm.colorScheme === "dark" && dm.bgOpaque && dm.bgLum < 0.1 && dm.ratio >= 4.5,
+        "暗色主题下" + label + " <select> colorScheme=dark 且深底高对比可读"
+      );
+      assert(
+        !!dm && dm.optBgOpaque && dm.optBgLum < 0.1 && dm.optRatio >= 4.5,
+        "暗色主题下" + label + " <option> 深底不透明且对比度 ≥ 4.5:1"
+      );
+      assert(
+        !!lm && lm.colorScheme === "light" && lm.bgOpaque && lm.bgLum > 0.8 && lm.ratio >= 4.5,
+        "亮色主题下" + label + " <select> colorScheme=light 且浅底高对比可读"
+      );
+      assert(
+        !!lm && lm.optBgOpaque && lm.optBgLum > 0.8 && lm.optRatio >= 4.5,
+        "亮色主题下" + label + " <option> 浅底不透明且对比度 ≥ 4.5:1"
+      );
+      assert(
+        !!dm && !!lm && dm.bg !== lm.bg && dm.fg !== lm.fg && dm.optBg !== lm.optBg && dm.optFg !== lm.optFg,
+        label + " <select>/<option> 背景色与文字色随暗/亮主题同步切换"
+      );
+    }
+    homeRoot.querySelector('button[data-action="toggle-theme"]').click();
+    home.setState({ theme: document.documentElement.dataset.theme });
+    assert(document.documentElement.dataset.theme === "dark", "双态 select 校验后恢复暗色主题");
 
     home.setSetupTab("api");
     const apiOnText = setupPane.innerText;

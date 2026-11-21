@@ -1,5 +1,6 @@
 /* 统一设计令牌与公共原子（方案 C Studio C 浅/深双主题）。颜色、字体、间距只来自这里的变量。 */
 :root {
+  color-scheme: light;
   --font-sans: "Noto Sans CJK SC", "PingFang SC", "Microsoft YaHei", system-ui, -apple-system, sans-serif;
   --font-mono: "JetBrains Mono", "Noto Sans Mono CJK SC", "SFMono-Regular", Consolas, ui-monospace, monospace;
   --fs-xs: 12px;
@@ -57,6 +58,7 @@
 }
 
 [data-theme="light"] {
+  color-scheme: light;
   --c-bg: #f4f6fa;
   --c-rail: #eef1f6;
   --c-surface: #ffffff;
@@ -83,6 +85,7 @@
 }
 
 [data-theme="dark"] {
+  color-scheme: dark;
   --c-bg: #0d1117;
   --c-rail: #131820;
   --c-surface: #161b22;
@@ -234,6 +237,23 @@ body {
 textarea.field { resize: vertical; line-height: 1.6; }
 .field.key { width: 160px; text-align: center; font-family: var(--font-mono); }
 select.field { width: auto; min-width: 160px; }
+select {
+  color-scheme: inherit;
+  background-color: var(--c-surface);
+  color: var(--c-text);
+}
+select:disabled {
+  background-color: var(--c-bg);
+  color: var(--c-muted);
+}
+select option,
+select optgroup {
+  background-color: var(--c-surface);
+  color: var(--c-text);
+}
+select option:disabled {
+  color: var(--c-muted);
+}
 
 .rows {
   border: 1px solid var(--c-border);

@@ -212,6 +212,126 @@ if (!failures.some((m) => m.includes("对比度") || m.includes("--qr-bg") || m.
   pass("theme.css / studio.css / voice.css 双主题按钮与二维码静区 WCAG 对比度全部 ≥ 4.5:1");
 }
 
+/* 暗/亮双主题 color-scheme 与原生 select / option / optgroup 主题变量配色核验（先剥注释再解析顶层规则块） */
+function stripCssComments(cssText) {
+  return String(cssText || "").replace(/\/\*[\s\S]*?\*\//g, "");
+}
+function parseTopLevelCssRules(cssText) {
+  const clean = stripCssComments(cssText);
+  const rules = [];
+  let i = 0;
+  const n = clean.length;
+  while (i < n) {
+    const open = clean.indexOf("{", i);
+    if (open === -1) break;
+    const prelude = clean.slice(i, open).trim();
+    let depth = 1;
+    let j = open + 1;
+    while (j < n && depth > 0) {
+      if (clean[j] === "{") depth += 1;
+      else if (clean[j] === "}") depth -= 1;
+      j += 1;
+    }
+    const body = clean.slice(open + 1, j - 1);
+    i = j;
+    if (!prelude || prelude.startsWith("@")) continue;
+    const selectors = prelude.split(",").map((s) => s.trim().replace(/\s+/g, " ")).filter(Boolean);
+    const decls = {};
+    for (const part of body.split(";")) {
+      const colon = part.indexOf(":");
+      if (colon === -1) continue;
+      const prop = part.slice(0, colon).trim().toLowerCase();
+      const val = part.slice(colon + 1).trim();
+      if (prop && val) decls[prop] = val;
+    }
+    rules.push({ selectors, decls });
+  }
+  return rules;
+}
+function mergedDeclsForSelector(rules, selector) {
+  const target = selector.trim().replace(/\s+/g, " ");
+  const out = {};
+  for (const r of rules) {
+    if (r.selectors.includes(target)) Object.assign(out, r.decls);
+  }
+  return out;
+}
+function isThemeTokenRef(val) {
+  return /^var\(--[a-z0-9-]+\)$/.test(String(val || "").trim());
+}
+
+const themeRules = parseTopLevelCssRules(theme);
+const rootDecls = mergedDeclsForSelector(themeRules, ":root");
+const lightDecls = mergedDeclsForSelector(themeRules, '[data-theme="light"]');
+const darkDecls = mergedDeclsForSelector(themeRules, '[data-theme="dark"]');
+if (rootDecls["color-scheme"] !== "light") {
+  fail("theme.css :root 未声明 color-scheme: light");
+} else {
+  pass("theme.css :root 已声明 color-scheme: light");
+}
+if (lightDecls["color-scheme"] !== "light") {
+  fail('theme.css [data-theme="light"] 未声明 color-scheme: light');
+} else {
+  pass('theme.css [data-theme="light"] 已声明 color-scheme: light');
+}
+if (darkDecls["color-scheme"] !== "dark") {
+  fail('theme.css [data-theme="dark"] 未声明 color-scheme: dark');
+} else {
+  pass('theme.css [data-theme="dark"] 已声明 color-scheme: dark');
+}
+
+const selectDecls = mergedDeclsForSelector(themeRules, "select");
+const selectBg = selectDecls["background-color"] || selectDecls["background"];
+const selectFg = selectDecls["color"];
+if (
+  selectDecls["color-scheme"] !== "inherit"
+  || selectBg !== "var(--c-surface)"
+  || selectFg !== "var(--c-text)"
+) {
+  fail("theme.css select 未统一声明 color-scheme: inherit 与主题变量配色（var(--c-surface) / var(--c-text)）");
+} else {
+  pass("theme.css select 已统一声明 color-scheme: inherit 与主题变量配色");
+}
+
+const selectDisDecls = mergedDeclsForSelector(themeRules, "select:disabled");
+const selectDisBg = selectDisDecls["background-color"] || selectDisDecls["background"];
+const selectDisFg = selectDisDecls["color"];
+if (!isThemeTokenRef(selectDisBg) || !isThemeTokenRef(selectDisFg) || selectDisBg === selectDisFg) {
+  fail("theme.css select:disabled 未使用主题变量设置可读禁用态配色");
+} else {
+  pass("theme.css select:disabled 已使用主题变量设置可读禁用态配色");
+}
+
+const selectOptDecls = mergedDeclsForSelector(themeRules, "select option");
+const selectOptGroupDecls = mergedDeclsForSelector(themeRules, "select optgroup");
+const optBg = selectOptDecls["background-color"] || selectOptDecls["background"];
+const optFg = selectOptDecls["color"];
+const optGrpBg = selectOptGroupDecls["background-color"] || selectOptGroupDecls["background"];
+const optGrpFg = selectOptGroupDecls["color"];
+if (
+  optBg !== "var(--c-surface)" || optFg !== "var(--c-text)"
+  || optGrpBg !== "var(--c-surface)" || optGrpFg !== "var(--c-text)"
+) {
+  fail("theme.css select option / select optgroup 未使用主题变量配色（var(--c-surface) / var(--c-text)）");
+} else {
+  pass("theme.css select option / select optgroup 已统一使用主题变量配色");
+}
+
+const selectOptDisDecls = mergedDeclsForSelector(themeRules, "select option:disabled");
+if (!isThemeTokenRef(selectOptDisDecls["color"])) {
+  fail("theme.css select option:disabled 未使用主题变量配色");
+} else {
+  pass("theme.css select option:disabled 已使用主题变量配色");
+}
+
+const studioRules = parseTopLevelCssRules(studioCss);
+const boxHeadSelectDecls = mergedDeclsForSelector(studioRules, ".box-head select");
+if ("background" in boxHeadSelectDecls || "background-color" in boxHeadSelectDecls || "color" in boxHeadSelectDecls) {
+  fail("studio.css .box-head select 存在与 theme.css 重复的背景或文字色声明");
+} else {
+  pass("studio.css .box-head select 仅保留盒头局部布局，背景/文字色统一由 theme.css 单源提供");
+}
+
 for (const css of cssFiles) {
   const rel = path.relative(repo, css);
   if (path.basename(css) === "theme.css") continue;
