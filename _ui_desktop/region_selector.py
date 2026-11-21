@@ -10,7 +10,7 @@ from collections.abc import Callable
 from PySide6.QtCore import QPoint, QRect, QRectF, Qt
 from PySide6.QtGui import (
     QCloseEvent,
-    QCursor,
+    QEnterEvent,
     QFont,
     QFontMetrics,
     QGuiApplication,
@@ -65,7 +65,7 @@ class RedCrosshairSelector(QWidget):
         self.setGeometry(vx, vy, vw, vh)
         self.resize(vw, vh)
 
-        self._mouse_pos: QPoint = self._initial_cursor_pos(vx, vy, vw, vh)
+        self._mouse_pos: QPoint | None = None
         self._drag_start: QPoint | None = None
         self._drag_current: QPoint | None = None
         self._last_tag_rect: QRect = QRect()
@@ -78,18 +78,11 @@ class RedCrosshairSelector(QWidget):
             weight=QFont.Weight.DemiBold,
         )
 
-    @staticmethod
-    def _initial_cursor_pos(vx: int, vy: int, vw: int, vh: int) -> QPoint:
-        global_pos = QCursor.pos()
-        lx = global_pos.x() - vx
-        ly = global_pos.y() - vy
-        if 0 <= lx < vw and 0 <= ly < vh:
-            return QPoint(lx, ly)
-        return QPoint(max(0, vw // 2), max(0, vh // 2))
-
     @property
-    def mouse_position(self) -> QPoint:
-        """当前窗口逻辑坐标系内的光标位置。"""
+    def mouse_position(self) -> QPoint | None:
+        """当前窗口逻辑坐标系内的光标位置；未收到真实指针事件前为 None。"""
+        if self._mouse_pos is None:
+            return None
         return QPoint(self._mouse_pos)
 
     def selection_rect(self) -> QRect | None:
@@ -98,8 +91,10 @@ class RedCrosshairSelector(QWidget):
             return None
         return self._normalized_logical_rect(self._drag_start, self._drag_current)
 
-    def coord_tag_rect(self) -> QRect:
-        """返回当前光标位置对应的坐标/尺寸胶囊矩形（已做窗口边缘防裁切钳制）。"""
+    def coord_tag_rect(self) -> QRect | None:
+        """返回当前光标位置对应的坐标/尺寸胶囊矩形（已做窗口边缘防裁切钳制）；未收到指针事件前返回 None。"""
+        if self._mouse_pos is None:
+            return None
         w = max(1, self.width())
         h = max(1, self.height())
         mx = max(0, min(self._mouse_pos.x(), w - 1))
@@ -111,6 +106,8 @@ class RedCrosshairSelector(QWidget):
         return self.compute_tag_rect(mx, my, tag_w, tag_h, w, h)
 
     def coord_tag_text(self) -> str:
+        if self._mouse_pos is None:
+            return ""
         w = max(1, self.width())
         h = max(1, self.height())
         mx = max(0, min(self._mouse_pos.x(), w - 1))
@@ -199,6 +196,10 @@ class RedCrosshairSelector(QWidget):
         if sel is None and w >= 240 and h >= 80:
             self._draw_top_hint(painter, w)
 
+        if self._mouse_pos is None:
+            painter.end()
+            return
+
         # 4. 贯穿全屏宽高的 1px #ff2d2d 红色十字定位线 + 中心准星
         mx = max(0, min(self._mouse_pos.x(), w - 1))
         my = max(0, min(self._mouse_pos.y(), h - 1))
@@ -275,6 +276,11 @@ class RedCrosshairSelector(QWidget):
 
         painter.setPen(theme.qcolor(theme.COORD_TAG_TEXT_HEX, opaque=True))
         painter.drawText(tag_rect, Qt.AlignmentFlag.AlignCenter, tag_text)
+
+    def enterEvent(self, event: QEnterEvent) -> None:
+        self._mouse_pos = event.position().toPoint()
+        self.update()
+        super().enterEvent(event)
 
     def mouseMoveEvent(self, event: QMouseEvent) -> None:
         pos = event.position().toPoint()

@@ -10,8 +10,8 @@ from pathlib import Path
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
-from PySide6.QtCore import QBuffer, QByteArray, QIODevice, QPoint, QRect, Qt
-from PySide6.QtGui import QColor, QGuiApplication, QImage, QPainter
+from PySide6.QtCore import QBuffer, QByteArray, QIODevice, QPoint, QPointF, QRect, Qt
+from PySide6.QtGui import QColor, QCursor, QEnterEvent, QGuiApplication, QImage, QPainter
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QSystemTrayIcon, QWidget
 
@@ -298,6 +298,123 @@ def test_selector_under_8px_ignored_and_right_click_or_esc_cancels(
     finally:
         sel2.close_silent()
         sel2.deleteLater()
+
+
+def test_selector_no_initial_crosshair_until_real_pointer_event_and_direct_press_drag(
+    qapp: QApplication,
+) -> None:
+    """未收到真实指针事件前不画红十字线/准星/坐标胶囊，enterEvent/mouseMoveEvent 画在真实位置，直接左键按下拖拽起点准确。"""
+    cursor = QCursor.pos()
+    origin_x = max(4000, cursor.x() + 1000)
+    origin_y = max(4000, cursor.y() + 1000)
+    red = QColor(theme.CROSSHAIR_HEX)
+
+    selector = RedCrosshairSelector(
+        virtual_geometry=(origin_x, origin_y, 320, 220),
+        mode_label="截屏翻译",
+    )
+    try:
+        selector.show()
+        qapp.processEvents()
+
+        # 1. 刚打开且未收到任何真实指针事件：查询均为空，仅绘暗色遮罩与顶部提示条，无任何红十字/准星/坐标胶囊像素
+        assert selector.mouse_position is None
+        assert selector.coord_tag_rect() is None
+        assert selector.coord_tag_text() == ""
+
+        initial_img = selector.grab().toImage()
+        assert abs(initial_img.pixelColor(20, 180).alpha() - theme.DIM_MASK_RGBA[3]) <= 2
+        assert _pixels_of(initial_img, theme.TOP_HINT_TEXT_HEX)
+        assert _pixels_of(initial_img, theme.CROSSHAIR_HEX) == []
+        assert _pixels_of(initial_img, theme.COORD_TAG_TEXT_HEX) == []
+        assert not any(
+            initial_img.pixelColor(x, y).red() - initial_img.pixelColor(x, y).blue() > 20
+            for y in range(initial_img.height())
+            for x in range(initial_img.width())
+        )
+
+        # 2a. 收到首个真实 enterEvent 后立即在真实坐标绘制红十字线与坐标胶囊（不在屏幕中点 (160, 110)）
+        enter_pos = QPoint(95, 70)
+        QApplication.sendEvent(
+            selector,
+            QEnterEvent(
+                QPointF(enter_pos),
+                QPointF(enter_pos),
+                QPointF(origin_x + enter_pos.x(), origin_y + enter_pos.y()),
+            ),
+        )
+        qapp.processEvents()
+
+        assert selector.mouse_position == enter_pos
+        assert selector.coord_tag_rect() is not None
+        assert selector.coord_tag_text() == f"X: {origin_x + 95}, Y: {origin_y + 70}"
+        enter_img = selector.grab().toImage()
+        assert enter_img.pixelColor(20, 70).rgb() == red.rgb()
+        assert enter_img.pixelColor(290, 70).rgb() == red.rgb()
+        assert enter_img.pixelColor(95, 5).rgb() == red.rgb()
+        assert enter_img.pixelColor(95, 200).rgb() == red.rgb()
+        assert enter_img.pixelColor(20, 110).rgb() != red.rgb()
+        assert enter_img.pixelColor(160, 200).rgb() != red.rgb()
+        assert _pixels_of(enter_img, theme.COORD_TAG_TEXT_HEX)
+
+        # 2b. 收到 mouseMoveEvent 后红十字线与坐标胶囊随真实移动坐标更新
+        move_pos = QPoint(210, 145)
+        QTest.mouseMove(selector, move_pos)
+        qapp.processEvents()
+
+        assert selector.mouse_position == move_pos
+        assert selector.coord_tag_rect() is not None
+        assert selector.coord_tag_text() == f"X: {origin_x + 210}, Y: {origin_y + 145}"
+        move_img = selector.grab().toImage()
+        assert move_img.pixelColor(20, 145).rgb() == red.rgb()
+        assert move_img.pixelColor(290, 145).rgb() == red.rgb()
+        assert move_img.pixelColor(210, 5).rgb() == red.rgb()
+        assert move_img.pixelColor(210, 200).rgb() == red.rgb()
+        assert move_img.pixelColor(20, 70).rgb() != red.rgb()
+        assert move_img.pixelColor(95, 200).rgb() != red.rgb()
+    finally:
+        selector.close_silent()
+        selector.deleteLater()
+
+    # 3. 无任何前置移动或 enterEvent，直接左键按下拖拽：选区起点精确等于 mousePressEvent 坐标
+    captured: list[tuple[int, int, int, int]] = []
+    direct_origin_x = origin_x + 1000
+    direct_origin_y = origin_y + 1000
+    direct = RedCrosshairSelector(
+        virtual_geometry=(direct_origin_x, direct_origin_y, 320, 220),
+        mode_label="纯 OCR 识别",
+        on_selected=captured.append,
+    )
+    try:
+        direct.show()
+        qapp.processEvents()
+        assert direct.mouse_position is None
+
+        QTest.mousePress(
+            direct,
+            Qt.MouseButton.LeftButton,
+            Qt.KeyboardModifier.NoModifier,
+            QPoint(60, 50),
+        )
+        qapp.processEvents()
+        assert direct.mouse_position == QPoint(60, 50)
+        assert direct.selection_rect() == QRect(60, 50, 0, 0)
+        press_img = direct.grab().toImage()
+        assert press_img.pixelColor(20, 50).rgb() == red.rgb()
+        assert press_img.pixelColor(60, 200).rgb() == red.rgb()
+
+        QTest.mouseMove(direct, QPoint(180, 150))
+        QTest.mouseRelease(
+            direct,
+            Qt.MouseButton.LeftButton,
+            Qt.KeyboardModifier.NoModifier,
+            QPoint(180, 150),
+        )
+        qapp.processEvents()
+        assert captured == [(direct_origin_x + 60, direct_origin_y + 50, 120, 100)]
+    finally:
+        direct.close_silent()
+        direct.deleteLater()
 
 
 # ---------------------------------------------------------------------------
