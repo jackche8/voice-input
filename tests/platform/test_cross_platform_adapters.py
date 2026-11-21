@@ -98,6 +98,28 @@ class _FakeKey:
         self.vk = vk
 
 
+class _FakeWinFn:
+    """Win32 DLL 函数桩：记录 argtypes/restype 并将调用转给可注入 impl。"""
+
+    def __init__(self, impl=None):
+        self.impl = impl
+        self.argtypes = None
+        self.restype = None
+
+    def __call__(self, *args):
+        return self.impl(*args) if self.impl else 0
+
+
+class _FakeWinDll:
+    """Win32 DLL 容器桩（供 CtypesWin32Api 离线契约测试复用）。"""
+
+    def __init__(self, mapping):
+        self._m = {k: _FakeWinFn(v) for k, v in mapping.items()}
+
+    def __getattr__(self, name: str):
+        return self._m.setdefault(name, _FakeWinFn())
+
+
 # ---------------------------------------------------------------------------
 # 1. detect_os & create_platform_adapter 契约测试
 # ---------------------------------------------------------------------------
@@ -301,6 +323,12 @@ class _FakeWin32Api:
         self.clipboard = WinClipboardSnapshot(kind="text", text=text)
         return None
 
+    def write_clipboard_dib(self, dib: bytes) -> str | None:
+        if self.fail_clip:
+            return self.fail_clip
+        self.clipboard = WinClipboardSnapshot(kind="dib", dib_bytes=dib)
+        return None
+
     def snapshot_clipboard(self) -> WinClipboardSnapshot:
         return self.clipboard
 
@@ -492,6 +520,11 @@ class _FakeMacOSApi:
 
     def write_clipboard_text(self, text: str) -> str | None:
         self.clip = MacClipboardSnapshot(kind="text", text=text)
+        return None
+
+    def write_clipboard_png(self, png: bytes, temp_dir: Path) -> str | None:
+        assert not str(temp_dir).startswith("/tmp")
+        self.clip = MacClipboardSnapshot(kind="png", png_bytes=png)
         return None
 
     def snapshot_clipboard(self, _temp_dir: Path) -> MacClipboardSnapshot:
@@ -818,22 +851,6 @@ def test_windows_and_macos_clipboard_protect_unsupported_and_failed_snapshots(tm
     """根治回归：Win32 (CF_HDROP/打开失败) 与 macOS (furl/PDF/探测失败) 均不覆写清空用户剪贴板。"""
 
     # --- Windows CtypesWin32Api ---
-    class _Fn:
-        def __init__(self, impl=None):
-            self.impl = impl
-            self.argtypes = None
-            self.restype = None
-
-        def __call__(self, *args):
-            return self.impl(*args) if self.impl else 0
-
-    class _Dll:
-        def __init__(self, mapping):
-            self._m = {k: _Fn(v) for k, v in mapping.items()}
-
-        def __getattr__(self, name: str):
-            return self._m.setdefault(name, _Fn())
-
     win_state = {"open_ok": True, "formats": [CF_HDROP], "emptied": 0}
 
     def _enum_fmt(prev: int) -> int:
@@ -845,7 +862,7 @@ def test_windows_and_macos_clipboard_protect_unsupported_and_failed_snapshots(tm
         idx = fmts.index(prev) + 1
         return fmts[idx] if idx < len(fmts) else 0
 
-    user32 = _Dll(
+    user32 = _FakeWinDll(
         {
             "OpenClipboard": lambda _hwnd: 1 if win_state["open_ok"] else 0,
             "CloseClipboard": lambda: 1,
@@ -854,7 +871,7 @@ def test_windows_and_macos_clipboard_protect_unsupported_and_failed_snapshots(tm
             "IsClipboardFormatAvailable": lambda fmt: 1 if fmt in win_state["formats"] else 0,
         }
     )
-    kernel32 = _Dll({})
+    kernel32 = _FakeWinDll({})
     win_api = CtypesWin32Api(user32=user32, kernel32=kernel32)
 
     snap_hdrop = win_api.snapshot_clipboard()
@@ -1385,3 +1402,179 @@ def test_autostart_uses_background_app_command_and_portal_entry_follows_xdg_orde
     assert "NoDisplay=true" in text and f"Exec={shlex.join(app_command(paths, background=True))}" in text
     written.write_text("[Desktop Entry]\nExec=user-edited\n", encoding="utf-8")
     assert ensure_portal_app_entry(paths, env) == written and "user-edited" in written.read_text(encoding="utf-8")
+
+
+# ---------------------------------------------------------------------------
+# U10：三端 write_clipboard_png（Linux xclip / Windows CF_DIB / macOS osascript 公共路径）
+# ---------------------------------------------------------------------------
+def test_write_clipboard_png_across_linux_windows_and_macos(tmp_path: Path, monkeypatch):
+    import os
+    import re
+    import struct
+    from PIL import Image
+
+    from _paths import default_app_paths
+
+    buf = io.BytesIO()
+    Image.new("RGBA", (6, 4), (12, 34, 56, 200)).save(buf, format="PNG")
+    sample_png = buf.getvalue()
+
+    # 1. Linux：经 SystemClipboard.write_binary 调 xclip -selection clipboard -t image/png 并喂原始 PNG 字节
+    linux_calls: list[tuple[list[str], bytes]] = []
+    linux_rc = {"code": 0}
+
+    class _FakeXclipProc:
+        def __init__(self, cmd: list[str]) -> None:
+            self._cmd = list(cmd)
+            self.returncode = linux_rc["code"]
+
+        def communicate(self, payload: bytes = b"", timeout: float | None = None):
+            del timeout
+            linux_calls.append((self._cmd, bytes(payload)))
+            return b"", b""
+
+    linux_ok = LinuxPlatformAdapter(
+        environ={"XDG_SESSION_TYPE": "x11"},
+        which=lambda name: "/usr/bin/xclip" if name == "xclip" else None,
+        popen=lambda cmd, **kw: _FakeXclipProc(cmd),
+        uinput_factory=None,
+    )
+    assert linux_ok.write_clipboard_png(sample_png) is None
+    assert linux_calls == [(["xclip", "-selection", "clipboard", "-t", "image/png"], sample_png)]
+
+    linux_rc["code"] = 1
+    err_rc = linux_ok.write_clipboard_png(sample_png)
+    assert err_rc is not None and "失败" in err_rc
+    assert linux_ok.write_clipboard_png(b"") is not None
+
+    linux_missing = LinuxPlatformAdapter(
+        environ={"XDG_SESSION_TYPE": "x11"},
+        which=lambda _n: None,
+        uinput_factory=None,
+    )
+    err_missing = linux_missing.write_clipboard_png(sample_png)
+    assert err_missing is not None and "xclip" in err_missing
+
+    # 2. Windows：真实 Pillow 转 24 位 RGB DIB（BMP 去 14 字节头）→ 公开 Win32Api.write_clipboard_dib
+    fake_win_api = _FakeWin32Api()
+    assert not hasattr(fake_win_api, "_write_clipboard_bytes")
+    assert WindowsPlatformAdapter(win32_api=fake_win_api).write_clipboard_png(sample_png) is None
+    assert fake_win_api.clipboard.kind == "dib" and not fake_win_api.clipboard.dib_bytes.startswith(b"BM")
+
+    win_clip: dict[str, object] = {"open_ok": True, "open_calls": 0, "buffers": {}, "next_h": 100, "set": None}
+
+    def _global_alloc(_flags, size):
+        h = int(win_clip["next_h"])
+        win_clip["next_h"] = h + 1
+        win_clip["buffers"][h] = ctypes.create_string_buffer(size)
+        return h
+
+    def _global_lock(h):
+        return ctypes.addressof(win_clip["buffers"][int(h)])
+
+    def _set_clip(fmt, h):
+        win_clip["set"] = (int(fmt), bytes(win_clip["buffers"][int(h)].raw))
+        return h
+
+    user32 = _FakeWinDll(
+        {
+            "OpenClipboard": lambda _hwnd: (
+                win_clip.__setitem__("open_calls", int(win_clip["open_calls"]) + 1)
+                or (1 if win_clip["open_ok"] else 0)
+            ),
+            "CloseClipboard": lambda: 1,
+            "EmptyClipboard": lambda: 1,
+            "SetClipboardData": _set_clip,
+        }
+    )
+    kernel32 = _FakeWinDll(
+        {
+            "GlobalAlloc": _global_alloc,
+            "GlobalLock": _global_lock,
+            "GlobalUnlock": lambda _h: 1,
+            "GlobalFree": lambda _h: 0,
+        }
+    )
+    win_adapter = WindowsPlatformAdapter(win32_api=CtypesWin32Api(user32=user32, kernel32=kernel32))
+    assert win_adapter.write_clipboard_png(sample_png) is None
+    assert win_clip["set"] is not None
+    fmt_written, dib_bytes = win_clip["set"]  # type: ignore[misc]
+    assert fmt_written == CF_DIB
+    # DIB 以 40 字节 BITMAPINFOHEADER 起头，不含 14 字节 "BM" 文件头，宽高与 24bpp 与源 PNG 一致
+    assert not dib_bytes.startswith(b"BM")
+    hdr_size, width, height, planes, bpp = struct.unpack_from("<IiiHH", dib_bytes, 0)
+    assert (hdr_size, width, height, planes, bpp) == (40, 6, 4, 1, 24)
+
+    open_before = int(win_clip["open_calls"])
+    bad_png_err = win_adapter.write_clipboard_png(b"not-a-png")
+    assert bad_png_err is not None and int(win_clip["open_calls"]) == open_before
+    assert win_adapter.write_clipboard_png(b"") is not None
+
+    win_clip["open_ok"] = False
+    open_fail_err = win_adapter.write_clipboard_png(sample_png)
+    assert open_fail_err is not None and "剪贴板" in open_fail_err
+
+    # 3. macOS：使用应用临时目录（绝不写 /tmp）+ osascript，并与 restore_clipboard 共用唯一实现
+    default_mac = MacOSPlatformAdapter()
+    assert default_mac._temp_dir == default_app_paths(os.environ, os_name="macos").temp_dir
+    assert not str(default_mac._temp_dir).startswith("/tmp")
+
+    mac_tmp = tmp_path / "mac_clip_tmp"
+    mac_runs: list[tuple[list[str], Path, bytes]] = []
+    mac_rc = {"code": 0, "stderr": ""}
+
+    def _fake_mac_run(cmd, **kw):
+        del kw
+        m = re.search(r'POSIX file "([^"]+)"', cmd[-1])
+        assert m is not None, cmd
+        p = Path(m.group(1))
+        assert p.is_relative_to(mac_tmp) and not str(p).startswith("/tmp")
+        mac_runs.append((list(cmd), p, p.read_bytes()))
+        return subprocess.CompletedProcess(cmd, mac_rc["code"], "", mac_rc["stderr"])
+
+    mac_api = RealMacOSSystemApi(
+        run=_fake_mac_run,
+        which=lambda n: "/usr/bin/osascript" if n == "osascript" else None,
+    )
+    mac_adapter = MacOSPlatformAdapter(macos_api=mac_api, temp_dir=mac_tmp)
+    assert mac_adapter.write_clipboard_png(sample_png) is None
+    assert len(mac_runs) == 1
+    cmd0, path0, written0 = mac_runs[0]
+    assert cmd0[0] == "osascript" and "«class PNGf»" in cmd0[-1]
+    assert written0 == sample_png
+    assert not path0.exists() and list(mac_tmp.iterdir()) == []
+
+    # restore_clipboard 必须复用 write_clipboard_png（不重复写第二份 osascript）
+    delegated: list[tuple[bytes, Path]] = []
+    orig_write_png = mac_api.write_clipboard_png
+
+    def _spy_write_png(png: bytes, temp_dir: Path) -> str | None:
+        delegated.append((png, temp_dir))
+        return orig_write_png(png, temp_dir)
+
+    monkeypatch.setattr(mac_api, "write_clipboard_png", _spy_write_png)
+    mac_api.restore_clipboard(MacClipboardSnapshot(kind="png", png_bytes=sample_png), mac_tmp)
+    assert delegated == [(sample_png, mac_tmp)]
+    assert len(mac_runs) == 2 and list(mac_tmp.iterdir()) == []
+
+    # 失败路径：osascript 非零退出仍必须清理临时文件；缺少 osascript 与空字节均报错
+    mac_rc["code"] = 1
+    mac_rc["stderr"] = "execution error: clipboard busy"
+    mac_fail = mac_adapter.write_clipboard_png(sample_png)
+    assert mac_fail is not None and "clipboard busy" in mac_fail
+    assert list(mac_tmp.iterdir()) == []
+    assert mac_adapter.write_clipboard_png(b"") is not None
+
+    mac_no_osa = MacOSPlatformAdapter(
+        macos_api=RealMacOSSystemApi(run=_fake_mac_run, which=lambda _n: None),
+        temp_dir=mac_tmp,
+    )
+    no_osa_err = mac_no_osa.write_clipboard_png(sample_png)
+    assert no_osa_err is not None and "osascript" in no_osa_err
+
+    # 临时目录创建/写盘遇到 OSError 返回可读错误而非抛未捕获异常
+    file_not_dir = tmp_path / "occupied_file"
+    file_not_dir.write_text("not a dir", encoding="utf-8")
+    mac_bad_tmp = MacOSPlatformAdapter(macos_api=mac_api, temp_dir=file_not_dir)
+    os_err = mac_bad_tmp.write_clipboard_png(sample_png)
+    assert os_err is not None and "临时文件" in os_err

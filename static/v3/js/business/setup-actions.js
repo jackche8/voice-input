@@ -167,9 +167,11 @@
           hotkey_voice: keys && keys.hotkey_voice,
           hotkey_screenshot: keys && keys.hotkey_screenshot,
           hotkey_ocr: keys && keys.hotkey_ocr,
-          hotkey_repeat: keys && keys.hotkey_repeat
+          hotkey_repeat: keys && keys.hotkey_repeat,
+          hotkey_annotate: keys && keys.hotkey_annotate
         };
         if (!keys || keys.hotkey_ocr === undefined) delete patch.hotkey_ocr;
+        if (!keys || keys.hotkey_annotate === undefined) delete patch.hotkey_annotate;
         return saveConfig(patch, {
           hotkeysSaved: true,
           hotkeyDrafts: null,

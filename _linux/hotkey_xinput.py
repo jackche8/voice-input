@@ -1,4 +1,4 @@
-"""XInput2 RawKey 全局快捷键 (X server 客户端层 raw event stream，支持四键)。
+"""XInput2 RawKey 全局快捷键 (X server 客户端层 raw event stream，支持五键)。
 
 Wayland 下只做 XTEST 卡键清理，不进快捷键状态机；仅在 X11 回退模式（XGrabKey 不可用，manager 打开
 actions_enabled）时把组合的按下区间与放行上报给 sink，停录后补发修饰键抬起（现状语义）。
@@ -79,7 +79,7 @@ def _build_xi_raw_event_struct():
 
 
 class XInputHotkeyGrabber:
-    """XInput2 RawKey 全局快捷键管理，完整支持 voice / screenshot / ocr / repeat 四键。"""
+    """XInput2 RawKey 全局快捷键管理，完整支持 voice / screenshot / ocr / repeat / annotate 五键。"""
 
     def __init__(
         self,
@@ -191,6 +191,11 @@ class XInputHotkeyGrabber:
             else None
         )
         self._repeat_combo = self._compile_hotkey(self.ctx.bindings.repeat)
+        self._annotate_combo = (
+            self._compile_hotkey(self.ctx.bindings.annotate)
+            if self.ctx.bindings.annotate
+            else None
+        )
         escape_sym = self._keysym_resolver("Escape")
         self._escape_kc = self.dpy.keysym_to_keycode(escape_sym) if escape_sym else 0
         print(
@@ -210,6 +215,11 @@ class XInputHotkeyGrabber:
             f"  XInput2: 重复 {self.ctx.bindings.repeat} "
             f"→ trigger=kc{self._repeat_combo['trigger']} mods={self._repeat_combo['modifiers']}"
         )
+        if self._annotate_combo is not None:
+            print(
+                f"  XInput2: 标注 {self.ctx.bindings.annotate} "
+                f"→ trigger=kc{self._annotate_combo['trigger']} mods={self._annotate_combo['modifiers']}"
+            )
 
     def _compile_hotkey(self, hotkey_str: str) -> dict:
         """解析快捷键字符串 → {'trigger': keycode, 'modifiers': [set, ...]} (X11 keycode)."""
@@ -303,6 +313,8 @@ class XInputHotkeyGrabber:
         ]
         if self._ocr_combo is not None:
             combos.append(("ocr", self._ocr_combo))
+        if self._annotate_combo is not None:
+            combos.append(("annotate", self._annotate_combo))
         return combos
 
     def _handle_press(self, keycode: int, sourceid: int = 0, t_ms: int = 0) -> None:
@@ -352,13 +364,7 @@ class XInputHotkeyGrabber:
 
     def _handle_release(self, keycode: int, sourceid: int = 0, t_ms: int = 0) -> None:
         if not self._ignore_source_ids and self.ctx.guard.active():
-            triggers = {
-                self._voice_combo["trigger"],
-                self._screen_combo["trigger"],
-                self._repeat_combo["trigger"],
-            }
-            if self._ocr_combo is not None:
-                triggers.add(self._ocr_combo["trigger"])
+            triggers = {combo["trigger"] for _action, combo in self._combos()}
             if keycode not in self._pressed or keycode not in triggers:
                 return
         self._last_key_activity = time.monotonic()

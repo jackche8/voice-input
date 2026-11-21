@@ -1,4 +1,4 @@
-"""守护进程启动自检：只读检查本机工具、portal、四键（voice/screenshot/ocr/repeat）自身查重与外部冲突。
+"""守护进程启动自检：只读检查本机工具、portal、五键（voice/screenshot/ocr/repeat/annotate）自身查重与外部冲突。
 
 模型/服务就绪状态归设置页 `/api/setup/check`，这里不重复探测。
 """
@@ -22,6 +22,7 @@ def _binding_duplicate_issue(bindings: HotkeyBindings) -> str | None:
             ("screenshot", bindings.screenshot),
             ("ocr", bindings.ocr),
             ("repeat", bindings.repeat),
+            ("annotate", bindings.annotate),
         )
         if val and val.strip()
     }

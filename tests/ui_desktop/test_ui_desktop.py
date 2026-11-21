@@ -5,6 +5,7 @@ import ast
 import os
 import re
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -17,6 +18,7 @@ from PySide6.QtWidgets import QApplication, QSystemTrayIcon, QWidget
 
 from _contracts import OcrTextBlock, OcrTextLine
 from _ui_desktop import (
+    AnnotateOverlay,
     InplaceTranslateOverlay,
     RedCrosshairSelector,
     StudioTrayIcon,
@@ -84,10 +86,16 @@ def test_theme_tokens_and_ui_layer_purity() -> None:
     assert theme.TAIL_TEXT_HEX == "#94a3b8"
     assert theme.CAPTION_STABLE_TEXT_HEX == "#f8fafc"
     assert theme.CAPTION_TAIL_TEXT_HEX == "#94a3b8"
+    assert theme.ANNOTATE_STROKE_PX == 3
+    assert theme.ANNOTATE_TEXT_PX == 20
+    assert theme.ANNOTATE_MOSAIC_BLOCK_PX == 10
+    assert theme.ANNOTATE_SAVED_FEEDBACK_MS == 2500
 
     py_files = sorted(UI_DESKTOP_DIR.glob("*.py"))
     assert [f.name for f in py_files] == [
         "__init__.py",
+        "annotate_overlay.py",
+        "annotate_tools.py",
         "caption_bar.py",
         "inplace_layout.py",
         "inplace_overlay.py",
@@ -203,6 +211,7 @@ def test_selector_coord_tag_clamped_at_all_four_edges(qapp: QApplication) -> Non
             QTest.mouseMove(selector, corner)
             qapp.processEvents()
             tag_rect = selector.coord_tag_rect()
+            assert tag_rect is not None
             assert bounds.contains(tag_rect), (
                 f"光标在边缘 {corner} 时胶囊越界: {tag_rect}"
             )
@@ -938,6 +947,7 @@ def test_tray_vector_icons_callbacks_and_safe_degradation(qapp: QApplication) ->
         on_open_home=lambda: events.append("home"),
         on_screenshot_translate=lambda: events.append("shot"),
         on_pure_ocr=lambda: events.append("ocr"),
+        on_screenshot_annotate=lambda: events.append("annotate"),
         on_open_setup=lambda: events.append("setup"),
         on_toggle_hud=lambda enabled: events.append(("hud", enabled)),
         on_quit=lambda: events.append("quit"),
@@ -949,30 +959,33 @@ def test_tray_vector_icons_callbacks_and_safe_degradation(qapp: QApplication) ->
         tray_fallback.set_state("recording", tooltip="录音中")
         assert tray_fallback.state == "recording"
         assert tray_fallback.tooltip == "录音中"
+        assert tray_fallback.screenshot_annotate_action.text() == "截屏标注"
 
         tray_fallback.open_home_action.trigger()
         tray_fallback.screenshot_translate_action.trigger()
         tray_fallback.pure_ocr_action.trigger()
+        tray_fallback.screenshot_annotate_action.trigger()
         tray_fallback.open_setup_action.trigger()
         tray_fallback.toggle_hud_action.trigger()  # 默认 True -> 切换为 False
         tray_fallback.quit_action.trigger()
 
-        assert events == ["home", "shot", "ocr", "setup", ("hud", False), "quit"]
+        assert events == ["home", "shot", "ocr", "annotate", "setup", ("hud", False), "quit"]
 
         # 外部同步勾选状态不应重复触发回调
         tray_fallback.set_hud_enabled(True)
         assert tray_fallback.toggle_hud_action.isChecked() is True
-        assert len(events) == 6
+        assert len(events) == 7
     finally:
         tray_fallback.close()
 
-    # 2. 模拟系统托盘可用分支，验证 QSystemTrayIcon 挂载与左键触发打开主页
+    # 2. 模拟系统托盘可用分支（且不传 on_screenshot_annotate 保持默认 None 兼容），验证挂载与左键触发打开主页
     tray_active = StudioTrayIcon(
         on_open_home=lambda: events.append("tray_click_home"),
         tray_available_fn=lambda: True,
     )
     try:
         assert tray_active.available is True
+        tray_active.screenshot_annotate_action.trigger()
         tray_active.set_state("polishing")
         assert tray_active.state == "polishing"
         tray_active._on_activated(QSystemTrayIcon.ActivationReason.Trigger)
@@ -1098,3 +1111,401 @@ def test_passive_overlay_flags_xcb_vs_wayland_and_offscreen(
         assert bool(other_flags & Qt.WindowType.WindowTransparentForInput) is True
         assert bool(other_flags & Qt.WindowType.WindowDoesNotAcceptFocus) is True
         assert bool(other_flags & Qt.WindowType.BypassWindowManagerHint) is False
+
+
+# ---------------------------------------------------------------------------
+# 6. AnnotateOverlay 截屏标注浮窗与 Esc 焦点裁决（U12 · annotate-a.html）
+# ---------------------------------------------------------------------------
+@dataclass(frozen=True)
+class _FakeSaveResult:
+    path: str | None = None
+    error: str | None = None
+
+
+def _open_annotator(
+    screen_rect: tuple[int, int, int, int],
+    *,
+    png: bytes | None = None,
+    **kwargs,
+) -> AnnotateOverlay:
+    overlay = AnnotateOverlay(
+        png if png is not None else _make_png(screen_rect[2], screen_rect[3], bg_hex="#ffffff"),
+        screen_rect,
+        virtual_geometry=(0, 0, 1280, 800),
+        available_screen_rect=(0, 0, 1280, 800),
+        **kwargs,
+    )
+    overlay.show()
+    return overlay
+
+
+def test_annotate_overlay_toolbar_placement_no_shift_and_outside_click_stays_open(
+    qapp: QApplication,
+) -> None:
+    """U12：工具条文案顺序、框下/框上/框内定位、切工具零抖动、框外暗罩且点框外不关闭。"""
+    with pytest.raises(ValueError):
+        AnnotateOverlay(b"", (0, 0, 100, 100))
+    with pytest.raises(ValueError):
+        AnnotateOverlay(b"not-a-png", (0, 0, 100, 100))
+    with pytest.raises(ValueError):
+        AnnotateOverlay(_make_png(100, 100), (0, 0, 0, 100))
+
+    closed: list[int] = []
+    mid = _open_annotator((200, 160, 480, 260), on_closed=lambda: closed.append(1))
+    try:
+        assert mid.testAttribute(Qt.WidgetAttribute.WA_TranslucentBackground) is True
+        assert mid.testAttribute(Qt.WidgetAttribute.WA_InputMethodEnabled) is False
+        assert mid.toolbar.visible_labels() == ["矩形", "箭头", "文字", "马赛克", "撤销", "复制", "保存", "取消"]
+        assert mid.toolbar.button("undo").isEnabled() is False
+        assert mid.menu_placement == "below"
+        assert mid.toolbar.geometry().top() > mid.canvas_rect().bottom()
+
+        # 连续切换工具 3 轮：工具条与全部按钮几何零位移
+        baseline_bar = mid.toolbar.geometry()
+        baseline_btns = {k: mid.toolbar.button(k).geometry() for k in ("rect", "arrow", "text", "mosaic", "undo", "copy", "save", "cancel")}
+        for _ in range(3):
+            for key in ("rect", "arrow", "text", "mosaic"):
+                QTest.mouseClick(mid.toolbar.button(key), Qt.MouseButton.LeftButton)
+                qapp.processEvents()
+                assert mid.current_tool == key
+                assert mid.toolbar.button(key).property("active") == "true"
+                assert mid.toolbar.geometry() == baseline_bar
+                for bk, rect in baseline_btns.items():
+                    assert mid.toolbar.button(bk).geometry() == rect
+
+        # 框外为 DIM_MASK_RGBA 暗罩；点框外消费点击但不关闭浮窗
+        grabbed = mid.grab().toImage()
+        assert abs(grabbed.pixelColor(20, 20).alpha() - theme.DIM_MASK_RGBA[3]) <= 2
+        QTest.mouseClick(mid, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, QPoint(20, 20))
+        qapp.processEvents()
+        assert mid.isVisible() is True
+        assert closed == []
+
+        # 点「取消」关闭并回调 on_closed 一次
+        QTest.mouseClick(mid.toolbar.button("cancel"), Qt.MouseButton.LeftButton)
+        qapp.processEvents()
+        assert mid.isVisible() is False
+        assert closed == [1]
+    finally:
+        mid.close_silent()
+        mid.deleteLater()
+
+    # 贴底翻到框上；全高放进框内底部；close_silent 不触发 on_closed
+    silent_closed: list[int] = []
+    bottom = _open_annotator((200, 700, 480, 90), on_closed=lambda: silent_closed.append(1))
+    try:
+        assert bottom.menu_placement == "above"
+        assert bottom.toolbar.geometry().bottom() < bottom.canvas_rect().top()
+    finally:
+        bottom.close_silent()
+        bottom.deleteLater()
+    assert silent_closed == []
+
+    tall = _open_annotator((200, 10, 480, 780))
+    try:
+        assert tall.menu_placement == "inside"
+        assert tall.canvas_rect().contains(tall.toolbar.geometry())
+    finally:
+        tall.close_silent()
+        tall.deleteLater()
+
+
+def test_annotate_overlay_four_tools_undo_replay_mosaic_average_and_export_resolution(
+    qapp: QApplication,
+) -> None:
+    """U12：2× HiDPI 冻结图下四种标注画出、马赛克块平均、撤销重放还原、导出 PNG 分辨率严格等于原图。"""
+    # 原冻结图 640×360（2×），画布逻辑尺寸 320×180；在图像像素 (200, 200, 40, 20) 放半黑半彩双色块验证马赛克块平均
+    hi_png = _make_png(
+        640,
+        360,
+        bg_hex="#ffffff",
+        patches=[
+            ((200, 200, 10, 20), "#000000"),
+            ((210, 200, 10, 20), "#c86432"),  # (200, 100, 50) -> 与黑平均 ≈ (100, 50, 25)
+            ((220, 200, 20, 20), "#00c864"),  # 整块纯绿 (0, 200, 100)
+        ],
+    )
+    overlay = _open_annotator((100, 80, 320, 180), png=hi_png)
+    try:
+        c = overlay.canvas_rect()
+
+        # 1. 矩形（画布 (20, 20) -> (90, 70)）
+        QTest.mouseClick(overlay.toolbar.button("rect"), Qt.MouseButton.LeftButton)
+        QTest.mousePress(overlay, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, c.topLeft() + QPoint(20, 20))
+        QTest.mouseMove(overlay, c.topLeft() + QPoint(90, 70))
+        QTest.mouseRelease(overlay, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, c.topLeft() + QPoint(90, 70))
+        qapp.processEvents()
+        assert len(overlay.operations) == 1
+        assert overlay.toolbar.button("undo").isEnabled() is True
+
+        # 2. 箭头（画布 (120, 30) -> (220, 30)）
+        QTest.mouseClick(overlay.toolbar.button("arrow"), Qt.MouseButton.LeftButton)
+        QTest.mousePress(overlay, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, c.topLeft() + QPoint(120, 30))
+        QTest.mouseMove(overlay, c.topLeft() + QPoint(220, 30))
+        QTest.mouseRelease(overlay, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, c.topLeft() + QPoint(220, 30))
+        qapp.processEvents()
+        assert len(overlay.operations) == 2
+
+        # 3. 文字（画布 (20, 120)，输入框开启输入法，Enter 提交）
+        QTest.mouseClick(overlay.toolbar.button("text"), Qt.MouseButton.LeftButton)
+        QTest.mouseClick(overlay, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, c.topLeft() + QPoint(20, 120))
+        qapp.processEvents()
+        assert overlay.is_editing_text is True
+        edit = overlay._text_edit
+        assert edit is not None
+        assert edit.testAttribute(Qt.WidgetAttribute.WA_InputMethodEnabled) is True
+        edit.setText("标注测试")
+        QTest.keyClick(edit, Qt.Key.Key_Return)
+        qapp.processEvents()
+        assert overlay.is_editing_text is False
+        assert len(overlay.operations) == 3
+
+        # 4. 马赛克（画布 (100, 100) -> (120, 110)，对应 2× 图像像素 (200, 200, 40, 20)，2 块×1 块，每块 20×20 像素）
+        QTest.mouseClick(overlay.toolbar.button("mosaic"), Qt.MouseButton.LeftButton)
+        QTest.mousePress(overlay, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, c.topLeft() + QPoint(100, 100))
+        QTest.mouseMove(overlay, c.topLeft() + QPoint(120, 110))
+        QTest.mouseRelease(overlay, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, c.topLeft() + QPoint(120, 110))
+        qapp.processEvents()
+        assert len(overlay.operations) == 4
+
+        # 校验导出 PNG 分辨率严格等于原冻结图 640×360，且四种标注像素均已合入
+        exported = QImage.fromData(overlay.export_png())
+        assert (exported.width(), exported.height()) == (640, 360)
+        red = QColor(theme.CROSSHAIR_HEX)
+        assert exported.pixelColor(40, 40).rgb() == red.rgb()  # 矩形左上角 (20*2, 20*2)
+        assert exported.pixelColor(300, 60).rgb() == red.rgb()  # 箭头杆中段 (150*2, 30*2)
+        assert exported.pixelColor(436, 60).rgb() == red.rgb()  # 箭头实心头部 (218*2, 30*2)
+        text_region = exported.copy(QRect(36, 236, 220, 60))
+        assert _pixels_of(text_region, theme.CROSSHAIR_HEX, tol=16)
+
+        # 马赛克左侧块 (200..219, 200..219) 全部均化为约 (100, 50, 25)，右侧块保持 (0, 200, 100)
+        m_left_a = exported.pixelColor(202, 205)
+        m_left_b = exported.pixelColor(217, 215)
+        assert m_left_a.rgb() == m_left_b.rgb()
+        assert abs(m_left_a.red() - 100) <= 2
+        assert abs(m_left_a.green() - 50) <= 2
+        assert abs(m_left_a.blue() - 25) <= 2
+        assert exported.pixelColor(230, 210).getRgb()[:3] == (0, 200, 100)
+
+        # 撤销马赛克：重放后恢复原始黑/彩清晰分界，其它三种标注仍在
+        QTest.mouseClick(overlay.toolbar.button("undo"), Qt.MouseButton.LeftButton)
+        qapp.processEvents()
+        assert len(overlay.operations) == 3
+        after_undo_mosaic = overlay.export_image()
+        assert after_undo_mosaic.pixelColor(202, 205).getRgb()[:3] == (0, 0, 0)
+        assert after_undo_mosaic.pixelColor(215, 205).getRgb()[:3] == (200, 100, 50)
+        assert after_undo_mosaic.pixelColor(40, 40).rgb() == red.rgb()
+
+        # 全部撤销回空：撤销按钮重新置灰，合成图恢复为原冻结图
+        for _ in range(3):
+            QTest.mouseClick(overlay.toolbar.button("undo"), Qt.MouseButton.LeftButton)
+        qapp.processEvents()
+        assert overlay.operations == ()
+        assert overlay.toolbar.button("undo").isEnabled() is False
+        restored = overlay.export_image()
+        assert restored.pixelColor(40, 40).name() == "#ffffff"
+        assert restored.pixelColor(300, 60).name() == "#ffffff"
+    finally:
+        overlay.close_silent()
+        overlay.deleteLater()
+
+
+def test_annotate_overlay_copy_and_save_feedback_and_auto_close(qapp: QApplication) -> None:
+    """U12：复制 False 提示 1.5s 不关 / True 立即关；保存 error 提示不关 / path 显示路径 2.5s 后关。"""
+    # 验证默认保存自动关闭延迟取自 theme.ANNOTATE_SAVED_FEEDBACK_MS (2500)
+    default_ov = _open_annotator((100, 100, 320, 180))
+    try:
+        assert default_ov._saved_feedback_ms == theme.ANNOTATE_SAVED_FEEDBACK_MS == 2500
+    finally:
+        default_ov.close_silent()
+        default_ov.deleteLater()
+
+    # 1. 复制 False 不关并限时恢复 -> 复制 True 立即关并回调 on_closed
+    copy_payloads: list[bytes] = []
+    copy_ok = [False]
+    copy_closed: list[int] = []
+    ov_copy = _open_annotator(
+        (100, 100, 320, 180),
+        on_copy_image=lambda png: (copy_payloads.append(png), copy_ok[0])[1],
+        on_closed=lambda: copy_closed.append(1),
+        copy_feedback_ms=80,
+    )
+    try:
+        QTest.mouseClick(ov_copy.toolbar.button("copy"), Qt.MouseButton.LeftButton)
+        qapp.processEvents()
+        assert len(copy_payloads) == 1
+        assert ov_copy.isVisible() is True
+        assert copy_closed == []
+        assert ov_copy.toolbar.button("copy").text() == "复制失败"
+        assert _wait_until(lambda: ov_copy.toolbar.button("copy").text() == "复制", 1000)
+
+        copy_ok[0] = True
+        QTest.mouseClick(ov_copy.toolbar.button("copy"), Qt.MouseButton.LeftButton)
+        qapp.processEvents()
+        assert len(copy_payloads) == 2
+        assert ov_copy.isVisible() is False
+        assert copy_closed == [1]
+    finally:
+        ov_copy.close_silent()
+        ov_copy.deleteLater()
+
+    # 2. 保存 error 不关 -> 保存 path 显示路径并在 saved_feedback_ms 后关闭
+    save_results: list[_FakeSaveResult] = [
+        _FakeSaveResult(error="目录无写权限"),
+        _FakeSaveResult(path="/home/u/Pictures/Ollama Voice Input/截屏 2026-11-21 10-00-00.png"),
+    ]
+    save_closed: list[int] = []
+    ov_save = _open_annotator(
+        (100, 100, 320, 180),
+        on_save_image=lambda _png: save_results.pop(0),
+        on_closed=lambda: save_closed.append(1),
+        saved_feedback_ms=90,
+    )
+    try:
+        QTest.mouseClick(ov_save.toolbar.button("save"), Qt.MouseButton.LeftButton)
+        qapp.processEvents()
+        assert ov_save.isVisible() is True
+        assert save_closed == []
+        assert ov_save.toolbar.status_text() == "保存失败：目录无写权限"
+
+        QTest.mouseClick(ov_save.toolbar.button("save"), Qt.MouseButton.LeftButton)
+        qapp.processEvents()
+        assert ov_save.isVisible() is True
+        assert ov_save.toolbar.status_text() == "✓ 已保存 /home/u/Pictures/Ollama Voice Input/截屏 2026-11-21 10-00-00.png"
+        assert save_closed == []
+        assert _wait_until(lambda: not ov_save.isVisible(), 1500)
+        assert save_closed == [1]
+    finally:
+        ov_save.close_silent()
+        ov_save.deleteLater()
+
+    # 3. 契约违例 SaveResult（全空）立即报错，不静默兜底
+    ov_bad = _open_annotator((100, 100, 320, 180), on_save_image=lambda _png: _FakeSaveResult())
+    try:
+        with pytest.raises(ValueError, match="SaveResult"):
+            ov_bad._save_image()
+    finally:
+        ov_bad.close_silent()
+        ov_bad.deleteLater()
+
+
+def test_overlays_escape_focus_arbitration_and_two_step_text_edit(qapp: QApplication) -> None:
+    """U12（10.17 焦点裁决）：有焦点时 handle_escape 不做事仅按键事件生效；无焦点时 handle_escape 生效且连按两次均处理。"""
+    other = QWidget()
+    other.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+    other.setGeometry(0, 0, 120, 80)
+    other.show()
+    try:
+        # 1. AnnotateOverlay 持有键盘焦点：文字输入中 handle_escape 不做事；按键 Esc 仅结束输入；再次 handle_escape 仍不做事；第二次按键 Esc 关闭
+        closed_focused: list[int] = []
+        ov_focused = _open_annotator((100, 100, 320, 180), on_closed=lambda: closed_focused.append(1))
+        try:
+            ov_focused.activateWindow()
+            ov_focused.setFocus()
+            qapp.processEvents()
+            assert ov_focused.isActiveWindow() is True
+
+            QTest.mouseClick(ov_focused.toolbar.button("text"), Qt.MouseButton.LeftButton)
+            QTest.mouseClick(ov_focused, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, QPoint(140, 140))
+            qapp.processEvents()
+            assert ov_focused.is_editing_text is True
+            assert ov_focused._text_edit is not None
+            ov_focused._text_edit.setText("未提交")
+
+            # 全局 Esc 先到：窗口有焦点 -> 不做事
+            ov_focused.handle_escape()
+            qapp.processEvents()
+            assert ov_focused.is_editing_text is True
+            assert ov_focused.isVisible() is True
+            assert closed_focused == []
+
+            # 窗内第一次 Esc：只结束文字输入，不提交、不关闭，焦点回到浮窗
+            QTest.keyClick(ov_focused._text_edit, Qt.Key.Key_Escape)
+            qapp.processEvents()
+            assert ov_focused.is_editing_text is False
+            assert ov_focused.operations == ()
+            assert ov_focused.isVisible() is True
+            assert closed_focused == []
+
+            # 同一次物理按键若全局 Esc 晚到：浮窗仍持有焦点 -> 不做事（不会被一次按键关掉）
+            ov_focused.handle_escape()
+            qapp.processEvents()
+            assert ov_focused.isVisible() is True
+            assert closed_focused == []
+
+            # 第二次窗内 Esc：关闭浮窗
+            QTest.keyClick(ov_focused, Qt.Key.Key_Escape)
+            qapp.processEvents()
+            assert ov_focused.isVisible() is False
+            assert closed_focused == [1]
+        finally:
+            ov_focused.close_silent()
+            ov_focused.deleteLater()
+
+        # 2. AnnotateOverlay 无键盘焦点：连续两次 handle_escape（0ms 间隔，无时间去重）分别结束文字输入、关闭浮窗
+        closed_unfocused: list[int] = []
+        ov_unfocused = _open_annotator((100, 100, 320, 180), on_closed=lambda: closed_unfocused.append(1))
+        try:
+            QTest.mouseClick(ov_unfocused.toolbar.button("text"), Qt.MouseButton.LeftButton)
+            QTest.mouseClick(ov_unfocused, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, QPoint(140, 140))
+            qapp.processEvents()
+            assert ov_unfocused.is_editing_text is True
+
+            other.activateWindow()
+            other.setFocus()
+            qapp.processEvents()
+            assert ov_unfocused.isActiveWindow() is False
+
+            ov_unfocused.handle_escape()
+            assert ov_unfocused.is_editing_text is False
+            assert ov_unfocused.isVisible() is True
+            assert closed_unfocused == []
+
+            ov_unfocused.handle_escape()
+            qapp.processEvents()
+            assert ov_unfocused.isVisible() is False
+            assert closed_unfocused == [1]
+        finally:
+            ov_unfocused.close_silent()
+            ov_unfocused.deleteLater()
+
+        # 3. InplaceTranslateOverlay 焦点裁决：有焦点时 handle_escape 不关（按键关）；无焦点时 handle_escape 直接关闭并回调
+        inplace_focused_closed: list[int] = []
+        ip_focused = _open_overlay((100, 100, 320, 180), "ocr", on_closed=lambda: inplace_focused_closed.append(1))
+        try:
+            ip_focused.activateWindow()
+            ip_focused.setFocus()
+            qapp.processEvents()
+            assert ip_focused.isActiveWindow() is True
+
+            ip_focused.handle_escape()
+            qapp.processEvents()
+            assert ip_focused.isVisible() is True
+            assert inplace_focused_closed == []
+
+            QTest.keyClick(ip_focused, Qt.Key.Key_Escape)
+            qapp.processEvents()
+            assert ip_focused.isVisible() is False
+            assert inplace_focused_closed == [1]
+        finally:
+            ip_focused.close_silent()
+            ip_focused.deleteLater()
+
+        inplace_unfocused_closed: list[int] = []
+        ip_unfocused = _open_overlay((100, 100, 320, 180), "ocr", on_closed=lambda: inplace_unfocused_closed.append(1))
+        try:
+            other.activateWindow()
+            other.setFocus()
+            qapp.processEvents()
+            assert ip_unfocused.isActiveWindow() is False
+
+            ip_unfocused.handle_escape()
+            qapp.processEvents()
+            assert ip_unfocused.isVisible() is False
+            assert inplace_unfocused_closed == [1]
+        finally:
+            ip_unfocused.close_silent()
+            ip_unfocused.deleteLater()
+    finally:
+        other.close()
+        other.deleteLater()

@@ -17,6 +17,9 @@ def test_activation_inside_untriggered_interval_triggers_once() -> None:
     state.interval_started("screenshot", 2000)
     assert [(e.kind, e.action) for e in state.activated("screenshot", 2000)] == [("fire", "screenshot")]
 
+    state.interval_started("annotate", 3000)
+    assert [(e.kind, e.action) for e in state.activated("annotate", 3000)] == [("fire", "annotate")]
+
 
 def test_repeats_inside_triggered_interval_and_duplicate_reports_have_no_effect() -> None:
     state = HotkeyPressState()

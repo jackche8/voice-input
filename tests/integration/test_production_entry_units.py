@@ -73,6 +73,13 @@ def test_daemon_entry_is_thin():
         "ensure_portal_app_entry(paths, os.environ)",
         "supervisor.stop(",
         "CaptureFlow",
+        "AnnotateOverlay",
+        "open_annotator",
+        "platform.write_clipboard_png",
+        "pictures_dir(",
+        "on_screenshot_annotate=actions.annotate",
+        "on_annotate=actions.annotate",
+        'attach_app_log(paths.logs / "app.log")',
         "DeliveryLoop",
         "VoiceHudOverlay",
         "StudioTrayIcon",
@@ -84,6 +91,17 @@ def test_daemon_entry_is_thin():
     ):
         assert needed in src
     assert src.index("event_loop.request_stop()") < src.index("api.close()") < src.index("event_loop.stop(")
+
+
+def test_daemon_load_bindings_includes_fifth_hotkey_annotate(tmp_path: Path):
+    import json
+
+    import daemon
+
+    cfg_path = tmp_path / "config.json"
+    cfg_path.write_text(json.dumps({"hotkey_annotate": "ctrl+shift+a"}), encoding="utf-8")
+    bindings = daemon.load_bindings(cfg_path)
+    assert bindings.annotate == "ctrl+shift+a"
 
 
 def test_build_production_app_binds_environ_roots_and_serves_pages(tmp_path):

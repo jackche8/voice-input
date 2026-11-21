@@ -62,6 +62,19 @@ def open_translate_overlay(app, overlay_cls, png, rect, *, mode, virtual_rect, o
     return _show_over_desktop(app, ov)
 
 
+def open_annotator(app, annotator_cls, png, rect, *, virtual_rect, on_copy_image, on_save_image, on_closed):
+    """打开截屏标注浮窗（全屏透明窗，与框选器/原位浮窗同一显示方式）。"""
+    ann = annotator_cls(
+        png,
+        rect,
+        virtual_geometry=virtual_rect,
+        on_copy_image=on_copy_image,
+        on_save_image=on_save_image,
+        on_closed=on_closed,
+    )
+    return _show_over_desktop(app, ann)
+
+
 def _show_over_desktop(app, widget):
     """单屏 showFullScreen（不被顶栏/Dock 压扁），多屏按虚拟桌面几何 show；置顶并激活。"""
     if len(app.screens()) <= 1:

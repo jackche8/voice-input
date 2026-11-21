@@ -8,10 +8,12 @@
 from __future__ import annotations
 
 import os
+import sys
+import threading
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import IO, Protocol
+from typing import IO, Protocol, TextIO
 
 from _platform.detect import detect_os
 from _platform.protocol import OsName
@@ -39,9 +41,96 @@ class ChildHandle(Protocol):
     def terminate_session(self, timeout_s: float) -> list[int]: ...
 
 
-def _rotate(log_path: Path) -> None:
+def rotate_log(log_path: Path) -> None:
+    """超过 LOG_ROTATE_BYTES（10MB）时将日志改名为 `.1`（只留一份）。"""
     if log_path.is_file() and log_path.stat().st_size > LOG_ROTATE_BYTES:
         os.replace(log_path, log_path.with_name(log_path.name + ".1"))
+
+
+class _TeeTextStream:
+    """将主进程 stdout/stderr 同步写入原流与持久化日志文件（线程安全，支持 pythonw 原流为 None）。"""
+
+    def __init__(self, primary: TextIO | None, sink: TextIO, lock: threading.Lock) -> None:
+        self._primary = primary
+        self._sink = sink
+        self._lock = lock
+        self.encoding = getattr(primary, "encoding", "utf-8") or "utf-8"
+
+    def write(self, data: str) -> int:
+        if not data:
+            return 0
+        if self._primary is not None:
+            try:
+                self._primary.write(data)
+            except OSError:
+                pass
+        with self._lock:
+            if not self._sink.closed:
+                self._sink.write(data)
+                self._sink.flush()
+        return len(data)
+
+    def flush(self) -> None:
+        if self._primary is not None:
+            try:
+                self._primary.flush()
+            except OSError:
+                pass
+        with self._lock:
+            if not self._sink.closed:
+                self._sink.flush()
+
+    def isatty(self) -> bool:
+        return bool(self._primary.isatty()) if self._primary is not None else False
+
+    def fileno(self) -> int:
+        if self._primary is not None:
+            return self._primary.fileno()
+        return self._sink.fileno()
+
+
+class AppLogHandle:
+    """主进程日志分流句柄；close() 幂等恢复原 sys.stdout/sys.stderr 并关闭日志文件。"""
+
+    def __init__(
+        self,
+        log_path: Path,
+        sink: TextIO,
+        lock: threading.Lock,
+        orig_stdout: TextIO | None,
+        orig_stderr: TextIO | None,
+    ) -> None:
+        self.path = log_path
+        self._sink = sink
+        self._lock = lock
+        self._orig_stdout = orig_stdout
+        self._orig_stderr = orig_stderr
+        self._closed = False
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        if isinstance(sys.stdout, _TeeTextStream) and sys.stdout._sink is self._sink:
+            sys.stdout = self._orig_stdout
+        if isinstance(sys.stderr, _TeeTextStream) and sys.stderr._sink is self._sink:
+            sys.stderr = self._orig_stderr
+        with self._lock:
+            if not self._sink.closed:
+                self._sink.flush()
+                self._sink.close()
+
+
+def attach_app_log(log_path: Path) -> AppLogHandle:
+    """按 rotate_log 轮转后以追加模式打开主进程日志，将 sys.stdout / sys.stderr 同步落盘。"""
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    rotate_log(log_path)
+    sink = open(log_path, "a", encoding="utf-8", buffering=1)
+    lock = threading.Lock()
+    orig_stdout, orig_stderr = sys.stdout, sys.stderr
+    sys.stdout = _TeeTextStream(orig_stdout, sink, lock)  # type: ignore[assignment]
+    sys.stderr = _TeeTextStream(orig_stderr, sink, lock)  # type: ignore[assignment]
+    return AppLogHandle(log_path, sink, lock, orig_stdout, orig_stderr)
 
 
 def spawn_child(
@@ -56,7 +145,7 @@ def spawn_child(
     """拉起组件：stdout+stderr 追加到 log_path（超过 10MB 先改名为 .1，只留一份）；stdin 默认接空设备。"""
     os_name = os_name or detect_os()
     log_path.parent.mkdir(parents=True, exist_ok=True)
-    _rotate(log_path)
+    rotate_log(log_path)
     with open(log_path, "ab") as log_file:  # 子进程继承后父进程即可关闭
         if os_name == "windows":
             from _platform import _child_windows
@@ -106,11 +195,14 @@ def kill_recorded_session(record: SessionRecord, *, timeout_s: float = 5.0, os_n
 
 
 __all__ = [
+    "AppLogHandle",
     "ChildHandle",
     "LOG_ROTATE_BYTES",
     "SessionRecord",
+    "attach_app_log",
     "kill_recorded_session",
     "process_identity",
+    "rotate_log",
     "session_record",
     "spawn_child",
 ]

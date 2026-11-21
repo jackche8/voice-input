@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""真实抓取器链路契约：松开后不得误触发、回流过滤、四键（含 ocr）映射与回退释放。
+"""真实抓取器链路契约：松开后不得误触发、回流过滤、五键（含 ocr / annotate）映射与回退释放。
 
 当宿主机存在可用 X11 连接与 /dev/uinput 权限时走真实 X server；
 在隔离 venv-test 或无 X 授权沙箱中，向真实 XInputHotkeyGrabber 注入内存 Display 夹具完成同等契约验证。
@@ -46,7 +46,13 @@ class _NoopActions:
     def screenshot(self) -> None:
         pass
 
+    def ocr(self) -> None:
+        pass
+
     def repeat(self) -> None:
+        pass
+
+    def annotate(self) -> None:
         pass
 
     def overlay_active(self) -> bool:
@@ -63,7 +69,13 @@ def VoiceRecorder():  # noqa: N802
 def _ctx() -> HotkeyContext:
     return HotkeyContext(
         actions=_NoopActions(),
-        bindings=HotkeyBindings(voice="ctrl+alt+z", screenshot="ctrl+alt+x", ocr="ctrl+alt+o", repeat="ctrl+alt+r"),
+        bindings=HotkeyBindings(
+            voice="ctrl+alt+z",
+            screenshot="ctrl+alt+x",
+            ocr="ctrl+alt+o",
+            repeat="ctrl+alt+r",
+            annotate="ctrl+alt+a",
+        ),
         janitor=ModifierJanitor(session_type=os.environ.get("XDG_SESSION_TYPE", "x11"), kb=None, key=None, xdotool=""),
         guard=_GUARD,
         session_type=os.environ.get("XDG_SESSION_TYPE", "x11"),
@@ -91,7 +103,12 @@ def test_stale_trigger_does_not_match() -> None:
     try:
         trigger = grabber._voice_combo["trigger"]
         other = trigger + 1
-        while other in {grabber._screen_combo["trigger"], grabber._ocr_combo["trigger"], grabber._repeat_combo["trigger"]}:
+        while other in {
+            grabber._screen_combo["trigger"],
+            grabber._ocr_combo["trigger"],
+            grabber._repeat_combo["trigger"],
+            grabber._annotate_combo["trigger"],
+        }:
             other += 1
         grabber._pressed = {trigger, 37, 64}
         assert grabber._match_combo(grabber._voice_combo, other) is False, "陈 trigger 配非 trigger 键必须不命中"
@@ -206,20 +223,30 @@ def test_fallback_release_clears_trigger_including_ocr() -> None:
     )
     old_until = _GUARD.until
     try:
-        # 第四热键 OCR 在 XInput2 回退中命中：上报区间开始与放行
+        # 第四/五热键 OCR 与 Annotate 在 XInput2 回退中命中：上报区间开始与放行
         ocr_trig = grabber._ocr_combo["trigger"]
+        ann_trig = grabber._annotate_combo["trigger"]
         grabber._handle_press(ocr_trig, 0, 1000)
-        assert sink.calls == [("start", "ocr", 1000), ("activated", "ocr", 1000)]
+        grabber._handle_press(ann_trig, 0, 1050)
+        assert sink.calls == [
+            ("start", "ocr", 1000),
+            ("activated", "ocr", 1000),
+            ("start", "annotate", 1050),
+            ("activated", "annotate", 1050),
+        ]
 
         grabber._ignore_source_ids = set()
         _GUARD.until = time.monotonic() + 10
         trig = grabber._voice_combo["trigger"]
         grabber._pressed.add(trig)
         grabber._pressed.add(ocr_trig)
+        grabber._pressed.add(ann_trig)
         grabber._handle_release(trig)
         grabber._handle_release(ocr_trig)
+        grabber._handle_release(ann_trig)
         assert trig not in grabber._pressed, "回退窗必须放行 voice trigger 抬起"
         assert ocr_trig not in grabber._pressed, "回退窗必须放行 ocr trigger 抬起"
+        assert ann_trig not in grabber._pressed, "回退窗必须放行 annotate trigger 抬起"
     finally:
         _GUARD.until = old_until
         grabber.cleanup()
@@ -277,6 +304,7 @@ def test_xinput_fallback_reports_own_bindings_and_only_escape_closes_overlay() -
             ("screenshot", grabber._screen_combo, 200),
             ("ocr", grabber._ocr_combo, 300),
             ("repeat", grabber._repeat_combo, 400),
+            ("annotate", grabber._annotate_combo, 450),
             ("voice", grabber._voice_combo, 500),
         ):
             grabber._handle_press(combo["trigger"], 0, ms)

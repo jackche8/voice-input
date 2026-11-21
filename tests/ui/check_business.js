@@ -551,20 +551,24 @@ async function runUnit() {
     hotkey_voice: "ctrl+alt+z",
     hotkey_screenshot: "ctrl+alt+x",
     hotkey_ocr: "ctrl+alt+p",
-    hotkey_repeat: "ctrl+alt+r"
+    hotkey_repeat: "ctrl+alt+r",
+    hotkey_annotate: "ctrl+alt+b"
   });
   const savedKeys = setupWorld.lastConfig;
   const afterKeys = setupView.getState();
   if (
     st.hotkey_ocr === "ctrl+alt+o" &&
+    st.hotkey_annotate === "ctrl+alt+a" &&
     savedKeys &&
     savedKeys.hotkey_ocr === "ctrl+alt+p" &&
+    savedKeys.hotkey_annotate === "ctrl+alt+b" &&
     afterKeys.hotkey_ocr === "ctrl+alt+p" &&
+    afterKeys.hotkey_annotate === "ctrl+alt+b" &&
     afterKeys.hotkeysSaved === true &&
     afterKeys.hotkeyCaptureWarning === ""
   ) {
-    pass("home-controller + setup-actions 读取并保存第四热键 hotkey_ocr，保存成功时清空 hotkeyCaptureWarning");
-  } else fail("home-controller hotkey_ocr 保存异常：" + JSON.stringify({ initOcr: st.hotkey_ocr, savedKeys: savedKeys, afterOcr: afterKeys.hotkey_ocr, warn: afterKeys.hotkeyCaptureWarning }));
+    pass("home-controller + setup-actions 读取并保存第四/五热键 hotkey_ocr 与 hotkey_annotate，保存成功时清空 hotkeyCaptureWarning");
+  } else fail("home-controller hotkey_ocr/hotkey_annotate 保存异常：" + JSON.stringify({ initOcr: st.hotkey_ocr, initAnnotate: st.hotkey_annotate, savedKeys: savedKeys, afterOcr: afterKeys.hotkey_ocr, afterAnnotate: afterKeys.hotkey_annotate, warn: afterKeys.hotkeyCaptureWarning }));
 
   /* 一键装齐：POST 一次（无请求体）→ 进行中按 setup/check 重读 → 结束即停；模型就绪仍只看 check.asr/ollama */
   setupWorld.onCheck = function (check, n) {
@@ -725,7 +729,8 @@ async function runUnit() {
         hotkey_voice: "ctrl+alt+z",
         hotkey_screenshot: "ctrl+alt+x",
         hotkey_ocr: "ctrl+alt+o",
-        hotkey_repeat: "ctrl+alt+r"
+        hotkey_repeat: "ctrl+alt+r",
+        hotkey_annotate: "ctrl+alt+a"
       });
     } },
     { path: "/api/v1/history", method: "GET", handler: function (rec) {
@@ -810,6 +815,7 @@ async function runUnit() {
     hs.asr.sidecarRunning === true &&
     hs.ollama.modelStatus === "ready" &&
     hs.hotkey_ocr === "ctrl+alt+o" &&
+    hs.hotkey_annotate === "ctrl+alt+a" &&
     hs.translate_target_lang === "zh" &&
     hs.history.records.length === 1 &&
     hs.lanEntries &&
@@ -1986,6 +1992,34 @@ function runAsgi() {
         if (!/未找到/.test(setupView.getState().statusNotice || "")) throw new Error("未知组件重试未呈现 404：" + setupView.getState().statusNotice);
         await setupCtl.hooks.onToggleAutostart(false);
         if (setupView.getState().autostart_enabled !== false) throw new Error("开机自启未经 config 回读为 false");
+        if (setupView.getState().hotkey_annotate !== "ctrl+alt+a") {
+          throw new Error("隔离 ASGI 默认 hotkey_annotate 未映射为 ctrl+alt+a：" + setupView.getState().hotkey_annotate);
+        }
+        await setupCtl.hooks.onSaveHotkeys({
+          hotkey_voice: "ctrl+alt+z",
+          hotkey_screenshot: "ctrl+alt+x",
+          hotkey_ocr: "ctrl+alt+o",
+          hotkey_repeat: "ctrl+alt+r",
+          hotkey_annotate: "ctrl+alt+b"
+        });
+        if (setupView.getState().hotkey_annotate !== "ctrl+alt+b") {
+          throw new Error("隔离 ASGI 保存 hotkey_annotate 未回读：" + setupView.getState().hotkey_annotate);
+        }
+        let dupRejected = false;
+        try {
+          await setupCtl.hooks.onSaveHotkeys({
+            hotkey_voice: "ctrl+alt+z",
+            hotkey_screenshot: "ctrl+alt+x",
+            hotkey_ocr: "ctrl+alt+o",
+            hotkey_repeat: "ctrl+alt+r",
+            hotkey_annotate: "ctrl+alt+z"
+          });
+        } catch (err) {
+          dupRejected = true;
+        }
+        if (!dupRejected || !setupView.getState().hotkeySaveError) {
+          throw new Error("隔离 ASGI 第五键冲突未拒保存或未写 hotkeySaveError：" + JSON.stringify({ dupRejected: dupRejected, err: setupView.getState().hotkeySaveError }));
+        }
         setupCtl.destroy();
         const lan = await client.call("lan_access_api_v1_lan_access_get");
         if (!lan || !lan.token_masked || !Array.isArray(lan.entries) || !lan.entries[0] || !lan.entries[0].url_masked) {

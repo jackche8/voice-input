@@ -276,10 +276,10 @@ hasAll("UtteranceSource", sourceEnums);
 hasAll("HistoryPolish", polishEnums);
 hasAll("ProductEventType", eventEnums);
 
-for (const field of ["stable_text", "tail_text", "raw_text", "final_text", "ocr_text", "polish_enabled", "custom_keywords", "translate_target_lang", "hotkey_voice", "hotkey_screenshot", "hotkey_ocr", "hotkey_repeat", "job_id", "delivery_unknown"]) {
+for (const field of ["stable_text", "tail_text", "raw_text", "final_text", "ocr_text", "polish_enabled", "custom_keywords", "translate_target_lang", "hotkey_voice", "hotkey_screenshot", "hotkey_ocr", "hotkey_repeat", "hotkey_annotate", "job_id", "delivery_unknown"]) {
   if (!prodText.includes(field)) fail("生产代码未使用契约字段 " + field);
 }
-pass("关键契约字段（含 hotkey_ocr）已在界面层出现");
+pass("关键契约字段（含 hotkey_ocr、hotkey_annotate）已在界面层出现");
 
 const indexHtml = fs.readFileSync(path.join(v3, "index.html"), "utf8");
 if (!/css\/studio\.css/.test(indexHtml) || !/js\/setup-panel\.js/.test(indexHtml) || !/js\/home\.js/.test(indexHtml) || !/js\/business\/setup-actions\.js/.test(indexHtml) || !/js\/business\/home-controller\.js/.test(indexHtml) || !/data-page=["']home["']/.test(indexHtml)) {

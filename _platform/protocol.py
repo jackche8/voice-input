@@ -60,6 +60,7 @@ class HotkeyCallbacks:
     on_screenshot: Callable[[], None]
     on_ocr: Callable[[], None] = lambda: None
     on_repeat: Callable[[], None] = lambda: None
+    on_annotate: Callable[[], None] = lambda: None
     overlay_active: Callable[[], bool] = lambda: False
     close_overlay: Callable[[], bool] = lambda: False
 
@@ -93,6 +94,8 @@ class PlatformAdapter(Protocol):
 
     def write_clipboard_text(self, text: str) -> str | None: ...
 
+    def write_clipboard_png(self, png: bytes) -> str | None: ...
+
     def inject_text(
         self,
         text: str,
@@ -110,6 +113,7 @@ class PlatformAdapter(Protocol):
         on_screenshot: Callable[[], None],
         on_ocr: Callable[[], None] = ...,
         on_repeat: Callable[[], None] = ...,
+        on_annotate: Callable[[], None] = ...,
         overlay_active: Callable[[], bool] = ...,
         close_overlay: Callable[[], bool] = ...,
         on_error: Callable[[str | None], None],

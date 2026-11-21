@@ -27,7 +27,7 @@ from PySide6.QtWidgets import QWidget
 from _contracts import OcrTextBlock
 from _ui_desktop import theme
 from _ui_desktop.inplace_layout import BlockLayout, layout_ocr_block, layout_translated_block, row_font
-from _ui_desktop.mini_menu import COPY_OCR, COPY_TRANSLATED, MiniMenu, place_menu
+from _ui_desktop.mini_menu import COPY_OCR, COPY_TRANSLATED, MiniMenu, has_window_keyboard_focus, place_menu
 from _ui_desktop.voice_bar_motion import FrameTicker, ease_out
 
 MODES = ("translate", "ocr")
@@ -147,6 +147,12 @@ class InplaceTranslateOverlay(QWidget):
         self._enter_phase("error")
         self.menu.show_error(f"{prefix}：{message}" if message else prefix)
         self._place_menu()
+
+    def handle_escape(self) -> None:
+        """全局 Esc（按焦点状态裁决）：持有焦点时交窗内按键事件，无焦点时关闭并回调 on_closed。"""
+        if has_window_keyboard_focus(self):
+            return
+        self.close()
 
     def close_silent(self) -> None:
         """关闭但不回调 on_closed（被新一次截屏取代时）。"""

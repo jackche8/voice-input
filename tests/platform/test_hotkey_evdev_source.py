@@ -27,7 +27,9 @@ def make(monkeypatch):
     def _make(*devices, rescan=()):
         ctx = HotkeyContext(
             actions=CallbackHotkeyActions(on_voice_start=lambda: True, on_voice_stop=lambda: None, on_screenshot=lambda: None),
-            bindings=HotkeyBindings(voice="ctrl+alt+z", screenshot="ctrl+alt+x", ocr="ctrl+alt+o", repeat="ctrl+alt+r"),
+            bindings=HotkeyBindings(
+                voice="ctrl+alt+z", screenshot="ctrl+alt+x", ocr="ctrl+alt+o", repeat="ctrl+alt+r", annotate="ctrl+alt+a"
+            ),
             janitor=None,
             guard=InjectGuard(),
             session_type="wayland",
@@ -238,7 +240,9 @@ def test_rescan_skips_devices_that_fail_mid_probe_and_reader_keeps_reporting(mon
 
     ctx = HotkeyContext(
         actions=CallbackHotkeyActions(on_voice_start=lambda: True, on_voice_stop=lambda: None, on_screenshot=lambda: None),
-        bindings=HotkeyBindings(voice="ctrl+alt+z", screenshot="ctrl+alt+x", ocr="ctrl+alt+o", repeat="ctrl+alt+r"),
+        bindings=HotkeyBindings(
+            voice="ctrl+alt+z", screenshot="ctrl+alt+x", ocr="ctrl+alt+o", repeat="ctrl+alt+r", annotate="ctrl+alt+a"
+        ),
         janitor=None,
         guard=InjectGuard(),
         session_type="wayland",

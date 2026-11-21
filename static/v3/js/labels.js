@@ -125,7 +125,8 @@
     hotkey_voice: "语音输入",
     hotkey_screenshot: "截图翻译",
     hotkey_ocr: "纯 OCR 识别",
-    hotkey_repeat: "重复上次输入"
+    hotkey_repeat: "重复上次输入",
+    hotkey_annotate: "截屏标注"
   };
 
   const HOME_NAVS = [

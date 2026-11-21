@@ -30,16 +30,18 @@ from _desktop.singleton import try_acquire_singleton_lock
 from _desktop.status import PlatformStatus
 from _desktop.supervisor import create_supervisor
 from _desktop.ui_bridge import (
-    QtUiBridge, configure_qt_platform_env, open_live_selector, open_translate_overlay, query_virtual_screen_rect,
+    QtUiBridge, configure_qt_platform_env, open_annotator, open_live_selector, open_translate_overlay,
+    query_virtual_screen_rect,
 )
 from _desktop.voice import VoiceFlow, build_keywords_context_provider, new_job_id
 from _hotkey import HotkeyBindings, format_hotkey
-from _paths import default_app_paths
+from _paths import APP_DISPLAY_NAME, default_app_paths, pictures_dir
 from _platform import create_platform_adapter
 from _platform._common import SoundDeviceSource
 from _platform.certs import ensure_tls_certificates
+from _platform.child_process import attach_app_log
 from _ports import local_ports
-from _ui_desktop import InplaceTranslateOverlay, RedCrosshairSelector, StudioTrayIcon, VoiceHudOverlay
+from _ui_desktop import AnnotateOverlay, InplaceTranslateOverlay, RedCrosshairSelector, StudioTrayIcon, VoiceHudOverlay
 from _version import APP_VERSION
 
 VOICE_CHECK_MS = 2000
@@ -50,10 +52,8 @@ SUPERVISOR_STOP_S = 60.0
 def load_bindings(config: Path) -> HotkeyBindings:
     cfg = ConfigStore(config).load()  # 与服务端同一配置文件（AppPaths.config），只读
     return HotkeyBindings(
-        voice=cfg.hotkey_voice,
-        screenshot=cfg.hotkey_screenshot,
-        ocr=cfg.hotkey_ocr,
-        repeat=cfg.hotkey_repeat,
+        voice=cfg.hotkey_voice, screenshot=cfg.hotkey_screenshot, ocr=cfg.hotkey_ocr,
+        repeat=cfg.hotkey_repeat, annotate=cfg.hotkey_annotate,
     )
 
 
@@ -67,6 +67,8 @@ def main() -> None:
     lock = try_acquire_singleton_lock(paths.lock)
     if lock is None:  # 已有实例在运行：请它打开主窗口，本进程退出
         sys.exit(run_as_second_instance(paths))
+    app_log = attach_app_log(paths.logs / "app.log")
+    atexit.register(app_log.close)
     ensure_tls_certificates(paths.cert_dir)  # 首次运行先生成本地 CA 与服务端证书（本机 API 客户端要用它校验）
     config = ConfigStore(paths.config)
     bindings = load_bindings(paths.config)
@@ -82,22 +84,18 @@ def main() -> None:
     hud = VoiceHudOverlay()
     capture_flow = CaptureFlow(
         capture_region=lambda rect, vrect: platform.capture_region(rect, virtual_rect=vrect),
-        open_selector=lambda rect, mode_label, on_sel, on_cancel: open_live_selector(
-            app, RedCrosshairSelector, rect, mode_label, on_sel, on_cancel
+        open_selector=lambda rect, label, on_sel, on_cancel: open_live_selector(
+            app, RedCrosshairSelector, rect, label, on_sel, on_cancel
         ),
         open_inplace_overlay=lambda png, rect, **kw: open_translate_overlay(app, InplaceTranslateOverlay, png, rect, **kw),
+        open_annotator=lambda png, rect, **kw: open_annotator(app, AnnotateOverlay, png, rect, **kw),
         copy_clipboard=lambda text: platform.write_clipboard_text(text) is None,
-        api=api,
-        status=status,
-        invoke_ui=bridge.post,
-        get_virtual_rect=lambda: query_virtual_screen_rect(app),
+        copy_image=platform.write_clipboard_png,
+        save_dir=lambda: pictures_dir(os.environ, os_name=platform.os_name) / APP_DISPLAY_NAME,
+        api=api, status=status, invoke_ui=bridge.post, get_virtual_rect=lambda: query_virtual_screen_rect(app),
     )
     voice = VoiceFlow(
-        api=api,
-        status=status,
-        probe=probe,
-        source_factory=SoundDeviceSource,
-        beep=platform.play_beep,
+        api=api, status=status, probe=probe, source_factory=SoundDeviceSource, beep=platform.play_beep,
         context_provider=build_keywords_context_provider(api),
     )
     repeat_action = RepeatAction(api=api, last=last, probe=probe, status=status, job_ids=new_job_id)
@@ -105,13 +103,9 @@ def main() -> None:
     main_window = MainWindow(paths=paths, origin=origin, environ=os.environ,
                              on_failed=lambda message: status.error(ErrorCode.dependency_failed, message))
     tray = StudioTrayIcon(
-        on_open_home=lambda: main_window.show("/"),
-        on_screenshot_translate=actions.screenshot,
-        on_pure_ocr=actions.ocr,
-        on_open_setup=lambda: main_window.show("/setup"),
-        on_toggle_hud=hud.set_enabled,
-        on_quit=app.quit,
-        on_retry_server=lambda: supervisor.retry("server"),
+        on_open_home=lambda: main_window.show("/"), on_screenshot_translate=actions.screenshot,
+        on_pure_ocr=actions.ocr, on_screenshot_annotate=actions.annotate, on_open_setup=lambda: main_window.show("/setup"),
+        on_toggle_hud=hud.set_enabled, on_quit=app.quit, on_retry_server=lambda: supervisor.retry("server"),
         hud_enabled=hud.enabled,
     )
     tray.show()
@@ -153,7 +147,7 @@ def main() -> None:
 
     hotkey_rig = platform.create_hotkey_rig(
         bindings, on_voice_start=actions.voice_start, on_voice_stop=actions.voice_stop, on_screenshot=actions.screenshot,
-        on_ocr=actions.ocr, on_repeat=actions.repeat, overlay_active=actions.overlay_active,
+        on_ocr=actions.ocr, on_repeat=actions.repeat, on_annotate=actions.annotate, overlay_active=actions.overlay_active,
         close_overlay=actions.close_overlay, on_error=status.set_hotkey_error,
     )
     hotkey_rig.start()
@@ -163,7 +157,8 @@ def main() -> None:
 
     print(f"Ollama Voice Input v{APP_VERSION} 已启动 ({platform.os_name}/{platform.session_type})，热键后端 "
           f"{hotkey_rig.backend_name}，快捷键 语音 {format_hotkey(bindings.voice)} · 原位翻译 {format_hotkey(bindings.screenshot)}"
-          f" · 纯 OCR {format_hotkey(bindings.ocr)} · 重复 {format_hotkey(bindings.repeat)}", flush=True)
+          f" · 纯 OCR {format_hotkey(bindings.ocr)} · 重复 {format_hotkey(bindings.repeat)}"
+          f" · 截屏标注 {format_hotkey(bindings.annotate)}", flush=True)
 
     for sig_name in ("SIGTERM", "SIGINT", "SIGHUP"):
         sig = getattr(signal, sig_name, None)
@@ -207,6 +202,7 @@ def main() -> None:
         tray.close()
         status.close()
         platform.close()
+        app_log.close()
         lock.release()
 
 

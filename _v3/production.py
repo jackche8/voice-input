@@ -216,6 +216,7 @@ def _setup_service(
             screenshot=cfg.hotkey_screenshot,
             repeat=cfg.hotkey_repeat,
             ocr=cfg.hotkey_ocr,
+            annotate=cfg.hotkey_annotate,
         )
         return scan_hotkey_conflicts(bindings, run=adapters.run, which=adapters.which)
 

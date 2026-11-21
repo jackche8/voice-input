@@ -117,6 +117,7 @@ class StudioTrayIcon(QObject):
         on_toggle_hud: Callable[[bool], None] | None = None,
         on_quit: Callable[[], None] | None = None,
         on_retry_server: Callable[[], None] | None = None,
+        on_screenshot_annotate: Callable[[], None] | None = None,
         *,
         hud_enabled: bool = True,
         tooltip: str = "Voice Studio · 本地语音与原位翻译",
@@ -132,6 +133,7 @@ class StudioTrayIcon(QObject):
         self._on_toggle_hud = on_toggle_hud
         self._on_quit = on_quit
         self._on_retry_server = on_retry_server
+        self._on_screenshot_annotate = on_screenshot_annotate
 
         self._state: str = "idle"
         self._tooltip: str = tooltip
@@ -165,6 +167,10 @@ class StudioTrayIcon(QObject):
         self.pure_ocr_action = QAction("纯 OCR 识别", self.menu)
         self.pure_ocr_action.triggered.connect(self._trigger_pure_ocr)
         self.menu.addAction(self.pure_ocr_action)
+
+        self.screenshot_annotate_action = QAction("截屏标注", self.menu)
+        self.screenshot_annotate_action.triggered.connect(self._trigger_screenshot_annotate)
+        self.menu.addAction(self.screenshot_annotate_action)
 
         self.menu.addSeparator()
 
@@ -298,3 +304,7 @@ class StudioTrayIcon(QObject):
     def _trigger_retry_server(self) -> None:
         if self._on_retry_server is not None:
             self._on_retry_server()
+
+    def _trigger_screenshot_annotate(self) -> None:
+        if self._on_screenshot_annotate is not None:
+            self._on_screenshot_annotate()

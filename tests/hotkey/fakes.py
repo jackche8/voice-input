@@ -261,6 +261,7 @@ class FakeXInputDisplay:
         ord("x"): 53,
         ord("o"): 32,
         ord("r"): 27,
+        ord("a"): 38,
     }
 
     def __init__(self) -> None:

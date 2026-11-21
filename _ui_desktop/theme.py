@@ -65,6 +65,18 @@ OVERLAY_FRAME_MS = 16
 OVERLAY_SPINNER_PX = 11
 OVERLAY_SPIN_PERIOD_MS = 900
 
+# 截屏标注浮窗（UI 验收标准 docs/design/v3.4/annotate-a.html）
+ANNOTATE_STROKE_PX = 3
+ANNOTATE_TEXT_PX = 20
+ANNOTATE_MOSAIC_BLOCK_PX = 10
+ANNOTATE_MIN_DRAG_PX = 6
+ANNOTATE_DRAFT_DASH_PX = (4.0, 3.0)
+ANNOTATE_COPY_FEEDBACK_MS = 1500
+ANNOTATE_SAVED_FEEDBACK_MS = 2500
+ANNOTATE_EDIT_MIN_WIDTH_PX = 48
+ANNOTATE_EDIT_EXTRA_HEIGHT_PX = 8
+ANNOTATE_EDIT_PADDING_X_PX = 18
+
 # ---------------------------------------------------------------------------
 # 3. 语音一体底栏（胶囊 / 字幕条 / 确认卡片三种形态）颜色令牌
 # ---------------------------------------------------------------------------
@@ -230,19 +242,26 @@ def resolve_available_screen_rect(
 
 
 def float_bar_stylesheet() -> str:
-    """原位浮窗迷你菜单 QSS（overlay-a.html 迷你菜单；全部引用本模块令牌）。"""
+    """悬浮工具条 QSS（overlay-a.html 与 annotate-a.html 共用；全部引用本模块令牌）。"""
+    accent_soft = (
+        f"rgba({ACCENT_SOFT_RGBA[0]}, {ACCENT_SOFT_RGBA[1]}, "
+        f"{ACCENT_SOFT_RGBA[2]}, {ACCENT_SOFT_RGBA[3]})"
+    )
     return (
         f"QFrame#oviFloatBar {{"
         f"  background-color: {SURFACE_HEX};"
         f"  border: 1px solid {BORDER_HEX};"
         f"  border-radius: {RADIUS_MD}px;"
         f"}}"
-        f"QLabel#oviFloatStatus, QLabel#oviFloatError {{"
+        f"QLabel#oviFloatStatus, QLabel#oviFloatOk, QLabel#oviFloatError {{"
         f"  color: {ACCENT_HEX};"
         f"  font-size: {FS_XS}px;"
         f"  font-weight: 600;"
         f"  background: transparent;"
         f"  border: none;"
+        f"}}"
+        f"QLabel#oviFloatOk {{"
+        f"  color: {OK_HEX};"
         f"}}"
         f"QLabel#oviFloatError {{"
         f"  color: {ERROR_HEX};"
@@ -265,17 +284,34 @@ def float_bar_stylesheet() -> str:
         f"  padding: 3px 10px;"
         f"  font-size: {FS_XS}px;"
         f"}}"
-        f"QPushButton:hover {{"
+        f"QPushButton:hover:enabled {{"
         f"  border-color: {ACCENT_HEX};"
         f"  color: {ACCENT_HEX};"
         f"}}"
         f"QPushButton:disabled {{"
         f"  color: {TEXT_MUTED_HEX};"
+        f"  border-color: transparent;"
+        f"}}"
+        f'QPushButton[active="true"] {{'
+        f"  background-color: {accent_soft};"
+        f"  color: {ACCENT_HEX};"
         f"}}"
         f'QPushButton[feedback="ok"] {{'
         f"  color: {OK_HEX};"
         f"}}"
         f'QPushButton[feedback="fail"] {{'
         f"  color: {ERROR_HEX};"
+        f"}}"
+    )
+
+
+def annotate_edit_stylesheet(*, color: str = CROSSHAIR_HEX) -> str:
+    """标注文字内联输入框 QSS（annotate-a.html `.edit`；全部引用本模块令牌）。"""
+    return (
+        f"QLineEdit#oviAnnotateEdit {{"
+        f"  background: transparent;"
+        f"  color: {color};"
+        f"  border: 1px dashed {ACCENT_HEX};"
+        f"  padding: 0 2px;"
         f"}}"
     )

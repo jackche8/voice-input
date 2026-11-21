@@ -80,7 +80,9 @@ if (V3.labels.formatError("delivery_failed", "输入目标已消失", { job_id: 
 
 if (V3.labels.hotkeyLabel("hotkey_ocr") !== "纯 OCR 识别") fail("hotkey_ocr 标签不正确：" + V3.labels.hotkeyLabel("hotkey_ocr"));
 else pass("hotkey_ocr 中文标签为 纯 OCR 识别");
-if (V3.labels.formatHotkey("ctrl+alt+o") !== "Ctrl+Alt+O") fail("formatHotkey 不正确：" + V3.labels.formatHotkey("ctrl+alt+o"));
+if (V3.labels.hotkeyLabel("hotkey_annotate") !== "截屏标注") fail("hotkey_annotate 标签不正确：" + V3.labels.hotkeyLabel("hotkey_annotate"));
+else pass("hotkey_annotate 中文标签为 截屏标注");
+if (V3.labels.formatHotkey("ctrl+alt+o") !== "Ctrl+Alt+O" || V3.labels.formatHotkey("ctrl+alt+a") !== "Ctrl+Alt+A") fail("formatHotkey 不正确：" + V3.labels.formatHotkey("ctrl+alt+o") + " / " + V3.labels.formatHotkey("ctrl+alt+a"));
 else pass("formatHotkey 格式化正确");
 const homeNavIds = Array.isArray(V3.labels.HOME_NAVS) ? V3.labels.HOME_NAVS.map((n) => n.id) : [];
 if (homeNavIds.length !== 5 || homeNavIds.join(",") !== "translate,ocr,history,lan,setup") {
@@ -100,6 +102,7 @@ if (
   home.translate_target_lang !== null ||
   home.hotkey_voice !== "" ||
   home.hotkey_ocr !== "" ||
+  home.hotkey_annotate !== "" ||
   Object.prototype.hasOwnProperty.call(home, "hotkeyHint") ||
   home.capabilities !== null ||
   home.apiPaths !== null ||
@@ -168,6 +171,11 @@ else {
   if (ocrKey.value === "ctrl+alt+o" && ocrKey.consumed === true && !ocrKey.warning) {
     pass("Ctrl+Alt+O 录为 ctrl+alt+o 且无警告");
   } else fail("Ctrl+Alt+O 转换失败：" + JSON.stringify(ocrKey));
+
+  const annotateKey = V3.hotkey.fromKeyboardEvent(ev({ ctrlKey: true, altKey: true, key: "a", code: "KeyA" }));
+  if (annotateKey.value === "ctrl+alt+a" && annotateKey.consumed === true && !annotateKey.warning && !annotateKey.hint) {
+    pass("Ctrl+Alt+A 录为 ctrl+alt+a 且无警告");
+  } else fail("Ctrl+Alt+A 转换失败：" + JSON.stringify(annotateKey));
 }
 
 if (

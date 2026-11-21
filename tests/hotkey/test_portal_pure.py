@@ -33,7 +33,9 @@ from _linux.portal_dbus import (  # noqa: E402
 )
 from tests.hotkey.fakes import FakeX11Display, ManualTimers, RecordingSink  # noqa: E402
 
-DEFAULTS = HotkeyBindings(voice="ctrl+alt+z", screenshot="ctrl+alt+x", ocr="ctrl+alt+o", repeat="ctrl+alt+r")
+DEFAULTS = HotkeyBindings(
+    voice="ctrl+alt+z", screenshot="ctrl+alt+x", ocr="ctrl+alt+o", repeat="ctrl+alt+r", annotate="ctrl+alt+a"
+)
 
 
 def _drain_glib() -> None:
@@ -50,12 +52,15 @@ def test_portal_trigger_format_and_fingerprint_id() -> None:
     assert to_portal_trigger("ctrl+alt+z") == "CTRL+ALT+Z"
     assert to_portal_trigger("ctrl+alt+x") == "CTRL+ALT+X"
     assert to_portal_trigger("ctrl+alt+o") == "CTRL+ALT+O"
+    assert to_portal_trigger("ctrl+alt+a") == "CTRL+ALT+A"
     assert to_portal_trigger("ctrl+grave") == "CTRL+grave"
     assert portal_shortcut_id("screenshot", "ctrl+alt+x") == "screenshot_ctrl_alt_x"
     assert portal_shortcut_id("screenshot", "Ctrl+Shift+S") == "screenshot_ctrl_shift_s"
     assert portal_shortcut_id("ocr", "ctrl+alt+o") == "ocr_ctrl_alt_o"
+    assert portal_shortcut_id("annotate", "ctrl+alt+a") == "annotate_ctrl_alt_a"
     assert action_from_shortcut_id("screenshot_ctrl_shift_s") == "screenshot"
     assert action_from_shortcut_id("ocr_ctrl_alt_o") == "ocr"
+    assert action_from_shortcut_id("annotate_ctrl_alt_a") == "annotate"
     assert action_from_shortcut_id("voice") == "voice"
     assert portal_trigger_matches("CTRL+ALT+X", "ctrl+alt+x") is True
     assert portal_trigger_matches("按 <Control><Alt>z", "ctrl+alt+z") is True
@@ -94,12 +99,14 @@ def test_parse_shortcuts_description() -> None:
         ("screenshot", {"trigger": "CTRL+ALT+X"}),
         ("ocr", {"trigger": "CTRL+ALT+O"}),
         ("repeat", {"preferred_trigger": "CTRL+ALT+R"}),
+        ("annotate", {"trigger": "CTRL+ALT+A"}),
     ]
     parsed = grabber._parse_shortcuts(raw)
     assert parsed["voice"] == "按 <Control><Alt>z"
     assert parsed["screenshot"] == "CTRL+ALT+X"
     assert parsed["ocr"] == "CTRL+ALT+O"
     assert parsed["repeat"] == "CTRL+ALT+R"
+    assert parsed["annotate"] == "CTRL+ALT+A"
 
 
 def test_portal_four_hotkeys_rebind_mismatch_and_bus_restart_recovery(tmp_path, monkeypatch) -> None:
@@ -209,7 +216,7 @@ def test_portal_four_hotkeys_rebind_mismatch_and_bus_restart_recovery(tmp_path, 
         on_screenshot=lambda: None,
     )
     custom_bindings = HotkeyBindings(
-        voice="ctrl+alt+z", screenshot="ctrl+shift+s", ocr="ctrl+alt+o", repeat="ctrl+alt+r"
+        voice="ctrl+alt+z", screenshot="ctrl+shift+s", ocr="ctrl+alt+o", repeat="ctrl+alt+r", annotate="ctrl+alt+a"
     )
     ctx = HotkeyContext(
         actions=actions,
@@ -253,6 +260,7 @@ def test_portal_four_hotkeys_rebind_mismatch_and_bus_restart_recovery(tmp_path, 
         "screenshot_ctrl_shift_s",
         "ocr_ctrl_alt_o",
         "repeat_ctrl_alt_r",
+        "annotate_ctrl_alt_a",
     ]
 
     # 模拟 GNOME 返回旧触发器 CTRL+ALT+X（与配置的 ctrl+shift+s 不一致）→ 自动触发 ConfigureShortcuts
@@ -264,6 +272,7 @@ def test_portal_four_hotkeys_rebind_mismatch_and_bus_restart_recovery(tmp_path, 
                 ("screenshot_ctrl_shift_s", {"trigger": "CTRL+ALT+X"}),
                 ("ocr_ctrl_alt_o", {"trigger": "CTRL+ALT+O"}),
                 ("repeat_ctrl_alt_r", {"trigger": "CTRL+ALT+R"}),
+                ("annotate_ctrl_alt_a", {"trigger": "CTRL+ALT+A"}),
             ]
         },
     )
@@ -276,6 +285,7 @@ def test_portal_four_hotkeys_rebind_mismatch_and_bus_restart_recovery(tmp_path, 
         "screenshot": "CTRL+ALT+X",
         "ocr": "CTRL+ALT+O",
         "repeat": "CTRL+ALT+R",
+        "annotate": "CTRL+ALT+A",
     }
 
     # 根治回归：ShortcutsChanged 信号到来时同步重算 mismatched_triggers（修复后清空，新冲突即时反映，且不死循环弹 ConfigureShortcuts）
@@ -286,6 +296,7 @@ def test_portal_four_hotkeys_rebind_mismatch_and_bus_restart_recovery(tmp_path, 
             ("screenshot_ctrl_shift_s", {"trigger": "SHIFT+CTRL+S"}),
             ("ocr_ctrl_alt_o", {"trigger": "CTRL+ALT+O"}),
             ("repeat_ctrl_alt_r", {"trigger": "CTRL+ALT+R"}),
+            ("annotate_ctrl_alt_a", {"trigger": "CTRL+ALT+A"}),
         ],
     )
     assert grabber.mismatched_triggers == {}
@@ -299,6 +310,7 @@ def test_portal_four_hotkeys_rebind_mismatch_and_bus_restart_recovery(tmp_path, 
             ("screenshot_ctrl_shift_s", {"trigger": "CTRL+ALT+X"}),
             ("ocr_ctrl_alt_o", {"trigger": "CTRL+ALT+O"}),
             ("repeat_ctrl_alt_r", {"trigger": "CTRL+ALT+R"}),
+            ("annotate_ctrl_alt_a", {"trigger": "CTRL+ALT+A"}),
         ],
     )
     assert "screenshot" in grabber.mismatched_triggers
@@ -311,6 +323,7 @@ def test_portal_four_hotkeys_rebind_mismatch_and_bus_restart_recovery(tmp_path, 
     state["signals"]["Activated"]("/session/1", "screenshot_ctrl_shift_s", 2500, {})
     state["signals"]["Activated"]("/session/1", "ocr_ctrl_alt_o", 3000, {})
     state["signals"]["Activated"]("/session/1", "repeat_ctrl_alt_r", 4000, {})
+    state["signals"]["Activated"]("/session/1", "annotate_ctrl_alt_a", 4500, {})
     state["signals"]["Activated"]("/session/other", "voice_ctrl_alt_z", 5000, {})
     state["signals"]["Activated"]("/session/1", "unknown_shortcut", 6000, {})
     _drain_glib()
@@ -320,6 +333,7 @@ def test_portal_four_hotkeys_rebind_mismatch_and_bus_restart_recovery(tmp_path, 
         ("activated", "screenshot", 2500),
         ("activated", "ocr", 3000),
         ("activated", "repeat", 4000),
+        ("activated", "annotate", 4500),
     ]
 
     # 模拟 xdg-desktop-portal 退出并重启（owner -> "" -> ":1.88"）：必须调用单源 register_portal_host_app(force=True) 重注册
@@ -341,6 +355,7 @@ def test_portal_four_hotkeys_rebind_mismatch_and_bus_restart_recovery(tmp_path, 
                 ("screenshot_ctrl_shift_s", {"trigger": "CTRL+SHIFT+S"}),
                 ("ocr_ctrl_alt_o", {"trigger": "CTRL+ALT+O"}),
                 ("repeat_ctrl_alt_r", {"trigger": "CTRL+ALT+R"}),
+                ("annotate_ctrl_alt_a", {"trigger": "CTRL+ALT+A"}),
             ]
         },
     )
@@ -375,13 +390,13 @@ def test_x11_reports_intervals_and_filters_autorepeat_release_pairs() -> None:
             hotkey_parser=lambda hk: (4, ord(hk.split("+")[-1])),
         )
         x11.grab()
-        assert {kc for kc, _m in x11.dpy.root.grabbed} == {ord("z"), ord("x"), ord("o"), ord("r")}
+        assert {kc for kc, _m in x11.dpy.root.grabbed} == {ord("z"), ord("x"), ord("o"), ord("r"), ord("a")}
         x11._handle_event(key(_X_KEY_PRESS, "o", 1000))
         x11._handle_event(key(_X_KEY_RELEASE, "o", 1100))  # X 自动重复：松开后同一时刻又按下
         x11._handle_event(key(_X_KEY_PRESS, "o", 1100))
         x11._handle_event(key(_X_KEY_RELEASE, "o", 1500))
         timers.fire_all()
-        for ch, action, ms in (("x", "screenshot", 2000), ("r", "repeat", 3000), ("z", "voice", 4000)):
+        for ch, action, ms in (("x", "screenshot", 2000), ("r", "repeat", 3000), ("a", "annotate", 3500), ("z", "voice", 4000)):
             x11._handle_event(key(_X_KEY_PRESS, ch, ms))
             x11._handle_event(key(_X_KEY_RELEASE, ch, ms + 50))
             timers.fire_all()
@@ -395,12 +410,15 @@ def test_x11_reports_intervals_and_filters_autorepeat_release_pairs() -> None:
             ("start", "repeat", 3000),
             ("activated", "repeat", 3000),
             ("end", "repeat", 3050),
+            ("start", "annotate", 3500),
+            ("activated", "annotate", 3500),
+            ("end", "annotate", 3550),
             ("start", "voice", 4000),
             ("activated", "voice", 4000),
             ("end", "voice", 4050),
         ]
         x11.ungrab()
-        assert {kc for kc, _m in x11.dpy.root.ungrabbed} == {ord("z"), ord("x"), ord("o"), ord("r")}
+        assert {kc for kc, _m in x11.dpy.root.ungrabbed} == {ord("z"), ord("x"), ord("o"), ord("r"), ord("a")}
         x11.cleanup()
     finally:
         hotkey_x11.GLib = saved_glib
@@ -551,7 +569,9 @@ def test_conflict_scanner_known_show_desktop() -> None:
         return subprocess.CompletedProcess(cmd, 0, out, "")
 
     conflicts = scan_hotkey_conflicts(
-        HotkeyBindings(voice="ctrl+alt+z", screenshot="ctrl+alt+d", ocr="ctrl+alt+o", repeat="ctrl+alt+r"),
+        HotkeyBindings(
+            voice="ctrl+alt+z", screenshot="ctrl+alt+d", ocr="ctrl+alt+o", repeat="ctrl+alt+r", annotate="ctrl+alt+a"
+        ),
         run=fake_gsettings,
         which=lambda name: "/usr/bin/gsettings" if name == "gsettings" else None,
     ).conflicts

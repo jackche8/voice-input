@@ -78,6 +78,7 @@
       hotkey_screenshot: "ctrl+alt+x",
       hotkey_ocr: "ctrl+alt+o",
       hotkey_repeat: "ctrl+alt+r",
+      hotkey_annotate: "ctrl+alt+a",
       lanEntries: [{
         ip: "192.0.2.8",
         urlMasked: "https://example.invalid/voice#token=a8f3••••7c21",
@@ -155,6 +156,7 @@
       hotkey_screenshot: "ctrl+alt+x",
       hotkey_ocr: "ctrl+alt+o",
       hotkey_repeat: "ctrl+alt+r",
+      hotkey_annotate: "ctrl+alt+a",
       translate_target_lang: "zh",
       history: SAMPLE_HISTORY,
       lanEntries: [{

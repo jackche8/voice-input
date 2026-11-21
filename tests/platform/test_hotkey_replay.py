@@ -29,9 +29,17 @@ from tests.hotkey.fakes import (
     simple_hotkey_parser,
 )
 
-CONFIG = HotkeyBindings(voice="ctrl+alt+z", screenshot="ctrl+alt+x", ocr="ctrl+alt+o", repeat="ctrl+alt+r")
-GNOME = {"voice": "CTRL+ALT+Z", "screenshot": "CTRL+ALT+X", "ocr": "CTRL+ALT+O", "repeat": "CTRL+ALT+R"}
-CTRL, ALT, SUPER, Z, X, BTN_LEFT = 29, 56, 125, 44, 45, 272
+CONFIG = HotkeyBindings(
+    voice="ctrl+alt+z", screenshot="ctrl+alt+x", ocr="ctrl+alt+o", repeat="ctrl+alt+r", annotate="ctrl+alt+a"
+)
+GNOME = {
+    "voice": "CTRL+ALT+Z",
+    "screenshot": "CTRL+ALT+X",
+    "ocr": "CTRL+ALT+O",
+    "repeat": "CTRL+ALT+R",
+    "annotate": "CTRL+ALT+A",
+}
+CTRL, ALT, SUPER, Z, X, A, BTN_LEFT = 29, 56, 125, 44, 45, 30, 272
 KB, MOUSE = "/dev/input/event5", "/dev/input/event16"
 
 
@@ -51,6 +59,7 @@ class Recorder:
             on_screenshot=lambda: self.events.append("shot"),
             on_ocr=lambda: self.events.append("ocr"),
             on_repeat=lambda: self.events.append("repeat"),
+            on_annotate=lambda: self.events.append("annotate"),
         )
 
     def release_hotkey(self, hotkey: str) -> None:
@@ -305,3 +314,192 @@ def test_x11_trigger_release_ends_and_modifiers_are_released_only_when_it_stoppe
             assert rec.events == ["v_start", "shot", "shot"]  # 开录失败：这次松开没停录音，不补发
             assert rec.released == []
         manager.cleanup()
+
+
+def test_fifth_hotkey_annotate_dispatches_across_wayland_x11_and_cross_platform_adapters(timers) -> None:
+    """第五键 annotate 贯通 Wayland（Portal+evdev）、X11（XGrabKey）以及 Linux/Windows/macOS 适配层。"""
+    from _platform.linux import LinuxPlatformAdapter
+    from _platform.macos import MacOSPlatformAdapter
+    from _platform.windows import WindowsPlatformAdapter
+
+    # 1. Wayland Portal + evdev + HotkeyManager + HotkeyDispatcher 完整链路
+    rig = WaylandRig()
+    rig.key(CTRL, 1, 1000)
+    rig.key(ALT, 1, 1010)
+    rig.key(A, 1, 1020)
+    rig.activate("annotate", 1020)
+    rig.activate("annotate", 1500)  # 同一次按住连发不得重复触发
+    rig.key(A, 0, 1600)
+    assert rig.rec.events == ["annotate"]
+    assert rig.failures() == []
+
+    # 1b. X11 XGrabKey + HotkeyManager + HotkeyDispatcher 完整链路
+    x11_rec = Recorder()
+    x11_ctx = HotkeyContext(
+        actions=x11_rec.actions(), bindings=CONFIG, janitor=x11_rec, guard=InjectGuard(), session_type="x11"
+    )
+    x11_mgr = HotkeyManager(
+        x11_ctx,
+        on_error=lambda _r: None,
+        x11_factory=lambda c, sink: HotkeyGrabber(
+            c, sink, display_factory=FakeX11Display, hotkey_parser=lambda hk: (4, ord(hk.split("+")[-1]))
+        ),
+    )
+    x11_mgr.start()
+    x11_mgr._x11._handle_event(type("E", (), {"type": _X_KEY_PRESS, "detail": ord("a"), "time": 2000})())
+    x11_mgr._x11._handle_event(type("E", (), {"type": _X_KEY_RELEASE, "detail": ord("a"), "time": 2050})())
+    timers.fire_all()
+    assert x11_rec.events == ["annotate"]
+    x11_mgr.cleanup()
+
+    # 2. LinuxPlatformAdapter.create_hotkey_rig 经 HotkeyDispatcher 派发 on_annotate（不误落入 repeat）
+    from _platform.protocol import HotkeyCallbacks
+
+    cb_events: list[str] = []
+    cb = HotkeyCallbacks(
+        on_voice_start=lambda: True,
+        on_voice_stop=lambda: None,
+        on_screenshot=lambda: None,
+        on_annotate=lambda: cb_events.append("annotate"),
+    )
+    cb.on_annotate()
+    assert cb_events == ["annotate"]
+    linux_events: list[str] = []
+    captured_ctx: list[HotkeyContext] = []
+
+    class _SpyManager:
+        backend_name = "spy"
+
+        def __init__(self, ctx: HotkeyContext, *, on_error) -> None:
+            del on_error
+            captured_ctx.append(ctx)
+
+        def start(self) -> None:
+            pass
+
+        def cleanup(self) -> None:
+            pass
+
+        def reset_voice(self) -> None:
+            pass
+
+    linux_adapter = LinuxPlatformAdapter(
+        environ={"XDG_SESSION_TYPE": "wayland"},
+        which=lambda _n: None,
+        uinput_factory=None,
+        hotkey_manager_cls=_SpyManager,
+    )
+    linux_adapter.create_hotkey_rig(
+        CONFIG,
+        on_voice_start=lambda: True,
+        on_voice_stop=lambda: None,
+        on_screenshot=lambda: linux_events.append("shot"),
+        on_ocr=lambda: linux_events.append("ocr"),
+        on_repeat=lambda: linux_events.append("repeat"),
+        on_annotate=lambda: linux_events.append("annotate"),
+        on_error=lambda _r: None,
+    )
+    captured_ctx[0].actions.annotate()
+    assert linux_events == ["annotate"]
+
+    # 3. Windows / macOS create_hotkey_rig（含 macOS kVK_ANSI_A == 0 边界）
+    class _FakeKey:
+        def __init__(self, *, name=None, char=None, vk=None) -> None:
+            self.name = name
+            self.char = char
+            self.vk = vk
+
+    class _FakeListener:
+        def __init__(self, *, on_press, on_release) -> None:
+            self.on_press = on_press
+            self.on_release = on_release
+
+        def start(self) -> None:
+            pass
+
+        def stop(self) -> None:
+            pass
+
+    win_listeners: list[_FakeListener] = []
+    win_events: list[str] = []
+    win_rig = WindowsPlatformAdapter(
+        listener_factory=lambda **kw: (win_listeners.append(_FakeListener(**kw)) or win_listeners[-1]),
+    ).create_hotkey_rig(
+        CONFIG,
+        on_voice_start=lambda: True,
+        on_voice_stop=lambda: None,
+        on_screenshot=lambda: win_events.append("shot"),
+        on_repeat=lambda: win_events.append("repeat"),
+        on_annotate=lambda: win_events.append("annotate"),
+        on_error=lambda _r: None,
+    )
+    win_rig.start()
+    wl = win_listeners[-1]
+    wl.on_press(_FakeKey(name="ctrl_l", vk=0xA2))
+    wl.on_press(_FakeKey(name="alt_l", vk=0xA4))
+    wl.on_press(_FakeKey(char="a", vk=0x41))
+    wl.on_release(_FakeKey(char="a", vk=0x41))
+    wl.on_release(_FakeKey(name="alt_l", vk=0xA4))
+    wl.on_release(_FakeKey(name="ctrl_l", vk=0xA2))
+    assert win_events == ["annotate"]
+    win_rig.stop()
+
+    mac_listeners: list[_FakeListener] = []
+    mac_events: list[str] = []
+    mac_rig = MacOSPlatformAdapter(
+        listener_factory=lambda **kw: (mac_listeners.append(_FakeListener(**kw)) or mac_listeners[-1]),
+    ).create_hotkey_rig(
+        CONFIG,
+        on_voice_start=lambda: True,
+        on_voice_stop=lambda: None,
+        on_screenshot=lambda: mac_events.append("shot"),
+        on_repeat=lambda: mac_events.append("repeat"),
+        on_annotate=lambda: mac_events.append("annotate"),
+        on_error=lambda _r: None,
+    )
+    mac_rig.start()
+    ml = mac_listeners[-1]
+    ml.on_press(_FakeKey(name="ctrl", vk=0x3B))
+    ml.on_press(_FakeKey(name="alt", vk=0x3A))
+    ml.on_press(_FakeKey(char="a", vk=0x00))  # kVK_ANSI_A == 0
+    ml.on_release(_FakeKey(char="a", vk=0x00))
+    ml.on_release(_FakeKey(name="alt", vk=0x3A))
+    ml.on_release(_FakeKey(name="ctrl", vk=0x3B))
+    assert mac_events == ["annotate"]
+    mac_rig.stop()
+
+
+def test_escape_pressed_schedules_one_shot_glib_callback_returning_false(monkeypatch) -> None:
+    """回归：close_overlay/handle_escape 返回 True 时，投递到 GLib.idle_add 的回调仍须返回 False（SOURCE_REMOVE），防无限循环。"""
+    from _linux.hotkey_dispatch import HotkeyDispatcher
+    from _linux.hotkey_state import HotkeyPressState
+
+    scheduled: list = []
+
+    class _CaptureIdleGLib:
+        @staticmethod
+        def idle_add(fn, *args):
+            scheduled.append((fn, args))
+            return 1
+
+    monkeypatch.setattr(hotkey_dispatch, "GLib", _CaptureIdleGLib)
+    close_calls: list[str] = []
+    ctx = HotkeyContext(
+        actions=CallbackHotkeyActions(
+            on_voice_start=lambda: True,
+            on_voice_stop=lambda: None,
+            on_screenshot=lambda: None,
+            is_overlay_active=lambda: True,
+            on_close_overlay=lambda: (close_calls.append("esc") or True),
+        ),
+        bindings=CONFIG,
+        janitor=None,
+        guard=InjectGuard(),
+        session_type="wayland",
+    )
+    dispatcher = HotkeyDispatcher(ctx, HotkeyPressState(), on_error=lambda _r: None)
+    dispatcher.escape_pressed()
+    assert len(scheduled) == 1
+    fn, args = scheduled[0]
+    assert fn(*args) is False
+    assert close_calls == ["esc"]

@@ -9,9 +9,9 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Literal
 
-Action = Literal["voice", "screenshot", "ocr", "repeat"]
+Action = Literal["voice", "screenshot", "ocr", "repeat", "annotate"]
 EdgeKind = Literal["voice_start", "voice_stop", "fire"]
-ACTIONS: tuple[Action, ...] = ("voice", "screenshot", "ocr", "repeat")
+ACTIONS: tuple[Action, ...] = ("voice", "screenshot", "ocr", "repeat", "annotate")
 
 _MASK = 0xFFFFFFFF
 _HALF = 0x80000000
@@ -59,7 +59,7 @@ class _Combo:
 
 
 class HotkeyPressState:
-    """四个组合共用的唯一按住状态；每个输入返回需要执行的边沿。"""
+    """五个组合共用的唯一按住状态；每个输入返回需要执行的边沿。"""
 
     def __init__(self) -> None:
         self._combos: dict[Action, _Combo] = {action: _Combo() for action in ACTIONS}

@@ -1,4 +1,4 @@
-"""xdg-desktop-portal GlobalShortcuts 后端（Wayland 主路径，支持四键与配置改键自动生效）。
+"""xdg-desktop-portal GlobalShortcuts 后端（Wayland 主路径，支持五键与配置改键自动生效）。
 
 根因修复：
 1. GNOME `xdg-desktop-portal-gnome` 在 dconf 中按 `shortcut_id` 缓存历史键位，若 ID 恒为固定 `"screenshot"`，
@@ -21,6 +21,7 @@ from collections.abc import Callable
 
 from _hotkey import HOTKEY_MODIFIERS, normalize_accel, normalize_hotkey, to_portal_trigger
 from _linux.hotkey_actions import GLib, HotkeyContext, HotkeySink
+from _linux.hotkey_state import ACTIONS
 from _linux.portal_dbus import (
     GLOBAL_SHORTCUTS_IFACE,
     PORTAL_NAME,
@@ -31,7 +32,7 @@ from _linux.portal_dbus import (
     register_portal_host_app,
 )
 
-_KNOWN_ACTIONS = ("voice", "screenshot", "ocr", "repeat")
+_KNOWN_ACTIONS = ACTIONS
 _MASK = 0xFFFFFFFF
 
 
@@ -346,6 +347,7 @@ class PortalGlobalShortcutsGrabber:
             ("screenshot", "截图翻译", self.ctx.bindings.screenshot),
             ("ocr", "纯OCR识别", self.ctx.bindings.ocr),
             ("repeat", "重复输入", self.ctx.bindings.repeat),
+            ("annotate", "截屏标注", self.ctx.bindings.annotate),
         ]
         return tuple(
             (action, portal_shortcut_id(action, hotkey), desc, hotkey)

@@ -1,4 +1,4 @@
-"""X11 XGrabKey 全局快捷键（X11 独占，支持 voice / screenshot / ocr / repeat 四键）。
+"""X11 XGrabKey 全局快捷键（X11 独占，支持 voice / screenshot / ocr / repeat / annotate 五键）。
 
 首个 KeyPress 即一次按下的开始并放行；trigger 松开（50ms 内无同键 KeyPress，滤掉 X 自动重复的松开/按下对）即结束。
 XGrabKey 收不到修饰键松开，所以 X11 下「任一键松开即结束」不成立（第七节已知限制）。停录后补发修饰键抬起是
@@ -58,6 +58,9 @@ class HotkeyGrabber:
             hotkey_parser(self.ctx.bindings.ocr) if self.ctx.bindings.ocr else (0, 0)
         )
         r_mask, r_sym = hotkey_parser(self.ctx.bindings.repeat)
+        a_mask, a_sym = (
+            hotkey_parser(self.ctx.bindings.annotate) if self.ctx.bindings.annotate else (0, 0)
+        )
 
         self.voice_kc = self.dpy.keysym_to_keycode(v_sym)
         self.voice_mask = v_mask
@@ -67,6 +70,8 @@ class HotkeyGrabber:
         self.ocr_mask = o_mask
         self.repeat_kc = self.dpy.keysym_to_keycode(r_sym)
         self.repeat_mask = r_mask
+        self.annotate_kc = self.dpy.keysym_to_keycode(a_sym) if a_sym else 0
+        self.annotate_mask = a_mask
         self._actions_by_kc: dict[int, Action] = {
             kc: action
             for kc, action in (
@@ -74,6 +79,7 @@ class HotkeyGrabber:
                 (self.screen_kc, "screenshot"),
                 (self.ocr_kc, "ocr"),
                 (self.repeat_kc, "repeat"),
+                (self.annotate_kc, "annotate"),
             )
             if kc
         }
@@ -93,6 +99,8 @@ class HotkeyGrabber:
         ]
         if self.ocr_kc:
             specs.append((self.ocr_kc, self.ocr_mask))
+        if self.annotate_kc:
+            specs.append((self.annotate_kc, self.annotate_mask))
         return specs
 
     def grab(self) -> None:

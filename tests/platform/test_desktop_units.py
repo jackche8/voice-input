@@ -8,14 +8,17 @@ from __future__ import annotations
 import subprocess
 import threading
 import time
+from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
+
+import pytest
 
 from _capture import FakeAudioSource
 from _contracts import ComponentStatus, ErrorCode, OcrTextBlock
 from _desktop.actions import DesktopActions
 from _desktop.api import ApiError
-from _desktop.capture_flow import CaptureFlow
+from _desktop.capture_flow import CaptureFlow, SaveResult
 from _desktop.delivery import LastDelivered, RepeatAction
 from _desktop.event_stream import ProductEventLoop, dispatch_product_event
 from _desktop.singleton import try_acquire_singleton_lock
@@ -64,6 +67,8 @@ class FakeInplaceOverlay:
         self.full_ocr = ""
         self.error: str | None = None
         self.closed = False
+        self.closed_silent = False
+        self.escape_calls = 0
 
     def set_loading(self) -> None:
         self.loading = True
@@ -80,8 +85,13 @@ class FakeInplaceOverlay:
         self.loading = False
         self.error = message
 
+    def handle_escape(self) -> None:
+        self.escape_calls += 1
+        self.close()
+
     def close_silent(self) -> None:
         self.closed = True
+        self.closed_silent = True
 
     def close(self) -> None:
         self.closed = True
@@ -89,10 +99,60 @@ class FakeInplaceOverlay:
             self.on_closed()
 
 
-def _make_capture_harness(api, *, capture_fn=None, copy_fn=None):
+class FakeAnnotator:
+    def __init__(
+        self,
+        png,
+        rect,
+        *,
+        virtual_rect,
+        on_copy_image,
+        on_save_image,
+        on_closed,
+        two_step_escape: bool = False,
+    ) -> None:
+        self.png = png
+        self.rect = rect
+        self.virtual_rect = virtual_rect
+        self.on_copy_image = on_copy_image
+        self.on_save_image = on_save_image
+        self.on_closed = on_closed
+        self.text_editing = two_step_escape
+        self.escape_calls = 0
+        self.closed = False
+        self.closed_silent = False
+
+    def handle_escape(self) -> None:
+        self.escape_calls += 1
+        if self.text_editing:
+            self.text_editing = False
+            return
+        self.close()
+
+    def close_silent(self) -> None:
+        self.closed = True
+        self.closed_silent = True
+
+    def close(self) -> None:
+        self.closed = True
+        if self.on_closed:
+            self.on_closed()
+
+
+def _make_capture_harness(
+    api,
+    *,
+    capture_fn=None,
+    copy_fn=None,
+    copy_image_fn=None,
+    save_dir_fn=None,
+    now_fn=None,
+    two_step_escape: bool = False,
+):
     status, posted = _status()
     selectors: list[FakeSelector] = []
     overlays: list[FakeInplaceOverlay] = []
+    annotators: list[FakeAnnotator] = []
     copied: list[str] = []
     region_calls: list[tuple[tuple[int, int, int, int], tuple[int, int, int, int] | None]] = []
 
@@ -106,6 +166,11 @@ def _make_capture_harness(api, *, capture_fn=None, copy_fn=None):
         overlays.append(ov)
         return ov
 
+    def open_annotator(png, rect, **kwargs):
+        ann = FakeAnnotator(png, rect, two_step_escape=two_step_escape, **kwargs)
+        annotators.append(ann)
+        return ann
+
     def default_copy(text: str) -> bool:
         copied.append(text)
         return True
@@ -118,7 +183,11 @@ def _make_capture_harness(api, *, capture_fn=None, copy_fn=None):
         capture_region=capture_fn or default_capture_region,
         open_selector=open_selector,
         open_inplace_overlay=open_overlay,
+        open_annotator=open_annotator,
         copy_clipboard=copy_fn or default_copy,
+        copy_image=copy_image_fn,
+        save_dir=save_dir_fn,
+        now=now_fn or datetime.now,
         api=api,
         status=status,
         invoke_ui=lambda fn: fn(),
@@ -127,6 +196,7 @@ def _make_capture_harness(api, *, capture_fn=None, copy_fn=None):
         spawn=lambda fn: fn(),
     )
     flow._test_region_calls = region_calls  # type: ignore[attr-defined]
+    flow._test_annotators = annotators  # type: ignore[attr-defined]
     return flow, status, posted, selectors, overlays, copied
 
 
@@ -514,7 +584,7 @@ def test_ui_bridge_configure_qt_platform_env_and_open_live_selector(monkeypatch)
     import os
     import sys
 
-    from _desktop.ui_bridge import configure_qt_platform_env, open_live_selector, open_translate_overlay
+    from _desktop.ui_bridge import configure_qt_platform_env, open_annotator, open_live_selector, open_translate_overlay
 
     # 1. Linux + DISPLAY 且未显式指定 QT_QPA_PLATFORM → 自动设为 xcb
     monkeypatch.setattr(sys, "platform", "linux")
@@ -593,6 +663,261 @@ def test_ui_bridge_configure_qt_platform_env_and_open_live_selector(monkeypatch)
         assert isinstance(ov, DummyOverlay) and calls == [expected, "raise_", "activateWindow"]
         assert seen_kwargs[-1] == {"png": b"png", "rect": (10, 20, 30, 40), "mode": "ocr",
                                    "virtual_geometry": (0, 0, 1920, 1080), **callbacks}
+
+    # 7. open_annotator：与原位浮窗同一显示方式，按契约 G 透传回调与虚拟桌面几何
+    ann_cbs = {
+        "on_copy_image": lambda _b: True,
+        "on_save_image": lambda _b: SaveResult(path="/pictures/x.png"),
+        "on_closed": lambda: None,
+    }
+    for app_, expected in ((single_app, "showFullScreen"), (multi_app, "show")):
+        calls.clear()
+        ann = open_annotator(app_, DummyOverlay, b"png", (15, 25, 35, 45), virtual_rect=(0, 0, 1920, 1080), **ann_cbs)
+        assert isinstance(ann, DummyOverlay) and calls == [expected, "raise_", "activateWindow"]
+        assert seen_kwargs[-1] == {"png": b"png", "rect": (15, 25, 35, 45), "virtual_geometry": (0, 0, 1920, 1080), **ann_cbs}
+
+
+def test_capture_flow_annotate_mode_exclusion_copy_and_save(tmp_path: Path):
+    """U11：标注模式共用框选器与 generation 互斥、复制成败不发 status、保存与重名递增及失败返回原因。"""
+
+    class GuardApi:
+        def __init__(self) -> None:
+            self.ocr_calls = 0
+
+        def get_config(self) -> dict:
+            return {"translate_target_lang": "zh"}
+
+        def ocr_inplace(self, png: bytes, *, target_lang: str, lang=None) -> dict:
+            self.ocr_calls += 1
+            return _ocr_payload("译文", target_lang)
+
+    copy_outcomes = iter([None, "xclip 不可用"])
+
+    def fake_copy_image(png: bytes) -> str | None:
+        copied_pngs.append(png)
+        outcome = next(copy_outcomes, "boom")
+        if outcome == "boom":
+            raise RuntimeError("clipboard crashed")
+        return outcome
+
+    copied_pngs: list[bytes] = []
+    fixed_time = datetime(2026, 11, 21, 10, 20, 30)
+    save_root = tmp_path / "Pictures" / "Ollama Voice Input"
+    api = GuardApi()
+    flow, status, posted, selectors, overlays, _copied = _make_capture_harness(
+        api,
+        copy_image_fn=fake_copy_image,
+        save_dir_fn=lambda: save_root,
+        now_fn=lambda: fixed_time,
+    )
+    annotators: list[FakeAnnotator] = flow._test_annotators  # type: ignore[attr-defined]
+
+    # 1. 触发标注 → 复用红十字框选器（标签「截屏标注」），选区后打开标注浮窗且不调 OCR API
+    flow.trigger_annotate()
+    assert len(selectors) == 1 and selectors[0].mode_label == "截屏标注"
+    assert flow.overlay_active() is True
+    selectors[0].on_selected((20, 30, 400, 300))
+    assert len(annotators) == 1 and overlays == [] and api.ocr_calls == 0
+    ann = annotators[0]
+    assert ann.png == b"region-png" and ann.rect == (20, 30, 400, 300) and ann.virtual_rect == (0, 0, 1920, 1080)
+
+    # 2. 复制图片：成功返回 True、失败/异常返回 False，全过程不发 status 事件
+    assert [ann.on_copy_image(b"annotated-png") for _ in range(3)] == [True, False, False]
+    assert copied_pngs == [b"annotated-png"] * 3
+    status.drain()
+    assert posted == []
+
+    # 3. 保存图片：首次写入 `截屏 YYYY-MM-DD HH-MM-SS.png`，同秒重名依次加 ` (2)`、` (3)`
+    r1 = ann.on_save_image(b"png-1")
+    r2 = ann.on_save_image(b"png-2")
+    r3 = ann.on_save_image(b"png-3")
+    assert r1 == SaveResult(path=str(save_root / "截屏 2026-11-21 10-20-30.png"))
+    assert r2 == SaveResult(path=str(save_root / "截屏 2026-11-21 10-20-30 (2).png"))
+    assert r3 == SaveResult(path=str(save_root / "截屏 2026-11-21 10-20-30 (3).png"))
+    assert Path(r1.path).read_bytes() == b"png-1"  # type: ignore[arg-type]
+    assert Path(r2.path).read_bytes() == b"png-2"  # type: ignore[arg-type]
+    assert Path(r3.path).read_bytes() == b"png-3"  # type: ignore[arg-type]
+
+    # 4. 保存失败（目标路径被文件占用触发 OSError）→ 返回 SaveResult(error=...) 不抛异常
+    occupied = tmp_path / "file_as_dir"
+    occupied.write_text("x", encoding="utf-8")
+    flow.save_dir = lambda: occupied
+    fail_res = ann.on_save_image(b"png-fail")
+    assert fail_res.path is None and fail_res.error
+
+    # SaveResult 契约不变量：path 与 error 必须恰好一个非空
+    with pytest.raises(ValueError):
+        SaveResult()
+    with pytest.raises(ValueError):
+        SaveResult(path="/a.png", error="err")
+
+    # 5. generation 互斥：标注打开时触发翻译 → 静默关闭旧标注；翻译打开时触发标注 → 静默关闭旧原位浮窗
+    flow.trigger_translate()
+    assert ann.closed_silent is True and len(selectors) == 2
+    selectors[-1].on_selected((10, 10, 80, 40))
+    assert len(overlays) == 1 and api.ocr_calls == 1
+    flow.trigger_annotate()
+    assert overlays[0].closed_silent is True and len(selectors) == 3
+    selectors[-1].on_selected((10, 10, 80, 40))
+    assert len(annotators) == 2
+    annotators[-1].close()
+    assert flow.overlay_active() is False
+
+
+def test_capture_flow_handle_escape_unified_routing_and_close_overlay_separation():
+    """U11（10.15.5）：handle_escape 统一路由（框选器→取消；原位浮窗/标注→handle_escape；连续两次不去重；无活动窗→False），
+    且 close_overlay 仅走 close_silent 不再接 Esc。"""
+
+    class Api:
+        def ocr_inplace(self, png: bytes, *, target_lang: str, lang=None) -> dict:
+            return _ocr_payload("OCR", target_lang)
+
+    flow, _status, _posted, selectors, overlays, _copied = _make_capture_harness(Api(), two_step_escape=True)
+    annotators: list[FakeAnnotator] = flow._test_annotators  # type: ignore[attr-defined]
+
+    # 1. 无活动窗 → False
+    assert flow.handle_escape() is False
+
+    # 2. 框选器活动 → 取消框选并返回 True
+    flow.trigger_annotate()
+    assert flow.handle_escape() is True
+    assert selectors[0].closed is True and flow.overlay_active() is False
+    assert flow.handle_escape() is False
+
+    # 3. 原位浮窗活动 → 路由到 overlay.handle_escape（绝不走 close_silent）
+    flow.trigger_ocr()
+    selectors[-1].on_selected((0, 0, 50, 50))
+    ov = overlays[0]
+    assert flow.handle_escape() is True
+    assert ov.escape_calls == 1 and ov.closed is True and ov.closed_silent is False
+    assert flow.overlay_active() is False
+
+    # 4. 标注浮窗活动（两段式 Esc）：连续两次 handle_escape 各路由一次（不去重），第 1 次仅退出输入、第 2 次关闭
+    flow.trigger_annotate()
+    selectors[-1].on_selected((0, 0, 80, 60))
+    ann = annotators[0]
+    assert ann.text_editing is True
+    assert flow.handle_escape() is True
+    assert ann.escape_calls == 1 and ann.text_editing is False and ann.closed is False
+    assert flow.overlay_active() is True
+    assert flow.handle_escape() is True
+    assert ann.escape_calls == 2 and ann.closed is True and ann.closed_silent is False
+    assert flow.overlay_active() is False
+    assert flow.handle_escape() is False
+
+    # 5. close_overlay 只用于退出/强制清理（走 close_silent，不调 handle_escape）
+    flow.trigger_annotate()
+    selectors[-1].on_selected((0, 0, 80, 60))
+    ann2 = annotators[1]
+    flow.close_overlay()
+    assert ann2.closed_silent is True and ann2.escape_calls == 0 and flow.overlay_active() is False
+
+
+def test_capture_flow_annotate_real_save_and_linux_xclip_roundtrip(tmp_path: Path):
+    """R3 真实链路（业务半程）：真实 PNG 保存到临时图片目录 + 有 DISPLAY 且有 xclip 时真实写入并读回 image/png 校验字节一致。"""
+    import io
+    import os
+    import shutil
+    from PIL import Image
+
+    from _linux.clipboard import SystemClipboard
+    from _paths import APP_DISPLAY_NAME
+    from _platform.linux import LinuxPlatformAdapter
+
+    buf = io.BytesIO()
+    Image.new("RGB", (24, 16), (220, 48, 48)).save(buf, format="PNG")
+    real_png = buf.getvalue()
+
+    save_root = tmp_path / "Pictures" / APP_DISPLAY_NAME
+    adapter = LinuxPlatformAdapter(environ=os.environ, uinput_factory=None)
+    flow, status, posted, selectors, _overlays, _copied = _make_capture_harness(
+        api=object(),
+        capture_fn=lambda _r, _v: real_png,
+        copy_image_fn=adapter.write_clipboard_png,
+        save_dir_fn=lambda: save_root,
+        now_fn=lambda: datetime(2026, 11, 21, 12, 0, 0),
+    )
+    annotators: list[FakeAnnotator] = flow._test_annotators  # type: ignore[attr-defined]
+    flow.trigger_annotate()
+    selectors[0].on_selected((0, 0, 24, 16))
+    ann = annotators[0]
+
+    # 1. 真实落盘保存
+    saved = ann.on_save_image(real_png)
+    assert saved.error is None and saved.path is not None
+    saved_file = Path(saved.path)
+    assert saved_file == save_root / "截屏 2026-11-21 12-00-00.png"
+    assert saved_file.read_bytes() == real_png
+
+    # 2. 真实 Linux xclip 写入 + 读回（保留并恢复宿主原剪贴板）
+    if not (os.environ.get("DISPLAY") and shutil.which("xclip")):
+        pytest.skip("无 DISPLAY 或 xclip，跳过真实 Linux 剪贴板读回")
+    clip = SystemClipboard()
+    prev = clip.snapshot()
+    try:
+        assert ann.on_copy_image(real_png) is True
+        readback = subprocess.run(
+            ["xclip", "-selection", "clipboard", "-t", "image/png", "-o"],
+            capture_output=True,
+            timeout=5,
+            check=True,
+        ).stdout
+        assert readback == real_png
+    finally:
+        clip.restore_snapshot(prev)
+    status.drain()
+    assert posted == []
+
+
+def test_attach_app_log_writes_rotates_and_restores_streams(tmp_path: Path, monkeypatch):
+    """N1：主进程日志经 attach_app_log 复用 rotate_log（>10MB 轮转为 .1），双写 stdout/stderr 且关闭后恢复原流。"""
+    import io
+    import sys
+
+    from _platform.child_process import LOG_ROTATE_BYTES, attach_app_log, rotate_log
+
+    log_path = tmp_path / "logs" / "app.log"
+    log_path.parent.mkdir(parents=True)
+    with open(log_path, "wb") as fh:
+        fh.truncate(LOG_ROTATE_BYTES + 1)
+
+    fake_out = io.StringIO()
+    fake_err = io.StringIO()
+    monkeypatch.setattr(sys, "stdout", fake_out)
+    monkeypatch.setattr(sys, "stderr", fake_err)
+
+    handle = attach_app_log(log_path)
+    try:
+        rotated = log_path.with_name("app.log.1")
+        assert rotated.is_file() and rotated.stat().st_size == LOG_ROTATE_BYTES + 1
+        print("app-started-line", flush=True)
+        print("app-error-line", file=sys.stderr, flush=True)
+    finally:
+        handle.close()
+        handle.close()  # 幂等
+
+    assert sys.stdout is fake_out and sys.stderr is fake_err
+    assert "app-started-line" in fake_out.getvalue()
+    assert "app-error-line" in fake_err.getvalue()
+    persisted = log_path.read_text(encoding="utf-8")
+    assert "app-started-line" in persisted and "app-error-line" in persisted
+
+    # pythonw 等无终端场景（原 stdout 为 None）仍正常写入日志文件
+    monkeypatch.setattr(sys, "stdout", None)
+    monkeypatch.setattr(sys, "stderr", None)
+    handle2 = attach_app_log(log_path)
+    try:
+        print("headless-line", flush=True)
+    finally:
+        handle2.close()
+    assert sys.stdout is None and sys.stderr is None
+    assert "headless-line" in log_path.read_text(encoding="utf-8")
+
+    # 公开 rotate_log 小于阈值时不轮转
+    small = tmp_path / "logs" / "small.log"
+    small.write_text("hi", encoding="utf-8")
+    rotate_log(small)
+    assert small.is_file() and not small.with_name("small.log.1").exists()
 
 
 # ------------------------------------------------------------------ VoiceFlow
@@ -1088,7 +1413,14 @@ def test_desktop_actions_four_key_dispatch():
         def trigger_ocr(self):
             log.append("ocr")
 
+        def trigger_annotate(self):
+            log.append("annotate")
+
         def overlay_active(self):
+            return True
+
+        def handle_escape(self):
+            log.append("escape")
             return True
 
         def close_overlay(self):
@@ -1104,10 +1436,11 @@ def test_desktop_actions_four_key_dispatch():
     actions.voice_stop()
     actions.screenshot()
     actions.ocr()
+    actions.annotate()
     actions.repeat()
     assert actions.overlay_active() is True
-    actions.close_overlay()
-    assert log == ["vstart", "vstop", "translate", "ocr", "repeat", "close"]
+    assert actions.close_overlay() is True
+    assert log == ["vstart", "vstop", "translate", "ocr", "annotate", "repeat", "escape"]
 
 
 def test_repeat_action_confirm_resend():

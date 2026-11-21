@@ -1,4 +1,4 @@
-"""macOS 平台适配器：`screencapture`/`mss` + 前台 Bundle ID + `pbcopy`/`CGEvent Cmd+V` + 四键监听 + LaunchAgent。
+"""macOS 平台适配器：`screencapture`/`mss` + 前台 Bundle ID + `pbcopy`/`CGEvent Cmd+V` + 五键监听 + LaunchAgent。
 
 所有系统调用统一经 `_platform._macos_api.MacOSSystemApi` 协议封装，严禁导入 `_linux.*`。
 """
@@ -123,7 +123,7 @@ def _extract_macos_key_info(key) -> tuple[int, int]:
 
 
 class MacOSHotkeyRig(PynputHotkeyRig):
-    """基于 `_hotkey.parse_hotkey_macos` + `PynputHotkeyRig` 的 macOS 四键监听器。"""
+    """基于 `_hotkey.parse_hotkey_macos` + `PynputHotkeyRig` 的 macOS 五键监听器。"""
 
     def __init__(
         self,
@@ -134,6 +134,7 @@ class MacOSHotkeyRig(PynputHotkeyRig):
         on_screenshot: Callable[[], None],
         on_ocr: Callable[[], None] = noop,
         on_repeat: Callable[[], None] = noop,
+        on_annotate: Callable[[], None] = noop,
         overlay_active: Callable[[], bool] = always_false,
         close_overlay: Callable[[], bool] = always_false,
         listener_factory: Callable[..., object] | None = None,
@@ -149,6 +150,7 @@ class MacOSHotkeyRig(PynputHotkeyRig):
             on_screenshot=on_screenshot,
             on_ocr=on_ocr,
             on_repeat=on_repeat,
+            on_annotate=on_annotate,
             overlay_active=overlay_active,
             close_overlay=close_overlay,
             listener_factory=listener_factory,
@@ -218,6 +220,9 @@ class MacOSPlatformAdapter:
     def write_clipboard_text(self, text: str) -> str | None:
         return self._api().write_clipboard_text(text)
 
+    def write_clipboard_png(self, png: bytes) -> str | None:
+        return self._api().write_clipboard_png(png, self._temp_dir)
+
     def inject_text(
         self,
         text: str,
@@ -279,6 +284,7 @@ class MacOSPlatformAdapter:
         on_screenshot: Callable[[], None],
         on_ocr: Callable[[], None] = noop,
         on_repeat: Callable[[], None] = noop,
+        on_annotate: Callable[[], None] = noop,
         overlay_active: Callable[[], bool] = always_false,
         close_overlay: Callable[[], bool] = always_false,
         on_error: Callable[[str | None], None],
@@ -291,6 +297,7 @@ class MacOSPlatformAdapter:
             on_screenshot=on_screenshot,
             on_ocr=on_ocr,
             on_repeat=on_repeat,
+            on_annotate=on_annotate,
             overlay_active=overlay_active,
             close_overlay=close_overlay,
             listener_factory=self._listener_factory,

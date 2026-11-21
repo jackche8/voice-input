@@ -21,12 +21,13 @@ MOD_ALIASES = {
 
 @dataclass(frozen=True)
 class HotkeyBindings:
-    """一次启动内四条快捷键的值，来自配置，不在平台层写死。"""
+    """一次启动内五条快捷键的值，来自配置，不在平台层写死。"""
 
     voice: str
     screenshot: str
     repeat: str
     ocr: str = "ctrl+alt+o"
+    annotate: str = "ctrl+alt+a"
 
 
 @dataclass(frozen=True)
@@ -243,7 +244,7 @@ def validate_hotkey(hotkey: str) -> str:
 
 
 def ensure_distinct_hotkeys(hotkeys: dict[str, str]) -> None:
-    """三条快捷键规范化后不得重复；值须已经过 validate_hotkey。重复抛 LogicError(invalid_request)。"""
+    """多条快捷键规范化后不得重复；值须已经过 validate_hotkey。重复抛 LogicError(invalid_request)。"""
     from _contracts import ErrorCode, LogicError
 
     by_value: dict[str, list[str]] = {}

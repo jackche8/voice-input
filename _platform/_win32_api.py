@@ -60,6 +60,8 @@ class Win32Api(Protocol):
 
     def write_clipboard_text(self, text: str) -> str | None: ...
 
+    def write_clipboard_dib(self, dib: bytes) -> str | None: ...
+
     def snapshot_clipboard(self) -> WinClipboardSnapshot: ...
 
     def restore_clipboard(self, snap: WinClipboardSnapshot) -> None: ...
@@ -291,6 +293,9 @@ class CtypesWin32Api:
         encoded = (text + "\x00").encode("utf-16-le")
         return self._write_clipboard_bytes(CF_UNICODETEXT, encoded, label="剪贴板文本")
 
+    def write_clipboard_dib(self, dib: bytes) -> str | None:
+        return self._write_clipboard_bytes(CF_DIB, dib, label="剪贴板位图")
+
     def _write_clipboard_bytes(self, fmt: int, payload: bytes, *, label: str) -> str | None:
         with self._clip_lock:
             if not self._open_clipboard_retry():
@@ -370,7 +375,7 @@ class CtypesWin32Api:
             return
         if snap.kind == "dib":
             if snap.dib_bytes:
-                self._write_clipboard_bytes(CF_DIB, snap.dib_bytes, label="剪贴板位图")
+                self.write_clipboard_dib(snap.dib_bytes)
             return
         if snap.kind == "empty":
             with self._clip_lock:

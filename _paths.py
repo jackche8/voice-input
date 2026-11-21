@@ -7,8 +7,9 @@
 from __future__ import annotations
 
 import os
+import subprocess
 import sys
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -202,6 +203,48 @@ def default_app_paths(environ: Mapping[str, str], *, os_name: OsName | None = No
     return AppPaths(config_root=config_root, data_root=data_root, runtime_dir=runtime_dir, os_name=os_name, live=True)
 
 
+def _home_dir(environ: Mapping[str, str]) -> Path:
+    raw = environ.get("HOME", "").strip()
+    return Path(raw) if raw and Path(raw).is_absolute() else Path.home()
+
+
+def pictures_dir(
+    environ: Mapping[str, str],
+    *,
+    os_name: OsName | None = None,
+    run: Callable[..., subprocess.CompletedProcess] = subprocess.run,
+) -> Path:
+    """用户图片目录（截屏标注保存的父目录，子目录为 `pictures_dir(...) / APP_DISPLAY_NAME`）。"""
+    resolved_os = os_name or detect_os()
+    if resolved_os == "windows":
+        profile = environ.get("USERPROFILE", "").strip()
+        base = Path(profile) if profile else Path.home()
+        return base / "Pictures"
+    if resolved_os == "macos":
+        return _home_dir(environ) / "Pictures"
+    try:
+        proc = run(
+            ["xdg-user-dir", "PICTURES"],
+            capture_output=True,
+            text=True,
+            timeout=2,
+            check=False,
+            env=dict(environ),
+        )
+    except (OSError, subprocess.SubprocessError):
+        proc = None
+    if proc is not None and proc.returncode == 0:
+        raw = (
+            proc.stdout.decode("utf-8", errors="replace")
+            if isinstance(proc.stdout, (bytes, bytearray))
+            else str(proc.stdout or "")
+        )
+        out = raw.strip()
+        if out and Path(out).is_absolute():
+            return Path(out)
+    return _home_dir(environ) / "Pictures"
+
+
 def app_command(paths: AppPaths, *, background: bool) -> list[str]:
     """启动应用主进程的命令（开机自启、单例唤起说明共用）。源码运行与安装版都由当前解释器执行程序根下的入口。"""
     command = [sys.executable, str(paths.program_root / "daemon.py")]
@@ -216,4 +259,5 @@ __all__ = [
     "AppPaths",
     "app_command",
     "default_app_paths",
+    "pictures_dir",
 ]

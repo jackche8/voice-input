@@ -45,6 +45,7 @@
     assert(homeInitText.indexOf("未连接") !== -1, "主页默认显示未连接");
     assert(homeInitText.indexOf("Qwen3-ASR-1.7B") !== -1 && homeInitText.indexOf("qwen3.5:4b") !== -1, "主页侧栏展示两个固定模型");
     assert(!!homeRoot.querySelector('kbd[data-hotkey-badge="hotkey_ocr"]'), "主页侧栏展示第四热键 hotkey_ocr");
+    assert(!!homeRoot.querySelector('kbd[data-hotkey-badge="hotkey_annotate"]'), "主页侧栏展示第五热键 hotkey_annotate");
     assert(!homeRoot.querySelector('a[href="/setup"]'), "主页侧栏无 /setup 跳页外链");
     assert(homeRoot.querySelectorAll('button[data-panel]').length === 5, "主页侧栏提供 5 项页内切换面板");
     assert(!!homeRoot.querySelector('button[data-panel="setup"]'), "主页侧栏提供页内设置按钮");
@@ -92,6 +93,7 @@
     const homeConnText = homeRoot.innerText;
     assert(homeConnText.indexOf("已就绪") !== -1, "主页在双模型就绪时显示已就绪");
     assert(homeRoot.querySelector('kbd[data-hotkey-badge="hotkey_ocr"]').textContent === "Ctrl+Alt+O", "主页侧栏正确格式化 hotkey_ocr");
+    assert(homeRoot.querySelector('kbd[data-hotkey-badge="hotkey_annotate"]').textContent === "Ctrl+Alt+A", "主页侧栏正确格式化 hotkey_annotate");
     assert(homeRoot.innerHTML.indexOf("secret-should-be-stripped-by-ui") === -1, "主页视图层剥离明文 LAN URL，不写入 DOM");
 
     const srcInput = homeRoot.querySelector('textarea[data-role="translate-input"]');
@@ -318,7 +320,7 @@
     assert(confirms.some(function (c) { return c.sendOriginal && c.payload.text.indexOf("把这个函数拆成两个") !== -1; }), "发送原文只走回调");
     voice.destroy();
 
-    /* ---------- 4. 统一工作台内置设置：四热键录入与 sidecar 就绪验收 ---------- */
+    /* ---------- 4. 统一工作台内置设置：五热键录入与 sidecar 就绪验收 ---------- */
     let rejectSave = false;
     const savedHotkeys = [];
     const keyHome = V3.home.mount(homeRoot, {
@@ -328,7 +330,8 @@
       hotkey_voice: "ctrl+alt+z",
       hotkey_screenshot: "ctrl+alt+x",
       hotkey_ocr: "ctrl+alt+o",
-      hotkey_repeat: "ctrl+alt+r"
+      hotkey_repeat: "ctrl+alt+r",
+      hotkey_annotate: "ctrl+alt+a"
     }, {
       onSaveHotkeys: function (keys) {
         savedHotkeys.push(keys);
@@ -373,6 +376,8 @@
     const voice0 = keyField("hotkey_voice");
     assert(!!voice0 && voice0.value === "ctrl+alt+z", "已保存的合法组合仍显示");
     assert(!!keyField("hotkey_ocr") && keyField("hotkey_ocr").value === "ctrl+alt+o", "设置面板展示第四热键 hotkey_ocr");
+    assert(!!keyField("hotkey_annotate") && keyField("hotkey_annotate").value === "ctrl+alt+a", "设置面板展示第五热键 hotkey_annotate");
+    assert(keySetupPane.innerText.indexOf("五个全局快捷键") !== -1, "设置面板标题展示五个全局快捷键");
     voice0.focus();
     assert(keyHome.getState().hotkeyCapturing === "hotkey_voice", "聚焦进入录入态");
     assert(document.activeElement === keyField("hotkey_voice"), "进入录入后焦点仍在该输入框");
@@ -402,6 +407,11 @@
     );
     fireKey(keyField("hotkey_ocr"), { key: "p", code: "KeyP", ctrlKey: true, altKey: true });
     assert(keyHome.getState().hotkeyDrafts.hotkey_ocr === "ctrl+alt+p" && !keyHome.getState().hotkeyCaptureWarning, "重新录入安全组合后清空警告");
+
+    keyField("hotkey_annotate").focus();
+    fireKey(keyField("hotkey_annotate"), { key: "b", code: "KeyB", ctrlKey: true, altKey: true });
+    assert(keyHome.getState().hotkeyDrafts.hotkey_annotate === "ctrl+alt+b", "hotkey_annotate 录入草稿写入 viewstate");
+    assert(keyField("hotkey_annotate").value === "ctrl+alt+b", "hotkey_annotate 输入框显示草稿");
 
     keyField("hotkey_voice").focus();
     fireKey(keyField("hotkey_voice"), { key: "q", code: "KeyQ", ctrlKey: true, altKey: true });
@@ -463,7 +473,12 @@
     rejectSave = false;
     const savedCount = savedHotkeys.length;
     keySetupPane.querySelector("button.primary").click();
-    assert(savedHotkeys.length === savedCount + 1 && savedHotkeys[savedHotkeys.length - 1].hotkey_ocr === "ctrl+alt+p", "保存提交包含 hotkey_ocr 的四项草稿");
+    assert(
+      savedHotkeys.length === savedCount + 1
+        && savedHotkeys[savedHotkeys.length - 1].hotkey_ocr === "ctrl+alt+p"
+        && savedHotkeys[savedHotkeys.length - 1].hotkey_annotate === "ctrl+alt+b",
+      "保存提交包含 hotkey_ocr 与 hotkey_annotate 的五项草稿"
+    );
     assert(keySetupPane.innerText.indexOf("已保存") !== -1, "保存成功只显示已保存");
     assert(keySetupPane.innerText.indexOf("已生效") === -1, "已保存旁不出现已生效");
 
@@ -473,14 +488,16 @@
       hotkey_screenshot: "ctrl+alt+x",
       hotkey_ocr: "ctrl+alt+o",
       hotkey_repeat: "ctrl+alt+r",
+      hotkey_annotate: "ctrl+alt+a",
       hotkeysSaved: false
     });
     assert(
       keyField("hotkey_voice").value === "ctrl+alt+z"
         && keyField("hotkey_screenshot").value === "ctrl+alt+x"
         && keyField("hotkey_ocr").value === "ctrl+alt+o"
-        && keyField("hotkey_repeat").value === "ctrl+alt+r",
-      "已保存的四项合法组合在无草稿时仍可显示和配置"
+        && keyField("hotkey_repeat").value === "ctrl+alt+r"
+        && keyField("hotkey_annotate").value === "ctrl+alt+a",
+      "已保存的五项合法组合在无草稿时仍可显示和配置"
     );
 
     keyField("hotkey_voice").focus();

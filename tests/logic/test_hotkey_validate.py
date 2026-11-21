@@ -17,6 +17,7 @@ from _hotkey import HOTKEY_MAIN_KEYS, ensure_distinct_hotkeys, parse_hotkey_evde
         ("ctrl+alt+z", "ctrl+alt+z"),
         ("alt+x", "alt+x"),  # 用户现有配置（05:51:30 保存）保持合法、不改写
         ("ctrl+alt+r", "ctrl+alt+r"),
+        ("ctrl+alt+a", "ctrl+alt+a"),
         ("Control+Alt+Z", "ctrl+alt+z"),
         ("alt+ctrl+x", "ctrl+alt+x"),
         ("ctrl+grave", "ctrl+grave"),
@@ -118,6 +119,12 @@ def test_apply_update_checks_duplicates_against_stored_values(tmp_path: Path):
     # 交换两条：同一次更新内的新值彼此查重，不与旧值误判
     view = apply_config_update(store, AppConfigUpdate(hotkey_voice="ctrl+alt+r", hotkey_repeat="ctrl+alt+z"))
     assert (view.hotkey_voice, view.hotkey_repeat) == ("ctrl+alt+r", "ctrl+alt+z")
+    # 第五键 annotate 与其它键一起查重与规范化
+    with pytest.raises(LogicError) as dup_ann:
+        apply_config_update(store, AppConfigUpdate(hotkey_annotate="CTRL+ALT+X"))
+    assert "hotkey_screenshot、hotkey_annotate 都是 ctrl+alt+x" in dup_ann.value.message
+    view = apply_config_update(store, AppConfigUpdate(hotkey_annotate="Alt+Ctrl+A"))
+    assert view.hotkey_annotate == "ctrl+alt+a"
 
 
 def test_existing_config_is_not_rewritten_on_load_or_unrelated_update(tmp_path: Path):

@@ -278,6 +278,11 @@ class LinuxPlatformAdapter:
     def write_clipboard_text(self, text: str) -> str | None:
         return self._clipboard.write(text)
 
+    def write_clipboard_png(self, png: bytes) -> str | None:
+        if not png:
+            return "剪贴板图片为空"
+        return self._clipboard.write_binary(png, "image/png")
+
     def inject_text(
         self,
         text: str,
@@ -310,6 +315,7 @@ class LinuxPlatformAdapter:
         on_screenshot: Callable[[], None],
         on_ocr: Callable[[], None] = noop,
         on_repeat: Callable[[], None] = noop,
+        on_annotate: Callable[[], None] = noop,
         overlay_active: Callable[[], bool] = always_false,
         close_overlay: Callable[[], bool] = always_false,
         on_error: Callable[[str | None], None],
@@ -321,6 +327,7 @@ class LinuxPlatformAdapter:
             on_screenshot=on_screenshot,
             on_ocr=on_ocr,
             on_repeat=on_repeat,
+            on_annotate=on_annotate,
             is_overlay_active=overlay_active,
             on_close_overlay=close_overlay,
         )

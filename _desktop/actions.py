@@ -1,4 +1,4 @@
-"""把桌面业务流程挂到四键快捷键动作接口（语音 / 截屏原位翻译 / 纯 OCR / 重复输入）。"""
+"""把桌面业务流程挂到五键快捷键动作接口（语音 / 截屏原位翻译 / 纯 OCR / 重复输入 / 截屏标注）。"""
 from __future__ import annotations
 
 import threading
@@ -37,8 +37,11 @@ class DesktopActions:
     def repeat(self) -> None:
         self._spawn(self.repeat_action.run)
 
+    def annotate(self) -> None:
+        self.capture.trigger_annotate()
+
     def overlay_active(self) -> bool:
         return self.capture.overlay_active()
 
     def close_overlay(self) -> bool:
-        return self.capture.close_overlay()
+        return self.capture.handle_escape()

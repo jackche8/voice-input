@@ -1,4 +1,4 @@
-"""扫描 GNOME 桌面级快捷键冲突（只读 gsettings，覆盖 voice / screenshot / ocr / repeat 四键）。
+"""扫描 GNOME 桌面级快捷键冲突（只读 gsettings，覆盖 voice / screenshot / ocr / repeat / annotate 五键）。
 
 读取来源：5 个 GNOME 键位 schema、media-keys 自定义快捷键、GNOME 全局快捷键授权表
 `org.gnome.settings-daemon.global-shortcuts`（其它应用经 portal 登记的组合键；排除本应用 app id）。
@@ -127,7 +127,7 @@ def scan_hotkey_conflicts(
     run: Runner = subprocess.run,
     which: Callable[[str], str | None] = shutil.which,
 ) -> ConflictScan:
-    """只读扫描；返回已读到的冲突与未能读取的来源（含 voice / screenshot / ocr / repeat 四键）。"""
+    """只读扫描；返回已读到的冲突与未能读取的来源（含 voice / screenshot / ocr / repeat / annotate 五键）。"""
     if not which("gsettings"):
         return ConflictScan(conflicts=(), unread=("gsettings 不可用，未能读取任何 GNOME 快捷键登记",))
     wanted = {
@@ -135,6 +135,7 @@ def scan_hotkey_conflicts(
         "screenshot": normalize_accel(bindings.screenshot),
         "ocr": normalize_accel(bindings.ocr),
         "repeat": normalize_accel(bindings.repeat),
+        "annotate": normalize_accel(bindings.annotate),
     }
     conflicts: list[str] = []
     unread: list[str] = []

@@ -77,6 +77,8 @@ class HotkeyActions(Protocol):
 
     def repeat(self) -> None: ...
 
+    def annotate(self) -> None: ...
+
     def overlay_active(self) -> bool: ...
 
     def close_overlay(self) -> bool: ...
@@ -84,13 +86,14 @@ class HotkeyActions(Protocol):
 
 @dataclass
 class CallbackHotkeyActions:
-    """基于函数回调的 `HotkeyActions` 实现，完整支持四键。"""
+    """基于函数回调的 `HotkeyActions` 实现，完整支持五键。"""
 
     on_voice_start: Callable[[], bool]
     on_voice_stop: Callable[[], None]
     on_screenshot: Callable[[], None]
     on_repeat: Callable[[], None] = lambda: None
     on_ocr: Callable[[], None] = lambda: None
+    on_annotate: Callable[[], None] = lambda: None
     is_overlay_active: Callable[[], bool] = lambda: False
     on_close_overlay: Callable[[], bool] = lambda: False
 
@@ -108,6 +111,9 @@ class CallbackHotkeyActions:
 
     def repeat(self) -> None:
         self.on_repeat()
+
+    def annotate(self) -> None:
+        self.on_annotate()
 
     def overlay_active(self) -> bool:
         return self.is_overlay_active()

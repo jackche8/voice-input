@@ -35,7 +35,7 @@
     }
   };
 
-  var HOTKEY_ORDER = ["hotkey_voice", "hotkey_screenshot", "hotkey_ocr", "hotkey_repeat"];
+  var HOTKEY_ORDER = ["hotkey_voice", "hotkey_screenshot", "hotkey_ocr", "hotkey_repeat", "hotkey_annotate"];
 
   function call(hooks, name, payload) {
     var fn = hooks && hooks[name];

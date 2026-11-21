@@ -52,6 +52,8 @@ class MacOSSystemApi(Protocol):
 
     def write_clipboard_text(self, text: str) -> str | None: ...
 
+    def write_clipboard_png(self, png: bytes, temp_dir: Path) -> str | None: ...
+
     def snapshot_clipboard(self, temp_dir: Path) -> MacClipboardSnapshot: ...
 
     def restore_clipboard(self, snap: MacClipboardSnapshot, temp_dir: Path) -> None: ...
@@ -269,23 +271,52 @@ class RealMacOSSystemApi:
             return MacClipboardSnapshot(kind="text", text=txt)
         return MacClipboardSnapshot(kind="failed")
 
+    def write_clipboard_png(self, png: bytes, temp_dir: Path) -> str | None:
+        """将 PNG 经应用临时目录（绝不写 `/tmp`）与 osascript 写入系统剪贴板。成功返回 None。"""
+        if not png:
+            return "剪贴板图片为空"
+        if not self._which("osascript"):
+            return "未找到 macOS osascript 工具"
+        img_path: Path | None = None
+        try:
+            temp_dir.mkdir(parents=True, exist_ok=True)
+            fd, tmp_name = tempfile.mkstemp(prefix=".clip-png.", suffix=".png", dir=str(temp_dir))
+            os.close(fd)
+            img_path = Path(tmp_name)
+            img_path.write_bytes(png)
+        except OSError as exc:
+            if img_path is not None:
+                img_path.unlink(missing_ok=True)
+            return f"准备图片剪贴板临时文件失败: {exc}"
+        try:
+            escaped = str(img_path).replace("\\", "\\\\").replace('"', '\\"')
+            script = f'set the clipboard to (read (POSIX file "{escaped}") as «class PNGf»)'
+            try:
+                proc = self._run(
+                    ["osascript", "-e", script],
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                    check=False,
+                )
+            except subprocess.TimeoutExpired:
+                return "osascript 写入图片剪贴板超时"
+            except OSError as exc:
+                return f"osascript 写入图片剪贴板失败: {exc}"
+            if proc.returncode != 0:
+                detail = (proc.stderr or proc.stdout or "").strip()
+                return f"osascript 写入图片剪贴板失败: {detail}" if detail else "osascript 写入图片剪贴板失败"
+            return None
+        finally:
+            img_path.unlink(missing_ok=True)
+
     def restore_clipboard(self, snap: MacClipboardSnapshot, temp_dir: Path) -> None:
         if snap.kind in ("unsupported", "failed"):
             return
         if snap.kind == "png":
-            if not snap.png_bytes or not self._which("osascript"):
-                return
-            temp_dir.mkdir(parents=True, exist_ok=True)
-            fd, tmp_name = tempfile.mkstemp(prefix=".clip-restore.", suffix=".png", dir=str(temp_dir))
-            os.close(fd)
-            img_path = Path(tmp_name)
-            try:
-                img_path.write_bytes(snap.png_bytes)
-                script = f'set the clipboard to (read (POSIX file "{img_path}") as «class PNGf»)'
-                self._run(["osascript", "-e", script], capture_output=True, text=True, timeout=3, check=False)
-                return
-            finally:
-                img_path.unlink(missing_ok=True)
+            if snap.png_bytes:
+                self.write_clipboard_png(snap.png_bytes, temp_dir)
+            return
         if snap.kind == "text":
             self.write_clipboard_text(snap.text)
             return

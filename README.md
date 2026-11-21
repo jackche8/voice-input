@@ -134,6 +134,8 @@ python3 -m venv --system-site-packages .venv
 | `OVI_PORT_ASR` | `17946` | 语音识别服务 |
 | `OVI_PORT_OLLAMA` | `17947` | 应用自带的 Ollama |
 
+设置 `OVI_PORT_*` 会同步改变全部派生地址——包括服务端地址（主窗口、桌面客户端与手机局域网入口 `https://127.0.0.1:<OVI_PORT_SERVER>`）、语音识别服务地址（`http://127.0.0.1:<OVI_PORT_ASR>`）、应用自带 Ollama 地址（`http://127.0.0.1:<OVI_PORT_OLLAMA>`）以及对应的本地健康探针地址；环境变量会由看护层自动透传给拉起的子进程。
+
 端口被其他程序占用时，应用不会抢占，会在托盘或底栏提示占用者的 PID 与进程名。
 
 ---

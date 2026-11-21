@@ -13,6 +13,7 @@
     "hotkey_screenshot",
     "hotkey_ocr",
     "hotkey_repeat",
+    "hotkey_annotate",
     "autostart_enabled"
   ];
 
@@ -41,6 +42,7 @@
     state.hotkey_screenshot = config.hotkey_screenshot || "";
     state.hotkey_ocr = config.hotkey_ocr || "";
     state.hotkey_repeat = config.hotkey_repeat || "";
+    state.hotkey_annotate = config.hotkey_annotate || "";
     state.autostart_enabled = config.autostart_enabled;
     return state;
   }

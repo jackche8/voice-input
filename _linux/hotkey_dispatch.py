@@ -50,7 +50,12 @@ class HotkeyDispatcher:
 
     def escape_pressed(self) -> None:
         if self.ctx.actions.overlay_active():
-            GLib.idle_add(self.ctx.actions.close_overlay)
+            GLib.idle_add(self._close_overlay_once)
+
+    def _close_overlay_once(self) -> bool:
+        """一次性 GLib 回调：无论 close_overlay/handle_escape 返回 True 或 False，均返回 False（SOURCE_REMOVE）。"""
+        self.ctx.actions.close_overlay()
+        return False
 
     def source_failed(self, reason: str) -> bool:
         """事件源退出后再也收不到结束：正在录音就先复位并停止，再上报失败。"""
@@ -79,5 +84,9 @@ class HotkeyDispatcher:
                 actions.screenshot()
             elif edge.action == "ocr":
                 actions.ocr()
-            else:
+            elif edge.action == "annotate":
+                actions.annotate()
+            elif edge.action == "repeat":
                 actions.repeat()
+            else:
+                raise ValueError(f"未知快捷键动作: {edge.action!r}")

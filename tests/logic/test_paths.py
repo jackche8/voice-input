@@ -1,13 +1,14 @@
 """U1 路径唯一表：三平台根目录与派生路径、非 live 拒绝真实根、应用启动命令（只注入 environ / os_name，不碰真实目录）。"""
 from __future__ import annotations
 
+import subprocess
 import sys
 from pathlib import Path
 
 import pytest
 
 from _contracts import OLLAMA_VERSION
-from _paths import APP_DISPLAY_NAME, APP_ID, PROGRAM_ROOT, AppPaths, app_command, default_app_paths
+from _paths import APP_DISPLAY_NAME, APP_ID, PROGRAM_ROOT, AppPaths, app_command, default_app_paths, pictures_dir
 
 LINUX_ENV = {
     "HOME": "/home/u",
@@ -79,3 +80,43 @@ def test_app_command_runs_program_root_entry_with_current_interpreter():
     entry = str(PROGRAM_ROOT / "daemon.py")
     assert app_command(p, background=False) == [sys.executable, entry]
     assert app_command(p, background=True) == [sys.executable, entry, "--background"]
+
+
+def test_pictures_dir_across_linux_windows_and_macos():
+    seen: list[tuple[list[str], dict[str, str]]] = []
+
+    def ok_run(cmd, **kw):
+        seen.append((list(cmd), dict(kw.get("env") or {})))
+        return subprocess.CompletedProcess(cmd, 0, "/home/u/图片\n", "")
+
+    linux_ok = pictures_dir(LINUX_ENV, os_name="linux", run=ok_run)
+    assert linux_ok == Path("/home/u/图片")
+    assert linux_ok / APP_DISPLAY_NAME == Path("/home/u/图片") / "Ollama Voice Input"
+    assert seen == [(["xdg-user-dir", "PICTURES"], dict(LINUX_ENV))]
+
+    # Linux xdg-user-dir 失败、缺失命令、空输出、相对路径均回退 HOME/Pictures
+    def rc_fail(cmd, **kw):
+        del kw
+        return subprocess.CompletedProcess(cmd, 1, "", "err")
+
+    def missing_cmd(cmd, **kw):
+        del cmd, kw
+        raise FileNotFoundError("xdg-user-dir")
+
+    def relative_out(cmd, **kw):
+        del kw
+        return subprocess.CompletedProcess(cmd, 0, "Pictures\n", "")
+
+    def empty_out(cmd, **kw):
+        del kw
+        return subprocess.CompletedProcess(cmd, 0, "  \n", "")
+
+    for bad_run in (rc_fail, missing_cmd, relative_out, empty_out):
+        assert pictures_dir(LINUX_ENV, os_name="linux", run=bad_run) == Path("/home/u/Pictures")
+    assert pictures_dir({}, os_name="linux", run=missing_cmd) == Path.home() / "Pictures"
+
+    # Windows 与 macOS
+    assert pictures_dir({"USERPROFILE": "/w/Users/alice"}, os_name="windows") == Path("/w/Users/alice/Pictures")
+    assert pictures_dir({}, os_name="windows") == Path.home() / "Pictures"
+    assert pictures_dir({"HOME": "/Users/bob"}, os_name="macos") == Path("/Users/bob/Pictures")
+    assert pictures_dir({}, os_name="macos") == Path.home() / "Pictures"

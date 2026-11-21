@@ -2,7 +2,7 @@
  *
  * 配置字段与 AppConfig 对齐：
  *   polish_enabled, custom_keywords, translate_target_lang,
- *   hotkey_voice, hotkey_screenshot, hotkey_ocr, hotkey_repeat, autostart_enabled
+ *   hotkey_voice, hotkey_screenshot, hotkey_ocr, hotkey_repeat, hotkey_annotate, autostart_enabled
  * 历史记录字段与 HistoryRecord / HistoryListResponse 对齐：
  *   timestamp, raw_text, final_text, language, mode, source, polish, job_id,
  *   records, total, skipped_malformed
@@ -60,6 +60,7 @@
       hotkey_screenshot: "",
       hotkey_ocr: "",
       hotkey_repeat: "",
+      hotkey_annotate: "",
       hotkeyDrafts: null,
       hotkeyCapturing: null,
       hotkeyFocus: null,

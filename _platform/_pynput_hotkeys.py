@@ -1,4 +1,4 @@
-"""跨平台 `pynput` 四键全局热键状态机（Windows / macOS 共用唯一实现，含 `voice` 按住/松开）。"""
+"""跨平台 `pynput` 五键全局热键状态机（Windows / macOS 共用唯一实现，含 `voice` 按住/松开）。"""
 from __future__ import annotations
 
 import threading
@@ -13,7 +13,7 @@ def _default_is_valid_code(code: int) -> bool:
 
 
 class PynputHotkeyRig:
-    """统一 `pynput` 四键监听器状态机。
+    """统一 `pynput` 五键监听器状态机。
 
     平台差异仅通过注入 `backend_name`、`hotkey_parser`、`key_extractor` 与 `is_valid_code` 表达，
     不在 Windows / macOS 适配器里各自复制一套按键状态机。
@@ -32,6 +32,7 @@ class PynputHotkeyRig:
         on_screenshot: Callable[[], None],
         on_ocr: Callable[[], None] = noop,
         on_repeat: Callable[[], None] = noop,
+        on_annotate: Callable[[], None] = noop,
         overlay_active: Callable[[], bool] = always_false,
         close_overlay: Callable[[], bool] = always_false,
         listener_factory: Callable[..., object] | None = None,
@@ -44,6 +45,7 @@ class PynputHotkeyRig:
         self.screenshot_spec = hotkey_parser(bindings.screenshot)
         self.ocr_spec = hotkey_parser(bindings.ocr) if bindings.ocr else None
         self.repeat_spec = hotkey_parser(bindings.repeat)
+        self.annotate_spec = hotkey_parser(bindings.annotate) if bindings.annotate else None
         self._escape_code = hotkey_parser("escape")[1]  # 浮窗只认 Esc 关闭（与 Linux evdev 一致）
 
         self._on_voice_start = on_voice_start
@@ -51,6 +53,7 @@ class PynputHotkeyRig:
         self._on_screenshot = on_screenshot
         self._on_ocr = on_ocr
         self._on_repeat = on_repeat
+        self._on_annotate = on_annotate
         self._overlay_active = overlay_active
         self._close_overlay = close_overlay
         self._listener_factory = listener_factory
@@ -97,6 +100,9 @@ class PynputHotkeyRig:
                 elif (mods, code) == self.repeat_spec:
                     matched_binding = True
                     action_to_run = self._on_repeat
+                elif self.annotate_spec is not None and (mods, code) == self.annotate_spec:
+                    matched_binding = True
+                    action_to_run = self._on_annotate
                 if not matched_binding and code == self._escape_code and self._overlay_active():
                     should_close_overlay = True
 

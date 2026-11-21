@@ -1,4 +1,4 @@
-"""Windows 平台适配器：Win32 `user32`/`kernel32` + `mss` 多屏抓屏 + `SendInput`/剪贴板保护 + 四键监听。
+"""Windows 平台适配器：Win32 `user32`/`kernel32` + `mss` 多屏抓屏 + `SendInput`/剪贴板保护 + 五键监听。
 
 所有系统调用统一经 `_platform._win32_api.Win32Api` 协议封装：
 - 真机 Windows 自动使用 `CtypesWin32Api`（`ctypes.windll.user32`/`kernel32`）+ `mss` + `pynput`；
@@ -6,6 +6,7 @@
 """
 from __future__ import annotations
 
+import io
 import os
 import shutil
 import threading
@@ -130,8 +131,21 @@ def _extract_win32_key_info(key) -> tuple[int, int]:
     return 0, vk
 
 
+def _png_to_dib(png: bytes) -> bytes:
+    """把 PNG 字节转为 Windows CF_DIB（24 位 RGB BMP 去掉 14 字节 BITMAPFILEHEADER）。"""
+    from PIL import Image
+
+    with Image.open(io.BytesIO(png)) as img:
+        buf = io.BytesIO()
+        img.convert("RGB").save(buf, format="BMP")
+    raw = buf.getvalue()
+    if len(raw) <= 14 or not raw.startswith(b"BM"):
+        raise RuntimeError("BMP 编码结果缺少有效文件头")
+    return raw[14:]
+
+
 class WindowsHotkeyRig(PynputHotkeyRig):
-    """基于 `_hotkey.parse_hotkey_win32` + `PynputHotkeyRig` 的 Windows 四键监听器。"""
+    """基于 `_hotkey.parse_hotkey_win32` + `PynputHotkeyRig` 的 Windows 五键监听器。"""
 
     def __init__(
         self,
@@ -142,6 +156,7 @@ class WindowsHotkeyRig(PynputHotkeyRig):
         on_screenshot: Callable[[], None],
         on_ocr: Callable[[], None] = noop,
         on_repeat: Callable[[], None] = noop,
+        on_annotate: Callable[[], None] = noop,
         overlay_active: Callable[[], bool] = always_false,
         close_overlay: Callable[[], bool] = always_false,
         listener_factory: Callable[..., object] | None = None,
@@ -157,6 +172,7 @@ class WindowsHotkeyRig(PynputHotkeyRig):
             on_screenshot=on_screenshot,
             on_ocr=on_ocr,
             on_repeat=on_repeat,
+            on_annotate=on_annotate,
             overlay_active=overlay_active,
             close_overlay=close_overlay,
             listener_factory=listener_factory,
@@ -230,6 +246,15 @@ class WindowsPlatformAdapter:
     def write_clipboard_text(self, text: str) -> str | None:
         return self._win32().write_clipboard_text(text)
 
+    def write_clipboard_png(self, png: bytes) -> str | None:
+        if not png:
+            return "剪贴板图片为空"
+        try:
+            dib = _png_to_dib(png)
+        except Exception as exc:
+            return f"PNG 转 DIB 失败: {exc}"
+        return self._win32().write_clipboard_dib(dib)
+
     def inject_text(
         self,
         text: str,
@@ -302,6 +327,7 @@ class WindowsPlatformAdapter:
         on_screenshot: Callable[[], None],
         on_ocr: Callable[[], None] = noop,
         on_repeat: Callable[[], None] = noop,
+        on_annotate: Callable[[], None] = noop,
         overlay_active: Callable[[], bool] = always_false,
         close_overlay: Callable[[], bool] = always_false,
         on_error: Callable[[str | None], None],
@@ -314,6 +340,7 @@ class WindowsPlatformAdapter:
             on_screenshot=on_screenshot,
             on_ocr=on_ocr,
             on_repeat=on_repeat,
+            on_annotate=on_annotate,
             overlay_active=overlay_active,
             close_overlay=close_overlay,
             listener_factory=self._listener_factory,
