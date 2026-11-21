@@ -32,6 +32,8 @@ def _with_route(url: str, route: str) -> str:
 
 def run(args: argparse.Namespace) -> int:
     context = WebKit2.WebContext.get_default()
+    context.set_cache_model(WebKit2.CacheModel.DOCUMENT_VIEWER)  # 本地 127.0.0.1 主窗口禁磁盘启发式缓存，避免升级后读旧 CSS/JS
+    context.clear_cache()
     context.allow_tls_certificate_for_host(Gio.TlsCertificate.new_from_file(args.cert), TRUSTED_HOST)
     view = WebKit2.WebView.new_with_context(context)
     window = Gtk.Window(title=args.title)

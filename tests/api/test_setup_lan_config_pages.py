@@ -213,8 +213,12 @@ def test_pages_come_only_from_static_v3(tmp_path):
     assert client.get("/").content == client.get("/setup").content
     for removed in ("/overlay-status", "/overlay-translate"):
         assert client.get(removed).status_code == 404, removed
-    assert client.get("/js/business/http.js").status_code == 200
-    assert client.get("/css/theme.css").status_code == 200
+    js_res = client.get("/js/business/http.js")
+    assert js_res.status_code == 200 and js_res.headers.get("cache-control") == "no-cache"
+    css_res = client.get("/css/theme.css")
+    assert css_res.status_code == 200 and css_res.headers.get("cache-control") == "no-cache"
+    assert css_res.headers.get("etag")
+    assert client.get("/css/theme.css", headers={"If-None-Match": css_res.headers["etag"]}).status_code == 304
     snap = client.get("/openapi.snapshot.json")
     assert snap.status_code == 200 and snap.json()["paths"]
 

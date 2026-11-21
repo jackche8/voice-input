@@ -22,6 +22,16 @@ OPENAPI_SNAPSHOT_FILE = "openapi.json"
 OPENAPI_SNAPSHOT_PATH = "/openapi.snapshot.json"
 LAN_PUBLIC_PAGES = frozenset({"/voice"})
 _PAGE_HEADERS = {"Referrer-Policy": "no-referrer", "Cache-Control": "no-store"}
+_ASSET_CACHE_CONTROL = "no-cache"
+
+
+class _RevalidatingStaticFiles(StaticFiles):
+    """本地静态资源强制 ETag 复验，避免浏览器/WebKit2GTK 启发式缓存跨升级沿用旧 CSS/JS。"""
+
+    async def get_response(self, path: str, scope):
+        response = await super().get_response(path, scope)
+        response.headers["Cache-Control"] = _ASSET_CACHE_CONTROL
+        return response
 
 
 def install_pages(app: FastAPI, static_v3: Path) -> None:
@@ -50,7 +60,7 @@ def install_pages(app: FastAPI, static_v3: Path) -> None:
 
     app.add_api_route(OPENAPI_SNAPSHOT_PATH, openapi_snapshot, methods=["GET"], include_in_schema=False)
     for name in ASSET_DIRS:
-        app.mount(f"/{name}", StaticFiles(directory=str(root / name)), name=f"v3_{name}")
+        app.mount(f"/{name}", _RevalidatingStaticFiles(directory=str(root / name)), name=f"v3_{name}")
 
 
 def is_lan_public_path(path: str) -> bool:
