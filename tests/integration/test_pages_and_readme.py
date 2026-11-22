@@ -703,28 +703,33 @@ def test_pages_workflow_yaml_contract() -> None:
     assert doc.get("concurrency") == {"group": "pages", "cancel-in-progress": False}
 
     jobs = doc["jobs"]
-    assert set(jobs) == {"deploy"}
+    assert set(jobs) == {"build", "deploy"}
+    build = jobs["build"]
     deploy = jobs["deploy"]
+    assert build["runs-on"] == "ubuntu-24.04"
     assert deploy["runs-on"] == "ubuntu-24.04"
+    assert deploy["needs"] == "build"
     assert deploy["environment"] == {
         "name": "github-pages",
         "url": "${{ steps.deployment.outputs.page_url }}",
     }
 
-    steps = deploy["steps"]
-    uses = [s.get("uses") for s in steps if s.get("uses")]
-    assert uses == [
+    build_steps = build["steps"]
+    deploy_steps = deploy["steps"]
+    build_uses = [s.get("uses") for s in build_steps if s.get("uses")]
+    deploy_uses = [s.get("uses") for s in deploy_steps if s.get("uses")]
+    assert build_uses == [
         "actions/checkout@v4",
         "actions/configure-pages@v5",
         "actions/upload-pages-artifact@v3",
-        "actions/deploy-pages@v4",
     ]
-    upload_step = next(s for s in steps if s.get("uses") == "actions/upload-pages-artifact@v3")
+    assert deploy_uses == ["actions/deploy-pages@v4"]
+    upload_step = next(s for s in build_steps if s.get("uses") == "actions/upload-pages-artifact@v3")
     assert upload_step["with"]["path"] == "docs/site"
-    deploy_step = next(s for s in steps if s.get("uses") == "actions/deploy-pages@v4")
+    deploy_step = next(s for s in deploy_steps if s.get("uses") == "actions/deploy-pages@v4")
     assert deploy_step.get("id") == "deployment"
 
-    run_blocks = [s["run"] for s in steps if s.get("run")]
+    run_blocks = [s["run"] for s in [*build_steps, *deploy_steps] if s.get("run")]
     assert run_blocks, "pages.yml 缺少静态资产校验步骤"
     combined_run = "\n".join(run_blocks)
     assert "test -f docs/site/.nojekyll" in combined_run
