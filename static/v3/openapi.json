@@ -957,8 +957,7 @@
                 "$ref": "#/components/schemas/Body_ocr_translate_api_v1_ocr_translate_post"
               }
             }
-          },
-          "required": true
+          }
         },
         "responses": {
           "200": {
@@ -1020,8 +1019,7 @@
                 "$ref": "#/components/schemas/Body_ocr_inplace_api_v1_ocr_inplace_post"
               }
             }
-          },
-          "required": true
+          }
         },
         "responses": {
           "200": {
@@ -1656,7 +1654,7 @@
             ],
             "title": "Custom Keywords"
           },
-          "translate_target_lang": {
+          "translate_lang_pair": {
             "anyOf": [
               {
                 "type": "string",
@@ -1666,7 +1664,18 @@
                 "type": "null"
               }
             ],
-            "title": "Translate Target Lang"
+            "title": "Translate Lang Pair"
+          },
+          "translate_auto_enabled": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Translate Auto Enabled"
           },
           "hotkey_voice": {
             "anyOf": [
@@ -1758,9 +1767,13 @@
             "type": "array",
             "title": "Custom Keywords"
           },
-          "translate_target_lang": {
+          "translate_lang_pair": {
             "type": "string",
-            "title": "Translate Target Lang"
+            "title": "Translate Lang Pair"
+          },
+          "translate_auto_enabled": {
+            "type": "boolean",
+            "title": "Translate Auto Enabled"
           },
           "hotkey_voice": {
             "type": "string",
@@ -1798,7 +1811,8 @@
         "required": [
           "polish_enabled",
           "custom_keywords",
-          "translate_target_lang",
+          "translate_lang_pair",
+          "translate_auto_enabled",
           "hotkey_voice",
           "hotkey_screenshot",
           "hotkey_repeat",
@@ -1932,8 +1946,35 @@
       },
       "Body_ocr_inplace_api_v1_ocr_inplace_post": {
         "properties": {
-          "target_lang": {
+          "mode": {
+            "$ref": "#/components/schemas/OcrTranslateMode",
+            "default": "translate"
+          },
+          "lang_pair": {
             "type": "string",
+            "title": "Lang Pair",
+            "default": "zh-en"
+          },
+          "source_lang": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Lang"
+          },
+          "target_lang": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
             "title": "Target Lang"
           },
           "lang": {
@@ -1961,15 +2002,39 @@
           }
         },
         "type": "object",
-        "required": [
-          "target_lang"
-        ],
         "title": "Body_ocr_inplace_api_v1_ocr_inplace_post"
       },
       "Body_ocr_translate_api_v1_ocr_translate_post": {
         "properties": {
-          "target_lang": {
+          "mode": {
+            "$ref": "#/components/schemas/OcrTranslateMode",
+            "default": "translate"
+          },
+          "lang_pair": {
             "type": "string",
+            "title": "Lang Pair",
+            "default": "zh-en"
+          },
+          "source_lang": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Lang"
+          },
+          "target_lang": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
             "title": "Target Lang"
           },
           "lang": {
@@ -1997,9 +2062,6 @@
           }
         },
         "type": "object",
-        "required": [
-          "target_lang"
-        ],
         "title": "Body_ocr_translate_api_v1_ocr_translate_post"
       },
       "Body_stt_api_v1_stt_post": {
@@ -2791,9 +2853,51 @@
             "type": "string",
             "title": "Ocr Text"
           },
+          "mode": {
+            "$ref": "#/components/schemas/OcrTranslateMode"
+          },
+          "lang_pair": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Lang Pair"
+          },
+          "source_lang": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Lang"
+          },
           "target_lang": {
-            "type": "string",
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
             "title": "Target Lang"
+          },
+          "direction_mode": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/TranslateDirectionMode"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "image_width": {
             "type": "integer",
@@ -2818,7 +2922,7 @@
         "required": [
           "text",
           "ocr_text",
-          "target_lang",
+          "mode",
           "image_width",
           "image_height"
         ],
@@ -2936,6 +3040,15 @@
         "title": "OcrTextLine",
         "description": "一条可见文字行；坐标已还原放大倍数与留白。"
       },
+      "OcrTranslateMode": {
+        "type": "string",
+        "enum": [
+          "translate",
+          "raw"
+        ],
+        "title": "OcrTranslateMode",
+        "description": "OCR 能力接口的处理模式：translate 识别并翻译，raw 仅识别原文。"
+      },
       "OcrTranslateResponse": {
         "properties": {
           "ok": {
@@ -2952,9 +3065,63 @@
             "type": "string",
             "title": "Ocr Text"
           },
+          "mode": {
+            "$ref": "#/components/schemas/OcrTranslateMode"
+          },
+          "lang_pair": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Lang Pair"
+          },
+          "source_lang": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Lang"
+          },
           "target_lang": {
-            "type": "string",
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
             "title": "Target Lang"
+          },
+          "direction_mode": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/TranslateDirectionMode"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "chunks": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 1.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Chunks"
           }
         },
         "additionalProperties": false,
@@ -2962,7 +3129,7 @@
         "required": [
           "text",
           "ocr_text",
-          "target_lang"
+          "mode"
         ],
         "title": "OcrTranslateResponse",
         "description": "OCR+翻译成功体：text 是译文，ocr_text 是识别原文；不得把 ocr 当 text。"
@@ -3453,22 +3620,53 @@
         ],
         "title": "SttResponse"
       },
+      "TranslateDirectionMode": {
+        "type": "string",
+        "enum": [
+          "auto",
+          "manual"
+        ],
+        "title": "TranslateDirectionMode",
+        "description": "翻译方向判定模式：auto 由后端自动判定，manual 为显式成对指定。"
+      },
       "TranslateRequest": {
         "properties": {
           "text": {
             "type": "string",
             "title": "Text"
           },
-          "target_lang": {
+          "lang_pair": {
             "type": "string",
+            "title": "Lang Pair",
+            "default": "zh-en"
+          },
+          "source_lang": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Lang"
+          },
+          "target_lang": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
             "title": "Target Lang"
           }
         },
         "additionalProperties": false,
         "type": "object",
         "required": [
-          "text",
-          "target_lang"
+          "text"
         ],
         "title": "TranslateRequest"
       },
@@ -3484,16 +3682,36 @@
             "type": "string",
             "title": "Text"
           },
+          "lang_pair": {
+            "type": "string",
+            "title": "Lang Pair"
+          },
+          "source_lang": {
+            "type": "string",
+            "title": "Source Lang"
+          },
           "target_lang": {
             "type": "string",
             "title": "Target Lang"
+          },
+          "direction_mode": {
+            "$ref": "#/components/schemas/TranslateDirectionMode"
+          },
+          "chunks": {
+            "type": "integer",
+            "minimum": 1.0,
+            "title": "Chunks",
+            "default": 1
           }
         },
         "additionalProperties": false,
         "type": "object",
         "required": [
           "text",
-          "target_lang"
+          "lang_pair",
+          "source_lang",
+          "target_lang",
+          "direction_mode"
         ],
         "title": "TranslateResponse"
       },
@@ -3731,10 +3949,15 @@
             "title": "Custom Keywords",
             "type": "array"
           },
-          "translate_target_lang": {
-            "default": "zh",
-            "title": "Translate Target Lang",
+          "translate_lang_pair": {
+            "default": "zh-en",
+            "title": "Translate Lang Pair",
             "type": "string"
+          },
+          "translate_auto_enabled": {
+            "default": true,
+            "title": "Translate Auto Enabled",
+            "type": "boolean"
           },
           "baidu_appid": {
             "default": "",

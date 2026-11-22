@@ -15,6 +15,40 @@
   };
 
   var HISTORY_PAGE_SIZE = 20;
+  var DEFAULT_TRANSLATE_DEBOUNCE_MS = 1000;
+
+  function scheduleTimer(fn, ms, opts) {
+    var start = (opts && opts.setTimeout) || (typeof setTimeout === "function" ? setTimeout : null);
+    if (!start) {
+      fn();
+      return 0;
+    }
+    return start(fn, ms);
+  }
+
+  function unscheduleTimer(id, opts) {
+    var stop = (opts && opts.clearTimeout) || (typeof clearTimeout === "function" ? clearTimeout : null);
+    if (stop && id != null) stop(id);
+  }
+
+  function defaultPairParts(pair) {
+    var labels = (typeof V3 !== "undefined" && V3.labels) ? V3.labels : null;
+    var map = labels && labels.LANG_PAIR_PARTS;
+    if (map && Array.isArray(map[pair]) && map[pair].length === 2) {
+      return [map[pair][0], map[pair][1]];
+    }
+    var split = String(pair || "zh-en").split("-");
+    if (split.length === 2 && split[0] && split[1]) return [split[0], split[1]];
+    return ["zh", "en"];
+  }
+
+  function readManualOverride(state) {
+    var ov = state && state.translate && state.translate.manualOverride;
+    if (ov && ov.source_lang && ov.target_lang) {
+      return { source_lang: String(ov.source_lang), target_lang: String(ov.target_lang) };
+    }
+    return null;
+  }
 
   function formatErr(err) {
     var labels = (typeof V3 !== "undefined" && V3.labels) ? V3.labels : null;
@@ -48,6 +82,15 @@
     var loadReqId = 0;
     var translateReqId = 0;
     var ocrReqId = 0;
+    var debounceTimer = null;
+    var debounceMs = opts.debounceMs != null ? opts.debounceMs : DEFAULT_TRANSLATE_DEBOUNCE_MS;
+
+    function cancelDebounce() {
+      if (debounceTimer != null) {
+        unscheduleTimer(debounceTimer, opts);
+        debounceTimer = null;
+      }
+    }
 
     function setState(patch) {
       if (destroyed) return;
@@ -65,7 +108,12 @@
       isDestroyed: function () { return destroyed; },
       pollInterval: opts.pollInterval,
       setTimeout: opts.setTimeout,
-      clearTimeout: opts.clearTimeout
+      clearTimeout: opts.clearTimeout,
+      onCancelDebounce: cancelDebounce,
+      onInvalidateTranslate: function () {
+        cancelDebounce();
+        translateReqId += 1;
+      }
     });
 
     function storeLan(mapped) {
@@ -134,11 +182,15 @@
           aboutText: "本地运行。组件状态来自设置检查，不把检查成功或注入标记当成已就绪。",
           history: root.applyHistory(results[2]),
           keywordsSaved: false,
-          targetLangSaved: false,
+          translateSettingsSaved: false,
           hotkeysSaved: false
         }, root.readinessPatch(mapped));
         if (opts.pageOrigin) patch.serviceUrl = String(opts.pageOrigin);
         root.applyConfig(patch, results[1]);
+        if (patch.translate_lang_pair) {
+          patch.translate = { lang_pair: patch.translate_lang_pair };
+          patch.ocr = { lang_pair: patch.translate_lang_pair };
+        }
         if (results[3]) {
           var lanMapped = root.mapLanAccess(results[3]);
           patch.lanEntries = storeLan(lanMapped);
@@ -168,25 +220,41 @@
       });
     }
 
+    function currentLangPair(state, explicitPair) {
+      return String(
+        explicitPair ||
+        (state && state.translate && state.translate.lang_pair) ||
+        (state && state.translate_lang_pair) ||
+        "zh-en"
+      );
+    }
+
     function translateText(payload) {
       if (destroyed) return Promise.resolve();
       payload = payload || {};
+      cancelDebounce();
       var rawInput = payload.text != null ? String(payload.text) : "";
       var text = rawInput.trim();
       var state = getState();
-      var targetLang = String(
-        payload.target_lang ||
-        (state.translate && state.translate.target_lang) ||
-        state.translate_target_lang ||
-        "zh"
-      );
+      var langPair = currentLangPair(state, payload.lang_pair);
+      var override = Object.prototype.hasOwnProperty.call(payload, "manualOverride")
+        ? payload.manualOverride
+        : ((payload.source_lang && payload.target_lang)
+            ? { source_lang: String(payload.source_lang), target_lang: String(payload.target_lang) }
+            : readManualOverride(state));
       if (!text) {
         setState({
           copyStatus: null,
           copyKind: null,
           translate: {
             phase: "error",
-            target_lang: targetLang,
+            lang_pair: langPair,
+            source_lang: null,
+            target_lang: null,
+            direction_mode: null,
+            chunks: null,
+            debouncePending: false,
+            manualOverride: override,
             text: "",
             ocr_text: "",
             elapsedMs: null,
@@ -199,26 +267,6 @@
         });
         return Promise.resolve();
       }
-      if (targetLang === "raw") {
-        setState({
-          copyStatus: null,
-          copyKind: null,
-          translate: {
-            phase: "result",
-            sourceText: rawInput,
-            target_lang: "raw",
-            text: text,
-            ocr_text: "",
-            elapsedMs: 0,
-            error: null,
-            message: "",
-            details: null,
-            copyStatus: null,
-            copyKind: null
-          }
-        });
-        return Promise.resolve({ ok: true, text: text, target_lang: "raw" });
-      }
       if (!context || !context.canCallLocal()) {
         var msg = nonLocalMessage(context);
         setState({
@@ -226,7 +274,13 @@
           connectionError: msg,
           translate: {
             phase: "error",
-            target_lang: targetLang,
+            lang_pair: langPair,
+            source_lang: override ? override.source_lang : null,
+            target_lang: override ? override.target_lang : null,
+            direction_mode: override ? "manual" : null,
+            chunks: null,
+            debouncePending: false,
+            manualOverride: override,
             text: "",
             ocr_text: "",
             elapsedMs: null,
@@ -247,7 +301,13 @@
         translate: {
           phase: "loading",
           sourceText: rawInput,
-          target_lang: targetLang,
+          lang_pair: langPair,
+          source_lang: override ? override.source_lang : null,
+          target_lang: override ? override.target_lang : null,
+          direction_mode: override ? "manual" : null,
+          chunks: null,
+          debouncePending: false,
+          manualOverride: override,
           text: "",
           ocr_text: "",
           elapsedMs: null,
@@ -258,8 +318,13 @@
           copyKind: null
         }
       });
+      var reqBody = { text: text, lang_pair: langPair };
+      if (override) {
+        reqBody.source_lang = override.source_lang;
+        reqBody.target_lang = override.target_lang;
+      }
       return client.call(OP.translate, {
-        body: { text: text, target_lang: targetLang }
+        body: reqBody
       }).then(function (res) {
         if (destroyed || reqId !== translateReqId) return res;
         var elapsed = Math.max(0, nowFn() - startedAt);
@@ -267,7 +332,13 @@
           connection: "connected",
           translate: {
             phase: "result",
-            target_lang: (res && res.target_lang) || targetLang,
+            lang_pair: (res && res.lang_pair) || langPair,
+            source_lang: (res && res.source_lang) || null,
+            target_lang: (res && res.target_lang) || null,
+            direction_mode: (res && res.direction_mode) || null,
+            chunks: (res && typeof res.chunks === "number") ? res.chunks : 1,
+            debouncePending: false,
+            manualOverride: override,
             text: (res && res.text) || "",
             ocr_text: "",
             elapsedMs: elapsed,
@@ -285,7 +356,13 @@
           connection: err && err.blocked ? "error" : (getState().connection || "connected"),
           translate: {
             phase: "error",
-            target_lang: targetLang,
+            lang_pair: langPair,
+            source_lang: override ? override.source_lang : null,
+            target_lang: override ? override.target_lang : null,
+            direction_mode: override ? "manual" : null,
+            chunks: null,
+            debouncePending: false,
+            manualOverride: override,
             text: "",
             ocr_text: "",
             elapsedMs: null,
@@ -299,9 +376,143 @@
       });
     }
 
+    function handleTranslateInput(payload) {
+      if (destroyed) return;
+      payload = payload || {};
+      var rawInput = payload.text != null ? String(payload.text) : "";
+      var trimmed = rawInput.trim();
+      cancelDebounce();
+      translateReqId += 1;
+
+      if (!trimmed) {
+        setState({
+          copyStatus: null,
+          copyKind: null,
+          translate: {
+            phase: "empty",
+            sourceText: rawInput,
+            source_lang: null,
+            target_lang: null,
+            direction_mode: null,
+            chunks: null,
+            debouncePending: false,
+            manualOverride: null,
+            text: "",
+            ocr_text: "",
+            elapsedMs: null,
+            error: null,
+            message: "",
+            details: null,
+            copyStatus: null,
+            copyKind: null
+          }
+        });
+        return;
+      }
+
+      var state = getState();
+      var autoEnabled = state.translate_auto_enabled === true;
+      var wasLoading = !!(state.translate && state.translate.phase === "loading");
+      var patch = {
+        sourceText: rawInput,
+        debouncePending: autoEnabled
+      };
+      if (wasLoading) {
+        patch.phase = (state.translate && state.translate.text) ? "result" : "empty";
+      }
+      setState({ translate: patch });
+
+      if (autoEnabled) {
+        var scheduledReqId = translateReqId;
+        debounceTimer = scheduleTimer(function () {
+          debounceTimer = null;
+          if (destroyed || scheduledReqId !== translateReqId) return;
+          var latestState = getState();
+          if (latestState.translate_auto_enabled !== true) {
+            setState({ translate: { debouncePending: false } });
+            return;
+          }
+          var latestRaw = (latestState.translate && latestState.translate.sourceText != null)
+            ? String(latestState.translate.sourceText)
+            : rawInput;
+          if (!latestRaw.trim()) {
+            setState({ translate: { debouncePending: false } });
+            return;
+          }
+          translateText({
+            text: latestRaw,
+            lang_pair: currentLangPair(latestState),
+            trigger: "auto"
+          });
+        }, debounceMs, opts);
+      }
+    }
+
+    function swapDirection(payload) {
+      if (destroyed) return Promise.resolve();
+      payload = payload || {};
+      cancelDebounce();
+      var state = getState();
+      var tr = state.translate || {};
+      var rawInput = payload.text != null ? String(payload.text) : String(tr.sourceText || "");
+      var trimmed = rawInput.trim();
+      if (!trimmed || tr.phase === "loading") return Promise.resolve();
+
+      var langPair = currentLangPair(state, payload.lang_pair);
+      var currentLock = readManualOverride(state);
+      var nextOverride = null;
+      if (!currentLock) {
+        if (tr.source_lang && tr.target_lang) {
+          nextOverride = {
+            source_lang: String(tr.target_lang),
+            target_lang: String(tr.source_lang)
+          };
+        } else {
+          var parts = defaultPairParts(langPair);
+          nextOverride = {
+            source_lang: parts[1],
+            target_lang: parts[0]
+          };
+        }
+      }
+      return translateText({
+        text: rawInput,
+        lang_pair: langPair,
+        manualOverride: nextOverride,
+        trigger: "manual"
+      });
+    }
+
+    function clearTranslate() {
+      if (destroyed) return;
+      cancelDebounce();
+      translateReqId += 1;
+      setState({
+        copyStatus: null,
+        copyKind: null,
+        translate: {
+          phase: "empty",
+          sourceText: "",
+          source_lang: null,
+          target_lang: null,
+          direction_mode: null,
+          chunks: null,
+          debouncePending: false,
+          manualOverride: null,
+          text: "",
+          ocr_text: "",
+          elapsedMs: null,
+          error: null,
+          message: "",
+          details: null,
+          copyStatus: null,
+          copyKind: null
+        }
+      });
+    }
+
     function resolveImageSlot(payload) {
       if (payload.panel === "ocr" || payload.panel === "translate") return payload.panel;
-      if (payload.mode === "ocr") return "ocr";
       if (getState().activePanel === "ocr") return "ocr";
       return "translate";
     }
@@ -312,12 +523,24 @@
       var slot = resolveImageSlot(payload);
       var file = payload.file;
       var state = getState();
-      var targetLang = String(
-        payload.target_lang ||
-        (slot === "ocr"
-          ? ((state.ocr && state.ocr.target_lang) || "raw")
-          : ((state.translate && state.translate.target_lang) || state.translate_target_lang || "zh"))
-      );
+      if (slot === "translate") {
+        cancelDebounce();
+      }
+      var mode = slot === "translate"
+        ? "translate"
+        : (payload.mode === "translate"
+            ? "translate"
+            : (payload.mode === "raw"
+                ? "raw"
+                : ((state.ocr && state.ocr.mode === "translate") ? "translate" : "raw")));
+      var langPair = mode === "translate"
+        ? String(
+            payload.lang_pair ||
+            (slot === "ocr"
+              ? ((state.ocr && state.ocr.lang_pair) || state.translate_lang_pair || "zh-en")
+              : currentLangPair(state))
+          )
+        : null;
 
       function setSlotError(errObj, blocked) {
         var patch = { copyStatus: null, copyKind: null };
@@ -325,8 +548,11 @@
         if (slot === "ocr") {
           patch.ocr = {
             phase: "error",
-            mode: targetLang === "raw" ? "raw" : "translate",
-            target_lang: targetLang,
+            mode: mode,
+            lang_pair: langPair || ((state.ocr && state.ocr.lang_pair) || state.translate_lang_pair || "zh-en"),
+            source_lang: null,
+            target_lang: null,
+            direction_mode: null,
             ocr_text: "",
             text: "",
             error: (errObj && errObj.error) || "ocr_failed",
@@ -338,7 +564,13 @@
         } else {
           patch.translate = {
             phase: "error",
-            target_lang: targetLang,
+            lang_pair: langPair || "zh-en",
+            source_lang: null,
+            target_lang: null,
+            direction_mode: null,
+            chunks: null,
+            debouncePending: false,
+            manualOverride: null,
             text: "",
             ocr_text: "",
             elapsedMs: null,
@@ -370,8 +602,11 @@
           copyKind: null,
           ocr: {
             phase: "loading",
-            mode: targetLang === "raw" ? "raw" : "translate",
-            target_lang: targetLang,
+            mode: mode,
+            lang_pair: langPair || ((state.ocr && state.ocr.lang_pair) || state.translate_lang_pair || "zh-en"),
+            source_lang: null,
+            target_lang: null,
+            direction_mode: null,
             ocr_text: "",
             text: "",
             error: null,
@@ -387,7 +622,13 @@
           copyKind: null,
           translate: {
             phase: "loading",
-            target_lang: targetLang,
+            lang_pair: langPair || "zh-en",
+            source_lang: null,
+            target_lang: null,
+            direction_mode: null,
+            chunks: null,
+            debouncePending: false,
+            manualOverride: null,
             text: "",
             ocr_text: "",
             elapsedMs: null,
@@ -401,7 +642,10 @@
       }
 
       var form = new FormData();
-      form.append("target_lang", targetLang);
+      form.append("mode", mode);
+      if (mode === "translate" && langPair) {
+        form.append("lang_pair", langPair);
+      }
       var filename = (file && file.name) || "clipboard-image.png";
       if (file instanceof Blob || (typeof File !== "undefined" && file instanceof File)) {
         form.append("image", file, filename);
@@ -413,17 +657,20 @@
         var currentId = slot === "ocr" ? ocrReqId : translateReqId;
         if (destroyed || reqId !== currentId) return res;
         var elapsed = Math.max(0, nowFn() - startedAt);
-        var usedLang = (res && res.target_lang) || targetLang;
+        var usedMode = (res && res.mode) || mode;
         if (slot === "ocr") {
-          var rawOcr = (res && res.ocr_text) || (usedLang === "raw" && res && res.text) || "";
+          var rawOcr = (res && res.ocr_text) || (usedMode === "raw" && res && res.text) || "";
           setState({
             connection: "connected",
             ocr: {
               phase: "result",
-              mode: usedLang === "raw" ? "raw" : "translate",
-              target_lang: usedLang,
+              mode: usedMode,
+              lang_pair: (res && res.lang_pair) || langPair || ((getState().ocr && getState().ocr.lang_pair) || "zh-en"),
+              source_lang: (res && res.source_lang) || null,
+              target_lang: (res && res.target_lang) || null,
+              direction_mode: (res && res.direction_mode) || null,
               ocr_text: rawOcr,
-              text: usedLang === "raw" ? "" : ((res && res.text) || ""),
+              text: usedMode === "raw" ? "" : ((res && res.text) || ""),
               error: null,
               message: "",
               details: null,
@@ -436,7 +683,13 @@
             connection: "connected",
             translate: {
               phase: "result",
-              target_lang: usedLang,
+              lang_pair: (res && res.lang_pair) || langPair || "zh-en",
+              source_lang: (res && res.source_lang) || null,
+              target_lang: (res && res.target_lang) || null,
+              direction_mode: (res && res.direction_mode) || null,
+              chunks: (res && typeof res.chunks === "number") ? res.chunks : 1,
+              debouncePending: false,
+              manualOverride: null,
               text: (res && res.text) || "",
               ocr_text: (res && res.ocr_text) || "",
               elapsedMs: elapsed,
@@ -573,6 +826,7 @@
 
     function destroy() {
       destroyed = true;
+      cancelDebounce();
       loadReqId += 1;
       translateReqId += 1;
       ocrReqId += 1;
@@ -580,7 +834,10 @@
     }
 
     var hooks = Object.assign({}, setupActions.hooks, {
+      onTranslateInput: function (payload) { return handleTranslateInput(payload); },
       onTranslateText: function (payload) { return translateText(payload); },
+      onSwapDirection: function (payload) { return swapDirection(payload); },
+      onClearTranslate: function () { return clearTranslate(); },
       onSubmitImage: function (payload) { return submitImage(payload); },
       onCopy: function (payload) { return copy(payload); },
       onRefreshHistory: function () { return refreshHistory(); },
@@ -612,7 +869,8 @@
         getLanToken: function () { return lanToken; },
         getLanUrls: function () { return lanUrls.slice(); },
         isDestroyed: function () { return destroyed; },
-        polling: function () { return setupActions.isPolling(); }
+        polling: function () { return setupActions.isPolling(); },
+        debouncePending: function () { return debounceTimer != null; }
       }
     };
   }

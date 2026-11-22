@@ -8,6 +8,7 @@ import pytest
 
 from _contracts import PolishRequest, PolishResponse, TranslateRequest, TranslateResponse
 from _paths import default_app_paths
+from _translate import resolve_translation_direction
 from _v3.isolated import compose_isolated_candidate
 from tests.integration.fixtures import FixtureStreamProvider, fixture_transcribe
 
@@ -49,7 +50,20 @@ def composition(tmp_path: Path):
         return PolishResponse(text=request.text.replace("错字", "正字"))
 
     def translate(request: TranslateRequest) -> TranslateResponse:
-        return TranslateResponse(text=f"[{request.target_lang}]{request.text}", target_lang=request.target_lang)
+        direction = resolve_translation_direction(
+            request.text,
+            lang_pair=request.lang_pair,
+            source_lang=request.source_lang,
+            target_lang=request.target_lang,
+        )
+        return TranslateResponse(
+            text=f"[{direction.source_lang}->{direction.target_lang}]{request.text}",
+            lang_pair=direction.lang_pair,
+            source_lang=direction.source_lang,
+            target_lang=direction.target_lang,
+            direction_mode=direction.mode,
+            chunks=1,
+        )
 
     comp = compose_isolated_candidate(
         root=tmp_path / "isolated",

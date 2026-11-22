@@ -13,6 +13,7 @@ from _contracts import ErrorCode, LogicError
 from _ocr import (
     DEFAULT_OCR_LANG,
     OCR_BORDER_PX,
+    OCR_TIMEOUT_S,
     OCR_UPSCALE_MAX_PIXELS,
     clear_language_cache,
     default_ocr_languages,
@@ -104,16 +105,21 @@ def test_preprocess_composites_transparency_then_grays_upscales_and_pads():
 
 
 def test_selection_too_large_for_the_ocr_budget_is_not_upscaled():
-    side = int((OCR_UPSCALE_MAX_PIXELS / 4) ** 0.5) + 1  # 放大后像素刚好超过上限
-    buf = io.BytesIO()
-    Image.new("RGB", (side, side), "white").save(buf, format="PNG")
-    _orig, ocr_img, scale = prepare_ocr_image(buf.getvalue())
-    assert scale == 1 and ocr_img.size == (side + 2 * OCR_BORDER_PX, side + 2 * OCR_BORDER_PX)
+    assert OCR_UPSCALE_MAX_PIXELS == 1920 * 1080 * 4
+    assert OCR_TIMEOUT_S == 30
+
+    # 1920×1080 刚好在上限内保持 2×；3440×1440 超出上限降为 1×
+    for (w, h), expected_scale in (((1920, 1080), 2), ((3440, 1440), 1)):
+        buf = io.BytesIO()
+        Image.new("RGB", (w, h), "white").save(buf, format="PNG")
+        _orig, ocr_img, scale = prepare_ocr_image(buf.getvalue())
+        assert scale == expected_scale
+        assert ocr_img.size == (w * expected_scale + 2 * OCR_BORDER_PX, h * expected_scale + 2 * OCR_BORDER_PX)
 
     seen: list[tuple[int, int]] = []
 
     def spy_runner(img: Image.Image, lang: str, timeout: int = 0) -> str:
-        assert timeout == 15
+        assert timeout == OCR_TIMEOUT_S
         seen.append(img.size)
         return "OK"
 

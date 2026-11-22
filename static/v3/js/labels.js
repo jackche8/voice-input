@@ -107,14 +107,19 @@
     { id: "sys", label: "系统检测" }
   ];
 
-  /* 现有设置页已使用的目标语言值；不是新猜的模型选项。仅识别对应既有值 raw。 */
-  const TARGET_LANG_OPTIONS = [
-    { value: "zh", label: "中文" },
-    { value: "en", label: "英文" },
-    { value: "ja", label: "日文" },
-    { value: "ko", label: "韩文" },
-    { value: "raw", label: "仅识别文字（不翻译）" }
+  /* 翻译语言对字典与语种简称（先支持中⇄英，结构预留扩展其他语言对）。 */
+  const LANG_PAIR_OPTIONS = [
+    { value: "zh-en", label: "中 ⇄ 英" }
   ];
+
+  const LANG_PAIR_PARTS = {
+    "zh-en": ["zh", "en"]
+  };
+
+  const LANG_SHORT_NAME = {
+    zh: "中",
+    en: "英"
+  };
 
   const FIXED_MODELS = {
     asr: "Qwen3-ASR-1.7B",
@@ -172,12 +177,20 @@
     return labelOf(PRODUCT_EVENT, value, "");
   }
 
-  function targetLang(value, options) {
-    const list = options && options.length ? options : TARGET_LANG_OPTIONS;
+  function langPairLabel(value, options) {
+    if (value == null || value === "") return "";
+    const list = options && options.length ? options : LANG_PAIR_OPTIONS;
     for (let i = 0; i < list.length; i++) {
       if (list[i].value === value) return list[i].label;
     }
-    return value ? String(value) : "";
+    return String(value);
+  }
+
+  function directionLabel(sourceLang, targetLang) {
+    if (!sourceLang || !targetLang) return "";
+    const src = labelOf(LANG_SHORT_NAME, sourceLang, String(sourceLang));
+    const tgt = labelOf(LANG_SHORT_NAME, targetLang, String(targetLang));
+    return src + " → " + tgt;
   }
 
   function polishBadgeClass(value) {
@@ -219,7 +232,9 @@
     COMPONENT: COMPONENT,
     COMPONENT_STATE: COMPONENT_STATE,
     SETUP_TABS: SETUP_TABS,
-    TARGET_LANG_OPTIONS: TARGET_LANG_OPTIONS,
+    LANG_PAIR_OPTIONS: LANG_PAIR_OPTIONS,
+    LANG_PAIR_PARTS: LANG_PAIR_PARTS,
+    LANG_SHORT_NAME: LANG_SHORT_NAME,
     FIXED_MODELS: FIXED_MODELS,
     HOTKEY_LABELS: HOTKEY_LABELS,
     HOME_NAVS: HOME_NAVS,
@@ -230,7 +245,8 @@
     polish: polish,
     jobState: jobState,
     productEvent: productEvent,
-    targetLang: targetLang,
+    langPairLabel: langPairLabel,
+    directionLabel: directionLabel,
     polishBadgeClass: polishBadgeClass,
     hotkeyLabel: hotkeyLabel,
     formatHotkey: formatHotkey

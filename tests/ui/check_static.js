@@ -396,10 +396,29 @@ hasAll("UtteranceSource", sourceEnums);
 hasAll("HistoryPolish", polishEnums);
 hasAll("ProductEventType", eventEnums);
 
-for (const field of ["stable_text", "tail_text", "raw_text", "final_text", "ocr_text", "polish_enabled", "custom_keywords", "translate_target_lang", "hotkey_voice", "hotkey_screenshot", "hotkey_ocr", "hotkey_repeat", "hotkey_annotate", "job_id", "delivery_unknown"]) {
+for (const field of ["stable_text", "tail_text", "raw_text", "final_text", "ocr_text", "polish_enabled", "custom_keywords", "translate_lang_pair", "translate_auto_enabled", "lang_pair", "source_lang", "direction_mode", "hotkey_voice", "hotkey_screenshot", "hotkey_ocr", "hotkey_repeat", "hotkey_annotate", "job_id", "delivery_unknown"]) {
   if (!prodText.includes(field)) fail("生产代码未使用契约字段 " + field);
 }
-pass("关键契约字段（含 hotkey_ocr、hotkey_annotate）已在界面层出现");
+pass("关键契约字段（含 translate_lang_pair / translate_auto_enabled / 方向字段与五热键）已在界面层出现");
+
+/* 反向守卫：static/v3/ 全量生产源码与生成快照严禁残留已删除旧字段 translate_target_lang */
+function stripSourceComments(filePath, raw) {
+  if (filePath.endsWith(".json")) return raw;
+  if (filePath.endsWith(".html")) return raw.replace(/<!--[\s\S]*?-->/g, "");
+  return raw.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:\\])\/\/.*$/gm, "$1");
+}
+const legacyTargetLangHits = [];
+for (const file of files) {
+  const code = stripSourceComments(file, fs.readFileSync(file, "utf8"));
+  if (/\btranslate_target_lang\b/.test(code)) {
+    legacyTargetLangHits.push(path.relative(repo, file));
+  }
+}
+if (legacyTargetLangHits.length) {
+  fail("static/v3/ 生产源码仍残留已废弃字段 translate_target_lang：" + legacyTargetLangHits.join(", "));
+} else {
+  pass("static/v3/ 生产源码已彻底清除已废弃字段 translate_target_lang（零出现反向守卫）");
+}
 
 const indexHtml = fs.readFileSync(path.join(v3, "index.html"), "utf8");
 if (!/css\/studio\.css/.test(indexHtml) || !/js\/setup-panel\.js/.test(indexHtml) || !/js\/home\.js/.test(indexHtml) || !/js\/business\/setup-actions\.js/.test(indexHtml) || !/js\/business\/home-controller\.js/.test(indexHtml) || !/data-page=["']home["']/.test(indexHtml)) {
@@ -420,9 +439,18 @@ if (leftoverHomeScripts.length) fail("index.html 仍加载未使用的冗余脚�
 else pass("index.html 已清理未使用的 5 个冗余脚本");
 
 const homeJs = fs.readFileSync(path.join(v3, "js/home.js"), "utf8");
-if (!homeJs.includes("onTranslateText") || !homeJs.includes("onSubmitImage") || !homeJs.includes("onCopy") || !homeJs.includes("onToggleTheme")) {
-  fail("home.js 缺少翻译框、图片 OCR、复制或主题切换回调");
-} else pass("home.js 提供翻译框、图片 OCR、复制与主题切换回调");
+if (
+  !homeJs.includes("onTranslateInput") ||
+  !homeJs.includes("onTranslateText") ||
+  !homeJs.includes("onSwapDirection") ||
+  !homeJs.includes("onClearTranslate") ||
+  !homeJs.includes("onChangeLangPair") ||
+  !homeJs.includes("onSubmitImage") ||
+  !homeJs.includes("onCopy") ||
+  !homeJs.includes("onToggleTheme")
+) {
+  fail("home.js 缺少翻译框（输入/提交/互换/清空/语言对）、图片 OCR、复制或主题切换回调");
+} else pass("home.js 提供翻译框完整回调（输入/提交/互换/清空/语言对）、图片 OCR、复制与主题切换回调");
 if (/\/setup/.test(homeJs)) {
   fail("home.js 仍含 /setup 外链跳转");
 } else pass("home.js 无 /setup 外链跳转，设置为页内面板");

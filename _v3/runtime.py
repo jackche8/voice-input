@@ -13,6 +13,7 @@ from pathlib import Path
 from _audio_codec import decode_audio_to_pcm16k, is_pcm16le_silent
 from _config import ConfigStore
 from _contracts import (
+    DEFAULT_TRANSLATE_LANG_PAIR,
     AppConfig,
     ErrorCode,
     LogicError,
@@ -22,6 +23,7 @@ from _contracts import (
     SttResponse,
     TranslateRequest,
     TranslateResponse,
+    validate_direction_override,
 )
 from _events import EventBus
 from _history import HistoryStore
@@ -32,6 +34,7 @@ from _ocr_text import block_segments, block_translated_text
 from _paths import default_app_paths
 from _ports import DEFAULT_SERVER_PORT
 from _session_finals import SessionFinalIndex
+from _translate import has_translatable_language
 from _utterance import UtteranceService
 from _v3.auth import AuthSettings
 from _v3.component_routes import ComponentRegistry
@@ -49,13 +52,35 @@ DecodeAudioFn = Callable[..., bytes]
 
 
 def _default_translate_blocks(translate: TranslateFn) -> TranslateBlocksFn:
-    def _run(blocks: list[OcrTextBlock], *, target_lang: str) -> list[OcrTextBlock]:
-        norm = (target_lang or "").strip()
-        if not norm:
-            raise LogicError(ErrorCode.invalid_request, "target_lang 不能为空")
+    def _run(
+        blocks: list[OcrTextBlock],
+        *,
+        source_lang: str,
+        target_lang: str,
+        lang_pair: str = DEFAULT_TRANSLATE_LANG_PAIR,
+    ) -> list[OcrTextBlock]:
+        try:
+            norm_pair, override = validate_direction_override(lang_pair, source_lang, target_lang)
+        except ValueError as exc:
+            raise LogicError(ErrorCode.invalid_request, str(exc)) from exc
+        if override is None:
+            raise LogicError(ErrorCode.invalid_request, "translate_blocks 必须显式指定 source_lang 与 target_lang")
+        norm_source, norm_target = override
         translated: list[OcrTextBlock] = []
-        for block in blocks:  # 与 _translate.translate_blocks 同一翻译单位：每个硬行段一项，按原缩进拼回
-            texts = [translate(TranslateRequest(text=seg.text, target_lang=norm)).text for seg in block_segments(block.lines)]
+        for block in blocks:  # 与 _translate.translate_blocks 同一翻译单位：每个硬行段一项，跳纯符号项并按原缩进拼回
+            texts = [
+                translate(
+                    TranslateRequest(
+                        text=seg.text,
+                        lang_pair=norm_pair,
+                        source_lang=norm_source,
+                        target_lang=norm_target,
+                    )
+                ).text
+                if has_translatable_language(seg.text)
+                else seg.text
+                for seg in block_segments(block.lines)
+            ]
             translated.append(block.model_copy(update={"translated_text": block_translated_text(block.lines, texts)}))
         return translated
 

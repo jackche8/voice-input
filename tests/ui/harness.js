@@ -13,11 +13,16 @@
     const confirms = [];
     const records = [];
     const translations = [];
+    const translateInputs = [];
+    const swapCalls = [];
+    const clearCalls = [];
+    const imageSubmits = [];
     const themes = [];
     const panels = [];
     const polishToggles = [];
     const keywordSaves = [];
-    const targetLangChanges = [];
+    const langPairChanges = [];
+    const autoTranslateToggles = [];
     const setupActions = [];
     const hooks = {
       onCopy: function (payload) { copies.push(payload); },
@@ -26,12 +31,17 @@
       onRecordStart: function () { records.push("start"); },
       onRecordEnd: function () { records.push("end"); },
       onRefreshStatus: function () { records.push("refresh"); },
+      onTranslateInput: function (payload) { translateInputs.push(payload); },
       onTranslateText: function (payload) { translations.push(payload); },
+      onSwapDirection: function (payload) { swapCalls.push(payload); },
+      onClearTranslate: function () { clearCalls.push("clear"); },
+      onSubmitImage: function (payload) { imageSubmits.push(payload); },
       onToggleTheme: function (payload) { themes.push(payload); },
       onSelectPanel: function (payload) { panels.push(payload); },
       onTogglePolish: function (enabled) { polishToggles.push(enabled); },
       onSaveKeywords: function (val) { keywordSaves.push(val); },
-      onChangeTargetLang: function (val) { targetLangChanges.push(val); },
+      onChangeLangPair: function (val) { langPairChanges.push(val); },
+      onToggleAutoTranslate: function (enabled) { autoTranslateToggles.push(enabled); },
       onInstallAll: function () { setupActions.push("install-all"); },
       onRetryComponent: function (name) { setupActions.push("retry:" + name); },
       onToggleAutostart: function (enabled) { setupActions.push("autostart:" + enabled); }
@@ -74,7 +84,11 @@
     assert(!!voiceSwOff && voiceSwOff.getAttribute("aria-checked") === "mixed" && voiceSwOff.disabled, "未连接时润色开关为 mixed 且禁用");
 
     homeRoot.querySelector('.setup-tabs button[data-tab="shot"]').click();
-    assert(homeRoot.querySelector('[data-panel-view="setup"]').innerText.indexOf("尚未读取") !== -1, "截图翻译未读取时显示尚未读取");
+    const shotOffPane = homeRoot.querySelector('[data-panel-view="setup"]');
+    const shotOffSelect = shotOffPane.querySelector('select[data-role="setup-lang-pair"]');
+    const shotOffAutoSw = shotOffPane.querySelector('button[data-role="setup-auto-translate"]');
+    assert(shotOffPane.innerText.indexOf("尚未读取") !== -1 && !!shotOffSelect && shotOffSelect.disabled, "翻译设置未读取时语言对显示尚未读取且禁用");
+    assert(!!shotOffAutoSw && shotOffAutoSw.getAttribute("aria-checked") === "mixed" && shotOffAutoSw.disabled, "未连接时自动翻译开关为 mixed 且禁用");
 
     homeRoot.querySelector('.setup-tabs button[data-tab="sys"]').click();
     assert(homeRoot.querySelector('[data-panel-view="setup"]').innerText.indexOf("尚未读取平台能力") !== -1, "系统检测未读取时声明尚未读取");
@@ -97,16 +111,40 @@
     assert(homeRoot.innerHTML.indexOf("secret-should-be-stripped-by-ui") === -1, "主页视图层剥离明文 LAN URL，不写入 DOM");
 
     const srcInput = homeRoot.querySelector('textarea[data-role="translate-input"]');
+    const dirBadge = homeRoot.querySelector('[data-role="translate-direction-badge"]');
+    const swapBtn = homeRoot.querySelector('button[data-role="translate-swap"]');
+    const pairSelect = homeRoot.querySelector('select[data-role="translate-lang-pair"]');
+    const autoHint = homeRoot.querySelector('[data-role="translate-auto-hint"]');
+
+    assert(dirBadge.textContent === "自动判定" && swapBtn.disabled === true && swapBtn.getAttribute("aria-pressed") === "false", "翻译空态展示自动判定且禁用互换按钮");
+    assert(pairSelect.options.length === 1 && pairSelect.value === "zh-en" && pairSelect.options[0].textContent === "中 ⇄ 英", "工作台语言对下拉仅含中⇄英且选中 zh-en");
+    pairSelect.dispatchEvent(new Event("change", { bubbles: true }));
+    assert(langPairChanges.length === 1 && langPairChanges[0] === "zh-en", "工作台切换语言对走 onChangeLangPair 回调");
+    assert(autoHint.textContent.indexOf("1s 自动翻译") !== -1, "自动翻译开启时左盒头展示停顿 1s 提示");
+
+    /* 校验 studio.css 仅对翻译面板 .studio-box 设 max-height，不裁切 OCR 预览 */
+    const trBoxMaxH = window.getComputedStyle(homeRoot.querySelector('[data-panel-view="translate"] .studio-box')).maxHeight;
+    assert(trBoxMaxH !== "none", "翻译面板 .studio-box 存在 max-height 约束以支持长译文滚动：" + trBoxMaxH);
+
     srcInput.focus();
     home.setState({ asr: { message: "后台状态轮询" }, hotkeyFocus: "hotkey_voice" });
     assert(document.activeElement === srcInput, "非 setup 面板时状态刷新绝不把焦点抢到热键框");
 
     srcInput.value = "Hello studio";
     srcInput.dispatchEvent(new Event("input", { bubbles: true }));
+    assert(
+      translateInputs.length === 1 && translateInputs[0].text === "Hello studio" && translations.length === 0,
+      "文本输入仅派发 onTranslateInput，纯 UI 不自行发起翻译请求"
+    );
+    assert(swapBtn.disabled === false, "输入非空后启用互换按钮");
+
+    home.setState({ translate: { debouncePending: true } });
+    assert(autoHint.classList.contains("pending") && autoHint.innerText.indexOf("等待停顿") !== -1, "防抖等待态在左盒头显示等待停顿提示");
+
     homeRoot.querySelector('button[data-role="translate-submit"]').click();
     assert(
-      translations.length === 1 && translations[0].text === "Hello studio" && translations[0].target_lang === "zh",
-      "主页提交翻译仅通过 onTranslateText 回调传给业务层"
+      translations.length === 1 && translations[0].text === "Hello studio" && translations[0].lang_pair === "zh-en" && translations[0].trigger === "manual",
+      "主页提交翻译仅通过 onTranslateText({text, lang_pair, trigger:'manual'}) 传给业务层"
     );
 
     home.setState(V3Fixtures.homeTranslateError);
@@ -115,21 +153,106 @@
     assert(trErrOut.indexOf("Release notes 3.2") === -1, "主页翻译失败不拿 ocr_text 冒充译文");
     assert(homeRoot.querySelector('button[data-role="copy-translation"]').disabled === true, "翻译失败时禁用复制译文按钮");
 
-    home.setState(V3Fixtures.homeTranslateResult);
+    home.setState(Object.assign({}, V3Fixtures.homeTranslateResult, {
+      translate: Object.assign({}, V3Fixtures.homeTranslateResult.translate, {
+        source_lang: "zh",
+        target_lang: "en",
+        chunks: 3
+      })
+    }));
     const trResOut = homeRoot.querySelector('[data-role="translate-output"]').innerText;
+    const trMetaText = homeRoot.querySelector('[data-role="translate-meta"]').textContent;
     assert(trResOut.indexOf("版本说明 3.2") !== -1, "主页翻译成功渲染译文");
     assert(trResOut.indexOf("Release notes 3.2") !== -1, "主页翻译成功在次级块展示 OCR 原文");
+    assert(dirBadge.classList.contains("accent") && dirBadge.textContent === "自动：中 → 英", "自动译文态展示蓝色方向徽章 自动：中 → 英");
+    assert(trMetaText.indexOf("共 3 段") !== -1, "多段长文本在底部元信息展示分段数");
     homeRoot.querySelector('button[data-role="copy-translation"]').click();
     assert(
       copies.length >= 1 && copies[copies.length - 1].kind === "translation" && copies[copies.length - 1].text === "版本说明 3.2",
       "主页复制译文只走 onCopy 回调"
     );
 
+    swapBtn.click();
+    assert(
+      swapCalls.length === 1 && swapCalls[0].text === "Hello studio" && swapCalls[0].lang_pair === "zh-en",
+      "点击互换按钮仅派发 onSwapDirection({text, lang_pair})"
+    );
+
+    /* 手动锁定态在 result / loading / error 下均保留琥珀锁徽章可见，loading 时禁用互换按钮 */
+    home.setState({
+      translate: {
+        phase: "result",
+        source_lang: "en",
+        target_lang: "zh",
+        direction_mode: "manual",
+        manualOverride: { source_lang: "en", target_lang: "zh" },
+        text: "手动锁译文"
+      }
+    });
+    assert(
+      dirBadge.classList.contains("warn") && dirBadge.innerText.indexOf("手动：英 → 中") !== -1 && !!dirBadge.querySelector('use[href="#i-lock"]') && swapBtn.getAttribute("aria-pressed") === "true" && swapBtn.innerText.indexOf("恢复自动") !== -1,
+      "手动锁定态展示琥珀锁徽章 手动：英 → 中 且按钮显示恢复自动"
+    );
+    home.setState({ translate: { phase: "loading" } });
+    assert(
+      dirBadge.classList.contains("warn") && dirBadge.innerText.indexOf("手动：英 → 中") !== -1 && swapBtn.disabled === true,
+      "手动锁定的 loading 态保留琥珀锁徽章可见且禁用互换按钮"
+    );
+    home.setState({ translate: { phase: "error", error: "translate_failed", message: "超时" } });
+    assert(
+      dirBadge.classList.contains("warn") && dirBadge.innerText.indexOf("手动：英 → 中") !== -1 && swapBtn.disabled === false,
+      "手动锁定的 error 态保留琥珀锁徽章可见且允许再次点击解除锁定"
+    );
+
+    /* 工作台清空按钮重置输入框、方向徽章与锁态，并派发 onClearTranslate */
+    homeRoot.querySelector('button[data-role="translate-clear"]').click();
+    assert(
+      srcInput.value === "" && dirBadge.textContent === "自动判定" && swapBtn.disabled === true && clearCalls.length === 1,
+      "点击清空按钮清空输入、恢复自动判定并派发 onClearTranslate"
+    );
+
+    /* 工作台粘贴截图派发 onSubmitImage({file, mode:'translate', lang_pair:'zh-en', panel:'translate'}) */
+    const trDropBox = homeRoot.querySelector('[data-panel-view="translate"] .studio-box');
+    const mockImg = new File(["png"], "shot.png", { type: "image/png" });
+    const dropEv = new Event("drop", { bubbles: true, cancelable: true });
+    Object.defineProperty(dropEv, "dataTransfer", { value: { files: [mockImg] } });
+    trDropBox.dispatchEvent(dropEv);
+    assert(
+      imageSubmits.length === 1 && imageSubmits[0].file === mockImg && imageSubmits[0].mode === "translate" && imageSubmits[0].lang_pair === "zh-en" && imageSubmits[0].panel === "translate",
+      "工作台拖入图片派发 onSubmitImage({file, mode:'translate', lang_pair:'zh-en', panel:'translate'})"
+    );
+
     homeRoot.querySelector('button[data-panel="ocr"]').click();
     assert(panels.some(function (p) { return p && p.panel === "ocr"; }), "切换 OCR 面板触发 onSelectPanel");
+    const ocrBoxMaxH = window.getComputedStyle(homeRoot.querySelector('[data-panel-view="ocr"] .studio-box')).maxHeight;
+    assert(ocrBoxMaxH === "none", "OCR 面板 .studio-box 不受 max-height 裁切：" + ocrBoxMaxH);
+    const ocrSelect = homeRoot.querySelector('select[data-role="ocr-mode"]');
+    const ocrOptionVals = Array.prototype.slice.call(ocrSelect.options).map(function (o) { return o.value; });
+    assert(ocrOptionVals.join(",") === "raw,zh-en", "OCR 面板下拉收敛为 raw 与 zh-en 二选一：" + ocrOptionVals.join(","));
+
+    const ocrDrop = homeRoot.querySelector('[data-panel-view="ocr"] .ocr-dropzone');
+    const ocrRawDrop = new Event("drop", { bubbles: true, cancelable: true });
+    Object.defineProperty(ocrRawDrop, "dataTransfer", { value: { files: [mockImg] } });
+    ocrDrop.dispatchEvent(ocrRawDrop);
+    assert(
+      imageSubmits.length === 2 && imageSubmits[1].mode === "raw" && imageSubmits[1].panel === "ocr" && !("lang_pair" in imageSubmits[1]),
+      "OCR 面板 raw 模式提交图片派发 mode:'raw', panel:'ocr'"
+    );
+
+    ocrSelect.value = "zh-en";
+    ocrSelect.dispatchEvent(new Event("change", { bubbles: true }));
+    const ocrTrDrop = new Event("drop", { bubbles: true, cancelable: true });
+    Object.defineProperty(ocrTrDrop, "dataTransfer", { value: { files: [mockImg] } });
+    ocrDrop.dispatchEvent(ocrTrDrop);
+    assert(
+      imageSubmits.length === 3 && imageSubmits[2].mode === "translate" && imageSubmits[2].lang_pair === "zh-en" && imageSubmits[2].panel === "ocr",
+      "OCR 面板翻译模式提交图片派发 mode:'translate', lang_pair:'zh-en', panel:'ocr'"
+    );
+
     home.setState(V3Fixtures.homeOcrResult);
     const ocrOut = homeRoot.querySelector('[data-role="ocr-output"]').innerText;
     assert(ocrOut.indexOf("Hello OCR world") !== -1 && ocrOut.indexOf("你好 OCR 世界") !== -1, "主页 OCR 面板展示原文与可选译文");
+    assert(ocrOut.indexOf("译文（英 → 中）") !== -1, "OCR 面板译文块标题使用 directionLabel 渲染方向");
     homeRoot.querySelector('button[data-role="copy-ocr"]').click();
     assert(
       copies[copies.length - 1].kind === "ocr" && copies[copies.length - 1].text === "Hello OCR world",
@@ -277,10 +400,23 @@
     );
 
     home.setSetupTab("shot");
-    const shotSelect = setupPane.querySelector("select.field");
-    shotSelect.value = "en";
+    const shotSelect = setupPane.querySelector('select[data-role="setup-lang-pair"]');
+    const shotAutoSw = setupPane.querySelector('button[data-role="setup-auto-translate"]');
+    assert(!!shotSelect && shotSelect.value === "zh-en" && !shotSelect.disabled, "设置页翻译语言对默认选中 zh-en 且可交互");
+    const langPairBeforeShot = langPairChanges.length;
     shotSelect.dispatchEvent(new Event("change", { bubbles: true }));
-    assert(targetLangChanges.length === 1 && targetLangChanges[0] === "en", "截图翻译目标语言切换走 onChangeTargetLang 回调");
+    assert(langPairChanges.length === langPairBeforeShot + 1 && langPairChanges[langPairChanges.length - 1] === "zh-en", "翻译语言对切换走 onChangeLangPair 回调");
+    assert(!!shotAutoSw && shotAutoSw.getAttribute("aria-checked") === "true" && !shotAutoSw.disabled, "设置页自动翻译开关反映配置 true");
+    shotAutoSw.click();
+    assert(
+      autoTranslateToggles.length === 1 && autoTranslateToggles[0] === false && shotAutoSw.getAttribute("aria-checked") === "true",
+      "自动翻译开关走 onToggleAutoTranslate(false) 且不做乐观状态翻转"
+    );
+    home.setState({ translate_auto_enabled: false, translateSettingsSaved: true });
+    assert(
+      setupPane.querySelector('button[data-role="setup-auto-translate"]').getAttribute("aria-checked") === "false" && setupPane.innerText.indexOf("已保存") !== -1,
+      "回读配置后自动翻译开关更新为 false 并展示 translateSettingsSaved 已保存提示"
+    );
 
     /* 暗/亮双主题下校验全站 3 处 <select> 与 <option> 的 colorScheme 及主题对比度 */
     function readSelectMetrics(el) {
@@ -305,16 +441,16 @@
     }
     function snapshotAllSelects() {
       homeRoot.querySelector('button[data-panel="translate"]').click();
-      const tr = readSelectMetrics(homeRoot.querySelector('select[data-role="translate-target-lang"]'));
+      const tr = readSelectMetrics(homeRoot.querySelector('select[data-role="translate-lang-pair"]'));
       homeRoot.querySelector('button[data-panel="ocr"]').click();
-      const ocr = readSelectMetrics(homeRoot.querySelector('select[data-role="ocr-target-lang"]'));
+      const ocr = readSelectMetrics(homeRoot.querySelector('select[data-role="ocr-mode"]'));
       homeRoot.querySelector('button[data-panel="setup"]').click();
       home.setSetupTab("shot");
-      const shot = readSelectMetrics(setupPane.querySelector("select.field"));
+      const shot = readSelectMetrics(setupPane.querySelector('select[data-role="setup-lang-pair"]'));
       return [
-        { name: "工作台翻译目标语言", m: tr },
+        { name: "工作台翻译语言对", m: tr },
         { name: "工作台 OCR 模式", m: ocr },
-        { name: "设置页翻译目标语言", m: shot }
+        { name: "设置页翻译语言对", m: shot }
       ];
     }
     assert(document.documentElement.dataset.theme === "dark", "双态 select 校验前处于暗色主题");

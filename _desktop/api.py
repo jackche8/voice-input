@@ -168,10 +168,19 @@ class DesktopApi:
         self,
         png_bytes: bytes,
         *,
-        target_lang: str,
+        mode: str = "translate",
+        lang_pair: str | None = None,
+        source_lang: str | None = None,
+        target_lang: str | None = None,
         lang: str | None = None,
     ) -> dict[str, Any]:
-        data: dict[str, str] = {"target_lang": target_lang}
+        data: dict[str, str] = {"mode": mode}
+        if lang_pair:
+            data["lang_pair"] = lang_pair
+        if source_lang:
+            data["source_lang"] = source_lang
+        if target_lang:
+            data["target_lang"] = target_lang
         if lang:
             data["lang"] = lang
         files = {"image": ("capture.png", png_bytes, "image/png")}

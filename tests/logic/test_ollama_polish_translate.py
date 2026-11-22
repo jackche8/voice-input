@@ -12,11 +12,20 @@ from _contracts import (
     OcrTextBlock,
     OcrTextLine,
     PolishRequest,
+    TranslateDirectionMode,
     TranslateRequest,
 )
 from _ollama import DEFAULT_OLLAMA_BASE_URL, OllamaClient
 from _polish import polish_text
-from _translate import translate_blocks, translate_text
+from _translate import (
+    TRANSLATE_TEXT_CHUNK_TOKEN_BUDGET,
+    _estimate_tokens,
+    _split_text_chunks,
+    has_translatable_language,
+    resolve_translation_direction,
+    translate_blocks,
+    translate_text,
+)
 
 
 def _one_line_block(bbox, text: str, **colors) -> OcrTextBlock:
@@ -215,7 +224,7 @@ def test_polish_blocks_short_utterance_expansion_below_four_chars(short_raw: str
         rogue_client.close()
 
 
-def test_polish_and_translate_text_compatible_with_two_arg_test_double():
+def test_polish_text_compatible_with_two_arg_test_double():
     class TwoArgDouble:
         def __init__(self, reply: str) -> None:
             self.reply = reply
@@ -229,12 +238,6 @@ def test_polish_and_translate_text_compatible_with_two_arg_test_double():
     res_p = polish_text(PolishRequest(text="纠正前的句子。"), model="m", client=double_p)
     assert res_p.text == "纠正后的句子。"
     assert len(double_p.calls) == 1
-
-    double_t = TwoArgDouble("你好世界")
-    res_t = translate_text(
-        TranslateRequest(text="hello world", target_lang="zh"), model="m", client=double_t
-    )
-    assert res_t.text == "你好世界"
 
 
 def test_polish_success_and_empty_input():
@@ -257,7 +260,7 @@ def test_translate_failure_does_not_return_original():
 
     client = OllamaClient(transport=httpx.MockTransport(boom))
     with pytest.raises(LogicError) as ei:
-        translate_text(TranslateRequest(text=original, target_lang="zh"), model="m", client=client)
+        translate_text(TranslateRequest(text=original, lang_pair="zh-en"), model="m", client=client)
     assert ei.value.code.value == "translate_failed"
     assert original not in ei.value.message or ei.value.code.value != "ok"
     assert not hasattr(ei.value, "text") or ei.value.__class__ is LogicError
@@ -269,18 +272,134 @@ def test_translate_success_sends_think_false_and_source_text_boundary():
 
     def handler(request: httpx.Request) -> httpx.Response:
         seen.append(json.loads(request.content.decode("utf-8")))
-        return _chat_ok("<think>skip</think><source_text>你好</source_text>")
+        return _chat_reply("<think>skip</think><source_text>你好</source_text>")
 
     client = OllamaClient(transport=httpx.MockTransport(handler))
     out = translate_text(
-        TranslateRequest(text="hello", target_lang="zh"), model="m", client=client
+        TranslateRequest(text="hello", lang_pair="zh-en"), model="m", client=client
     )
     assert out.text == "你好"
+    assert out.lang_pair == "zh-en"
+    assert out.source_lang == "en"
     assert out.target_lang == "zh"
+    assert out.direction_mode == TranslateDirectionMode.auto
+    assert out.chunks == 1
     assert seen[0]["think"] is False
     assert seen[0]["options"] == {"temperature": 0.0, "num_ctx": 2048}
-    assert "<source_text>\nhello\n</source_text>" in seen[0]["messages"][1]["content"]
+    user_msg = seen[0]["messages"][1]["content"]
+    assert "源语言: 英文 (en)" in user_msg and "目标语言: 中文 (zh)" in user_msg
+    assert "<source_text>\nhello\n</source_text>" in user_msg
     client.close()
+
+
+def test_resolve_translation_direction_auto_mixed_tie_manual_and_errors():
+    # 纯中文 / 纯英文 / 中文夹英文术语（6 汉字 × 3 = 18 > 16 ASCII 字母）
+    zh_dir = resolve_translation_direction("你好世界")
+    assert (zh_dir.source_lang, zh_dir.target_lang, zh_dir.mode) == ("zh", "en", TranslateDirectionMode.auto)
+
+    en_dir = resolve_translation_direction("Hello world")
+    assert (en_dir.source_lang, en_dir.target_lang, en_dir.mode) == ("en", "zh", TranslateDirectionMode.auto)
+
+    mixed_dir = resolve_translation_direction("请把 FastAPI 和 WebSocket 修一下")
+    assert (mixed_dir.source_lang, mixed_dir.target_lang, mixed_dir.mode) == ("zh", "en", TranslateDirectionMode.auto)
+
+    # 平局（1×3 == 3）、0 字母、纯全角中文标点（不计为汉字）均确定性回退 en → zh
+    for fallback_text in ("中 abc", "12345 !!!", "！！！，，，。"):
+        fb = resolve_translation_direction(fallback_text)
+        assert (fb.source_lang, fb.target_lang, fb.mode) == ("en", "zh", TranslateDirectionMode.auto), fallback_text
+
+    # 显式手动方向覆盖
+    manual = resolve_translation_direction("你好世界", lang_pair="zh-en", source_lang="en", target_lang="zh")
+    assert (manual.lang_pair, manual.source_lang, manual.target_lang, manual.mode) == (
+        "zh-en",
+        "en",
+        "zh",
+        TranslateDirectionMode.manual,
+    )
+
+    # 非法语言对 / 仅传单边 / 同语种 / 非配对语种均抛 invalid_request
+    for kwargs in (
+        {"lang_pair": "fr-de"},
+        {"lang_pair": "zh-en", "source_lang": "zh"},
+        {"lang_pair": "zh-en", "target_lang": "zh"},
+        {"lang_pair": "zh-en", "source_lang": "zh", "target_lang": "zh"},
+        {"lang_pair": "zh-en", "source_lang": "zh", "target_lang": "ja"},
+    ):
+        with pytest.raises(LogicError) as ei:
+            resolve_translation_direction("hello", **kwargs)
+        assert ei.value.code == ErrorCode.invalid_request
+
+
+def test_translate_text_chunks_long_input_preserving_separators_and_technical_tokens():
+    # 多段长文本：包含空行段落、单换行、含 config.json / v3.5 / 127.0.0.1 的长英文句
+    para_a = "第一段介绍本地翻译方案，避免长文本在上下文窗口中发生截断。" * 14
+    para_b_line1 = "Check config.json and v3.5 at 127.0.0.1. " * 26 + "Final sentence."
+    para_b_line2 = "第二段第二行继续验证单换行分隔符保留，并附带 FastAPI 服务说明。" * 10
+    long_text = f"{para_a}\n\n{para_b_line1}\n{para_b_line2}"
+
+    chunk_pairs = _split_text_chunks(long_text, budget=TRANSLATE_TEXT_CHUNK_TOKEN_BUDGET)
+    assert len(chunk_pairs) > 2
+    assert "".join(chunk + sep for chunk, sep in chunk_pairs) == long_text
+    assert all(chunk.strip() for chunk, _sep in chunk_pairs)
+    assert all(_estimate_tokens(chunk) <= TRANSLATE_TEXT_CHUNK_TOKEN_BUDGET for chunk, _sep in chunk_pairs)
+    # 技术标记不得在句末标点切分时被截成两半
+    for token in ("config.json", "v3.5", "127.0.0.1"):
+        assert sum(chunk.count(token) for chunk, _sep in chunk_pairs) == long_text.count(token)
+
+    # 单行无标点无空白超长中文触发兜底硬切，且拼回无损
+    unbroken_zh = "测" * 520
+    hard_pairs = _split_text_chunks(unbroken_zh, budget=TRANSLATE_TEXT_CHUNK_TOKEN_BUDGET)
+    assert len(hard_pairs) >= 2
+    assert "".join(chunk + sep for chunk, sep in hard_pairs) == unbroken_zh
+    assert all(_estimate_tokens(chunk) <= TRANSLATE_TEXT_CHUNK_TOKEN_BUDGET for chunk, _sep in hard_pairs)
+
+    # translate_text 对全文仅判一次方向（中文占优 → 全部段均 zh → en）并按原分隔符精确拼回
+    seen_users: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        user_content = json.loads(request.content.decode("utf-8"))["messages"][1]["content"]
+        seen_users.append(user_content)
+        inner = user_content.split(f"<{_SOURCE_TAG}>\n", 1)[1].rsplit(f"\n</{_SOURCE_TAG}>", 1)[0]
+        return _chat_reply(f"[T:{len(seen_users)}]{inner}")
+
+    with OllamaClient(transport=httpx.MockTransport(handler)) as client:
+        res = translate_text(TranslateRequest(text=long_text, lang_pair="zh-en"), model="m", client=client)
+
+    assert res.chunks == len(chunk_pairs) > 2
+    assert res.source_lang == "zh" and res.target_lang == "en" and res.direction_mode == TranslateDirectionMode.auto
+    assert len(seen_users) == res.chunks
+    # 含英文段也不得翻转为 en→zh，整篇所有分块保持同一方向
+    assert all("源语言: 中文 (zh)" in msg and "目标语言: 英文 (en)" in msg for msg in seen_users)
+    expected_rejoined = "".join(f"[T:{i}]{chunk}{sep}" for i, (chunk, sep) in enumerate(chunk_pairs, 1))
+    assert res.text == expected_rejoined
+
+
+def test_translate_text_fails_loudly_on_length_truncation_or_empty_chunk():
+    long_text = ("第一段长文本用于触发两段切分验证截断报错。" * 18) + "\n\n" + ("第二段长文本内容。" * 18)
+    calls = {"n": 0}
+
+    def truncate_second(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return _chat_reply("Part 1 translated.", done_reason="stop")
+        return _chat_reply("Part 2 cut off", done_reason="length")
+
+    with OllamaClient(transport=httpx.MockTransport(truncate_second)) as client:
+        with pytest.raises(LogicError) as ei:
+            translate_text(TranslateRequest(text=long_text, lang_pair="zh-en"), model="m", client=client)
+    assert ei.value.code == ErrorCode.translate_failed
+    assert "截断" in ei.value.message
+    assert ei.value.details and ei.value.details["chunk"] == 2
+
+    # 剥离 think/wrapper 后为空也显式失败
+    with OllamaClient(transport=httpx.MockTransport(lambda _r: _chat_reply("<think>only</think>"))) as client:
+        with pytest.raises(LogicError) as empty_ei:
+            translate_text(TranslateRequest(text="hello", lang_pair="zh-en"), model="m", client=client)
+    assert empty_ei.value.code == ErrorCode.translate_failed
+    assert "译文为空" in empty_ei.value.message
+
+
+_SOURCE_TAG = "source_text"
 
 
 def _chat_reply(content: str, done_reason: str = "stop") -> httpx.Response:
@@ -310,7 +429,7 @@ def test_translate_blocks_hard_segments_as_items():
         raise AssertionError("没有块时不得调用 Ollama")
 
     with OllamaClient(transport=httpx.MockTransport(forbid_http)) as no_call_client:
-        assert translate_blocks([], target_lang="zh", client=no_call_client) == []
+        assert translate_blocks([], source_lang="en", target_lang="zh", client=no_call_client) == []
 
     # 翻译项 = 硬行段：段落的软换行拼成一项，代码逐行一项；块译文按原缩进逐行拼回
     requests: list[tuple[dict, list[str]]] = []
@@ -324,7 +443,7 @@ def test_translate_blocks_hard_segments_as_items():
         OcrTextBlock(bbox=(10, 60, 320, 56), lines=PARAGRAPH_LINES, ocr_text="…"),
     ]
     with OllamaClient(transport=httpx.MockTransport(reply)) as client:
-        done = translate_blocks(blocks, target_lang="zh", client=client)
+        done = translate_blocks(blocks, source_lang="en", target_lang="zh", client=client)
     assert len(requests) == 1
     body, items = requests[0]
     assert items == [
@@ -333,12 +452,65 @@ def test_translate_blocks_hard_segments_as_items():
         "The installer downloads the model weights and verifies every checksum.",
         "Then it starts.",
     ]
+    assert "源语言: 英文 (en)" in body["messages"][1]["content"]
+    assert "目标语言: 中文 (zh)" in body["messages"][1]["content"]
+    assert "严禁返回空字符串" in body["messages"][0]["content"]
     schema = {"type": "array", "items": {"type": "string"}, "minItems": 4, "maxItems": 4}
     assert body["format"] == schema  # 结构化输出：条数恰为本批项数
     assert [b.translated_text for b in done] == [
         "def main():\n    run()  # 开始",
         "安装程序下载模型权重并核对每个校验值。\n然后启动。",
     ]
+
+
+def test_translate_blocks_skips_non_language_segments_and_keeps_valid_empty_fail_loud():
+    assert has_translatable_language("Hello") is True
+    assert has_translatable_language("中文 123") is True
+    for non_lang in ("---", "=== ===", "2026-11-21", "12.3%", "   ", "• · | ()"):
+        assert has_translatable_language(non_lang) is False, non_lang
+
+    # 全图均无自然语言项时：0 次模型调用，原样保留
+    def forbid_http(_request: httpx.Request) -> httpx.Response:
+        raise AssertionError("纯符号/纯数字块不得调用 Ollama")
+
+    symbol_only = [
+        _one_line_block((10, 10, 80, 16), "---"),
+        _one_line_block((10, 30, 80, 16), "2026-11-21"),
+    ]
+    with OllamaClient(transport=httpx.MockTransport(forbid_http)) as no_call:
+        same = translate_blocks(symbol_only, source_lang="en", target_lang="zh", client=no_call)
+    assert [b.translated_text for b in same] == ["---", "2026-11-21"]
+
+    # 混合块：仅将含自然语言行段送 Ollama，纯符号/数字段原位保留
+    sent_items: list[list[str]] = []
+
+    def reply_mixed(request: httpx.Request) -> httpx.Response:
+        items = _batch_items(request)
+        sent_items.append(items)
+        return _chat_reply(json.dumps(["文件", "设置"]))
+
+    mixed_blocks = [
+        OcrTextBlock(
+            bbox=(10, 10, 100, 70),
+            lines=[
+                OcrTextLine(bbox=(10, 10, 60, 16), text="File"),
+                OcrTextLine(bbox=(10, 30, 60, 16), text="---"),
+                OcrTextLine(bbox=(10, 50, 80, 16), text="2026-11-21"),
+            ],
+            ocr_text="File\n---\n2026-11-21",
+        ),
+        _one_line_block((10, 90, 90, 16), "Settings"),
+    ]
+    with OllamaClient(transport=httpx.MockTransport(reply_mixed)) as client:
+        done = translate_blocks(mixed_blocks, source_lang="en", target_lang="zh", client=client)
+    assert sent_items == [["File", "Settings"]]
+    assert [b.translated_text for b in done] == ["文件\n---\n2026-11-21", "设置"]
+
+    # 非法方向直接抛 invalid_request（不调用 Ollama）
+    with OllamaClient(transport=httpx.MockTransport(forbid_http)) as no_call:
+        with pytest.raises(LogicError) as bad_dir:
+            translate_blocks(mixed_blocks, source_lang="zh", target_lang="zh", client=no_call)
+    assert bad_dir.value.code == ErrorCode.invalid_request
 
 
 def test_translate_blocks_split_into_token_budget_batches_in_order():
@@ -354,7 +526,7 @@ def test_translate_blocks_split_into_token_budget_batches_in_order():
         return _chat_reply(json.dumps([f"译{item.rsplit(' ', 1)[1]}" for item in items]))
 
     with OllamaClient(transport=httpx.MockTransport(reply)) as client:
-        done = translate_blocks([block], target_lang="zh", client=client)
+        done = translate_blocks([block], source_lang="en", target_lang="zh", client=client)
     assert len(seen) >= 2  # 60 项约 1000 token，超出单批预算
     assert [item for batch in seen for item in batch] == [line.text for line in lines]  # 顺序不乱、不丢不重
     assert done[0].translated_text.split("\n") == [f"译{i}" for i in range(60)]
@@ -375,6 +547,6 @@ def test_translate_blocks_batch_failures_are_explicit(content: str, done_reason:
     src_blocks = [_one_line_block((10, 12, 80, 20), "File"), _one_line_block((10, 40, 120, 20), "Open Folder")]
     with OllamaClient(transport=httpx.MockTransport(lambda _r: _chat_reply(content, done_reason))) as client:
         with pytest.raises(LogicError) as err:
-            translate_blocks(src_blocks, target_lang="zh", client=client)
+            translate_blocks(src_blocks, source_lang="en", target_lang="zh", client=client)
     assert err.value.code == ErrorCode.translate_failed
     assert needle in err.value.message

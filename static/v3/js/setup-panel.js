@@ -448,39 +448,69 @@
 
     /* ---------- 其余子标签视图（截图 / 接口 / 系统） ---------- */
     function renderShot(state) {
-      var optionsList = state.targetLangOptions && state.targetLangOptions.length
-        ? state.targetLangOptions
-        : V3.labels.TARGET_LANG_OPTIONS;
+      var connected = isConnected(state);
+      var optionsList = state.langPairOptions && state.langPairOptions.length
+        ? state.langPairOptions
+        : V3.labels.LANG_PAIR_OPTIONS;
       var select = V3.dom.el("select", {
         className: "field",
-        "aria-label": "翻译成",
-        disabled: !isConnected(state),
-        onChange: function (ev) { call(hooks, "onChangeTargetLang", ev.target.value); }
+        "aria-label": "翻译语言对",
+        dataset: { role: "setup-lang-pair" },
+        disabled: !connected,
+        onChange: function (ev) { call(hooks, "onChangeLangPair", ev.target.value); }
       });
-      if (state.translate_target_lang == null || state.translate_target_lang === "") {
+      if (state.translate_lang_pair == null || state.translate_lang_pair === "") {
         select.appendChild(V3.dom.el("option", { value: "", selected: true, text: "尚未读取" }));
       }
       optionsList.forEach(function (item) {
         var opt = V3.dom.el("option", { value: item.value, text: item.label });
-        if (item.value === state.translate_target_lang) opt.selected = true;
+        if (item.value === state.translate_lang_pair) opt.selected = true;
         select.appendChild(opt);
       });
+
+      var autoEnabled = state.translate_auto_enabled;
+      var autoKnown = autoEnabled === true || autoEnabled === false;
+      var autoSwitch = V3.dom.el("button", {
+        type: "button",
+        className: "switch",
+        role: "switch",
+        "aria-checked": autoKnown ? String(autoEnabled) : "mixed",
+        "aria-label": "停止输入 1 秒后自动翻译",
+        dataset: { role: "setup-auto-translate" },
+        disabled: !connected,
+        onClick: function () {
+          var cur = getState();
+          if (!isConnected(cur)) return;
+          call(hooks, "onToggleAutoTranslate", cur.translate_auto_enabled !== true);
+        }
+      });
+
       return [
         V3.dom.el("div", { className: "setup-section" }, [
           V3.dom.el("h2", { text: "翻译设置" }),
           V3.dom.el("div", { className: "rows" }, [
             V3.dom.el("div", { className: "row" }, [
               V3.dom.el("div", { className: "row-main" }, [
-                V3.dom.el("div", { className: "row-title", text: "翻译成" }),
+                V3.dom.el("div", { className: "row-title", text: "翻译语言对" }),
                 V3.dom.el("div", {
                   className: "row-sub",
-                  text: "本地 " + V3.labels.FIXED_MODELS.ollama + " 翻译，不联网。选「仅识别文字」时只做文字识别。"
+                  text: "工作台文本翻译与截屏翻译（Ctrl+Alt+X）共用。后端按中英文字符占比自动判定源语言与译文方向，本地 " + V3.labels.FIXED_MODELS.ollama + " 离线运行。"
                 })
               ]),
               select
+            ]),
+            V3.dom.el("div", { className: "row" }, [
+              V3.dom.el("div", { className: "row-main" }, [
+                V3.dom.el("div", { className: "row-title", text: "停止输入 1 秒后自动翻译" }),
+                V3.dom.el("div", {
+                  className: "row-sub",
+                  text: "仅作用于工作台文本输入框。默认开启；关闭后需按 Ctrl+Enter 或点击「立即翻译」触发。"
+                })
+              ]),
+              autoSwitch
             ])
           ]),
-          state.targetLangSaved
+          state.translateSettingsSaved
             ? V3.dom.el("div", { className: "actions" }, [V3.dom.el("span", { className: "saved", text: "已保存" })])
             : null
         ])

@@ -9,6 +9,7 @@ from fastapi.testclient import TestClient
 
 from _contracts import PolishRequest, PolishResponse, SttResponse, TranslateRequest, TranslateResponse
 from _paths import default_app_paths
+from _translate import resolve_translation_direction
 from _v3_app import build_sandbox_runtime, create_app
 from tests.api.providers import FixtureAsrProvider, fixture_ocr, fixture_ocr_layout, fixture_transcribe
 
@@ -51,7 +52,20 @@ def runtime(tmp_path: Path):
         return PolishResponse(text=request.text.replace("错字", "正字"))
 
     def translate(request: TranslateRequest) -> TranslateResponse:
-        return TranslateResponse(text=f"[{request.target_lang}]{request.text}", target_lang=request.target_lang)
+        direction = resolve_translation_direction(
+            request.text,
+            lang_pair=request.lang_pair,
+            source_lang=request.source_lang,
+            target_lang=request.target_lang,
+        )
+        return TranslateResponse(
+            text=f"[{direction.source_lang}->{direction.target_lang}]{request.text}",
+            lang_pair=direction.lang_pair,
+            source_lang=direction.source_lang,
+            target_lang=direction.target_lang,
+            direction_mode=direction.mode,
+            chunks=1,
+        )
 
     return build_sandbox_runtime(
         root=tmp_path / "sandbox",

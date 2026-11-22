@@ -19,14 +19,12 @@ DEFAULT_OCR_LANGS = DEFAULT_OCR_LANG
 # 默认识别语言的能力项标签：设置页与各平台能力自检都经 default_ocr_languages() 从 DEFAULT_OCR_LANG 派生
 OCR_LANG_LABELS = {"chi_sim": "OCR 简体中文", "chi_tra": "OCR 繁体中文", "eng": "OCR 英文"}
 OCR_BORDER_PX = 12
-OCR_TIMEOUT_S = 15
+OCR_TIMEOUT_S = 30
 OCR_UPSCALE = 2
-# 放大后像素上限（8.6-C 方法：预算 B = 0.8 × OCR_TIMEOUT_S = 12s，取 2× 耗时 ≤ B 的样本里最大的放大后像素数，
-# 且小于 2× 耗时 > B 的样本里最小的放大后像素数）。O1 实测（默认语言 chi_sim+chi_tra+eng，image_to_data 三次取最快，
-# 样本见 tests/logic/ocr_samples.py）：1280×860 深底小字 2× 4.37s、1920×1080 正文 2× 2.55s、1920×1080 繁体 2× 5.12s、
-# 3440×1440 密集正文 2× 10.66s（另测五次 10.08–10.26s；加 chi_tra 前一次 chi_sim+eng 测得 11.95s，随负载波动），全部 ≤ B，
-# 没有超预算的样本 → 上限取 3440×1440 的放大后像素数
-OCR_UPSCALE_MAX_PIXELS = 3440 * 1440 * 4
+# 放大后像素上限：实测（默认 chi_sim+chi_tra+eng，tests/logic/ocr_samples.py）：
+# 全部 11 项精度样本最大 1280×860（2× = 4,403,200 px，4.17s 全过）、1920×1080 整屏 2× = 8,294,400 px（2.53–5.76s）；
+# 3440×1440 密集整屏 2× 需 10.25–10.40s（高负载易撞 15s 超时），降 1× 后 7.22s（-30.6%）且与 OCR_TIMEOUT_S=30 留足裕度。
+OCR_UPSCALE_MAX_PIXELS = 1920 * 1080 * 4
 
 _LIGHT_CANVAS_RGB = (255, 255, 255)  # #ffffff
 _DARK_CANVAS_RGB = (17, 24, 39)      # #111827

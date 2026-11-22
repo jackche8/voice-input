@@ -189,7 +189,8 @@ def main() -> int:
     sandbox_root = Path(sys.argv[2]) if len(sys.argv) > 2 else Path(tempfile.mkdtemp(prefix="v3-ui-asgi-"))
     sandbox_root.mkdir(parents=True, exist_ok=True)
 
-    from _contracts import SttResponse
+    from _contracts import SttResponse, TranslateRequest, TranslateResponse
+    from _translate import resolve_translation_direction
     from _v3.runtime import build_sandbox_runtime
     from _v3_app import create_app
     import uvicorn
@@ -201,12 +202,41 @@ def main() -> int:
     def transcribe(audio: bytes, language=None, context=None):
         return SttResponse(text="sandbox transcript", language=language or "zh")
 
+    def translate(request: TranslateRequest) -> TranslateResponse:
+        direction = resolve_translation_direction(
+            request.text,
+            lang_pair=request.lang_pair,
+            source_lang=request.source_lang,
+            target_lang=request.target_lang,
+        )
+        return TranslateResponse(
+            text=f"[{direction.source_lang}->{direction.target_lang}]{request.text.strip()}",
+            lang_pair=direction.lang_pair,
+            source_lang=direction.source_lang,
+            target_lang=direction.target_lang,
+            direction_mode=direction.mode,
+            chunks=1,
+        )
+
+    def ocr(image_bytes: bytes, *, lang: str | None = None) -> str:
+        del lang
+        if image_bytes and not image_bytes.startswith(b"\x89PNG"):
+            try:
+                decoded = image_bytes.decode("utf-8").strip()
+                if decoded:
+                    return decoded
+            except UnicodeDecodeError:
+                pass
+        return "Sandbox OCR text"
+
     token = "ui-business-sandbox-token"
     runtime = build_sandbox_runtime(
         root=sandbox_root,
         token=token,
         port=port,
         transcribe=transcribe,
+        translate=translate,
+        ocr=ocr,
     )
     runtime.setup = SandboxSetup(runtime.components, sandbox_root / "install_all.json")
     runtime.lan = SandboxLan(port, token)

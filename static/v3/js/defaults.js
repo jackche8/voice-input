@@ -1,7 +1,7 @@
 /* 纯 UI 默认视图状态：未连接、无数据。不把缺省值写成用户已选或已成功。
  *
  * 配置字段与 AppConfig 对齐：
- *   polish_enabled, custom_keywords, translate_target_lang,
+ *   polish_enabled, custom_keywords, translate_lang_pair, translate_auto_enabled,
  *   hotkey_voice, hotkey_screenshot, hotkey_ocr, hotkey_repeat, hotkey_annotate, autostart_enabled
  * 历史记录字段与 HistoryRecord / HistoryListResponse 对齐：
  *   timestamp, raw_text, final_text, language, mode, source, polish, job_id,
@@ -53,9 +53,10 @@
       custom_keywords: [],
       keywordsDraft: null,
       keywordsSaved: false,
-      translate_target_lang: null,
-      targetLangOptions: null,
-      targetLangSaved: false,
+      translate_lang_pair: null,
+      translate_auto_enabled: null,
+      langPairOptions: null,
+      translateSettingsSaved: false,
       hotkey_voice: "",
       hotkey_screenshot: "",
       hotkey_ocr: "",
@@ -72,7 +73,13 @@
       translate: {
         phase: "empty",
         sourceText: "",
-        target_lang: "zh",
+        lang_pair: "zh-en",
+        source_lang: null,
+        target_lang: null,
+        direction_mode: null,
+        chunks: null,
+        debouncePending: false,
+        manualOverride: null,
         text: "",
         ocr_text: "",
         elapsedMs: null,
@@ -85,7 +92,10 @@
       ocr: {
         phase: "empty",
         mode: "raw",
-        target_lang: "raw",
+        lang_pair: "zh-en",
+        source_lang: null,
+        target_lang: null,
+        direction_mode: null,
         fileName: "",
         previewUrl: "",
         ocr_text: "",

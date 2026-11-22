@@ -22,6 +22,7 @@ from _audio_codec import decode_audio_to_pcm16k
 from _config import ConfigStore, migrate_to_product_config
 from _contracts import (
     DEFAULT_OLLAMA_BASE_URL,
+    DEFAULT_TRANSLATE_LANG_PAIR,
     OLLAMA_VERSION,
     PRODUCT_ASR_MODEL,
     SIDECAR_DEFAULT_BASE_URL,
@@ -299,10 +300,18 @@ def compose_production_runtime(
     def translate(request: TranslateRequest) -> TranslateResponse:
         return translate_text(request, model=config.load().ollama_model, client=ollama)
 
-    def translate_blocks(blocks: list[OcrTextBlock], *, target_lang: str) -> list[OcrTextBlock]:
+    def translate_blocks(
+        blocks: list[OcrTextBlock],
+        *,
+        source_lang: str,
+        target_lang: str,
+        lang_pair: str = DEFAULT_TRANSLATE_LANG_PAIR,
+    ) -> list[OcrTextBlock]:
         return translate_ocr_blocks(
             blocks,
+            source_lang=source_lang,
             target_lang=target_lang,
+            lang_pair=lang_pair,
             model=config.load().ollama_model,
             client=ollama,
         )

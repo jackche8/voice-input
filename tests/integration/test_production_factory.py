@@ -17,7 +17,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from _asr_provider import SidecarStreamProvider
-from _contracts import SetupTaskKind
+from _contracts import OcrTextBlock, OcrTextLine, SetupTaskKind
 from _paths import PROGRAM_ROOT, STATIC_V3, AppPaths
 from _v3.production import (
     ProductionEndpoints,
@@ -57,12 +57,19 @@ class FakeServices:
                 payload = json.loads(request.content)
                 self.chat_payloads.append(payload)
                 raw_msg = payload["messages"][-1]["content"]
+                if "<source_text>" in raw_msg and "</source_text>" in raw_msg:
+                    inner = raw_msg.split("<source_text>", 1)[1].split("</source_text>", 1)[0].strip()
+                    if isinstance(payload.get("format"), dict) and payload["format"].get("type") == "array":
+                        items = json.loads(inner)
+                        out = json.dumps([f"tr:{item}" for item in items], ensure_ascii=False)
+                        return httpx.Response(200, json={"message": {"content": out}, "done_reason": "stop"})
+                    return httpx.Response(200, json={"message": {"content": f"tr:{inner}"}, "done_reason": "stop"})
                 if "<asr_transcript>" in raw_msg and "</asr_transcript>" in raw_msg:
                     inner = raw_msg.split("<asr_transcript>", 1)[1].split("</asr_transcript>", 1)[0].strip()
                 else:
                     inner = raw_msg.split("\n")[-1]
                 text = inner.replace("错字", "正字")
-                return httpx.Response(200, json={"message": {"content": text}})
+                return httpx.Response(200, json={"message": {"content": text}, "done_reason": "stop"})
         if host == "sidecar.fixture":
             if path == "/health":
                 return httpx.Response(200, json={"ok": True, "loaded": self.sidecar_loaded})
@@ -169,6 +176,8 @@ def test_config_migrated_keeps_user_fields_and_hides_secrets(world):
     assert disk["baidu_appkey"] == "fixture-secret" and disk["hotkey_screenshot"] == "ctrl+alt+x"
     view = world["client"].get("/api/v1/config").json()
     assert "fixture-secret" not in json.dumps(view) and view["ollama_model"] == "qwen3.5:4b"
+    assert "translate_target_lang" not in view
+    assert view["translate_lang_pair"] == "zh-en" and view["translate_auto_enabled"] is True
 
 
 def test_real_adapters_drive_from_audio_polish_and_queue(world):
@@ -233,3 +242,34 @@ def test_lan_access_uses_explicit_token(world):
 
 def test_pages_served(world):
     assert world["client"].get("/setup").status_code == 200
+
+
+def test_real_translate_and_translate_blocks_adapters_wire_new_contract(world):
+    client = world["client"]
+    resp = client.post("/api/v1/translate", json={"text": "本地翻译测试", "lang_pair": "zh-en"}, headers=H)
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert (body["lang_pair"], body["source_lang"], body["target_lang"], body["direction_mode"], body["chunks"]) == (
+        "zh-en",
+        "zh",
+        "en",
+        "auto",
+        1,
+    )
+    assert body["text"] == "tr:本地翻译测试"
+
+    blocks = [
+        OcrTextBlock(
+            bbox=(0, 0, 80, 20), ocr_text="你好世界", translated_text="",
+            lines=[OcrTextLine(bbox=(0, 0, 80, 20), text="你好世界")],
+        ),
+        OcrTextBlock(
+            bbox=(0, 24, 40, 20), ocr_text="42%", translated_text="",
+            lines=[OcrTextLine(bbox=(0, 24, 40, 20), text="42%")],
+        ),
+    ]
+    out = world["runtime"].translate_blocks(blocks, source_lang="zh", target_lang="en", lang_pair="zh-en")
+    assert [b.translated_text for b in out] == ["tr:你好世界", "42%"]
+    batch_payload = world["services"].chat_payloads[-1]
+    assert "源语言: 中文" in batch_payload["messages"][-1]["content"]
+    assert "目标语言: 英文" in batch_payload["messages"][-1]["content"]

@@ -167,11 +167,13 @@
     if (cleanInit && cleanInit.tab && !cleanInit.setupTab) {
       state.setupTab = cleanInit.tab;
     }
-    if (state.translate_target_lang && (!cleanInit || !cleanInit.translate || !cleanInit.translate.target_lang)) {
-      state.translate = Object.assign({}, state.translate, { target_lang: state.translate_target_lang });
+    if (state.translate_lang_pair && (!cleanInit || !cleanInit.translate || !cleanInit.translate.lang_pair)) {
+      state.translate = Object.assign({}, state.translate, { lang_pair: state.translate_lang_pair });
+    }
+    if (state.translate_lang_pair && (!cleanInit || !cleanInit.ocr || !cleanInit.ocr.lang_pair)) {
+      state.ocr = Object.assign({}, state.ocr, { lang_pair: state.translate_lang_pair });
     }
 
-    var userPickedTranslateLang = !!(cleanInit && cleanInit.translate && cleanInit.translate.target_lang);
     var ownedPreviewUrl = null;
     var currentOcrFile = null;
     var destroyed = false;
@@ -273,7 +275,7 @@
     var headActionsEl = V3.dom.el("div", { className: "studio-actions" });
     var topBannerEl = V3.dom.el("div", { className: "banner danger", hidden: true, role: "alert" });
 
-    /* ---------- 1. Translate 面板（持久化编辑框） ---------- */
+    /* ---------- 1. Translate 面板（持久化编辑框，对齐模板 A 原地最小扩展） ---------- */
     var srcTextarea = V3.dom.el("textarea", {
       className: "box-editor",
       placeholder: "在此输入或粘贴需要翻译的文字，或直接按 Ctrl+V 粘贴剪贴板截图…",
@@ -284,24 +286,63 @@
       srcTextarea.value = state.translate.sourceText;
     }
 
-    var translateTargetSelect = V3.dom.el("select", {
-      "aria-label": "目标语言",
-      dataset: { role: "translate-target-lang" },
+    var srcAutoHint = V3.dom.el("span", {
+      className: "auto-hint",
+      dataset: { role: "translate-auto-hint" },
+      text: "Ctrl+Enter 提交"
+    });
+    var srcMetaEl = V3.dom.el("span", {
+      dataset: { role: "translate-src-meta" },
+      text: "支持拖入图片或 Ctrl+V 粘贴截图 · 0 字"
+    });
+    var copySourceBtn = V3.dom.el("button", {
+      type: "button",
+      className: "btn btn-sm",
+      dataset: { role: "copy-source" },
+      onClick: function () {
+        var raw = srcTextarea.value || (state.translate && state.translate.ocr_text) || "";
+        if (!raw) return;
+        call(hooks, "onCopy", { text: raw, kind: "source" });
+      }
+    }, [V3.dom.icon("copy", "ic ic-sm"), document.createTextNode("复制原文")]);
+
+    var translateDirBadge = V3.dom.el("span", {
+      className: "badge",
+      dataset: { role: "translate-direction-badge" },
+      text: "自动判定"
+    });
+    var translateSwapLabel = V3.dom.el("span", { text: "互换" });
+    var translateSwapBtn = V3.dom.el("button", {
+      type: "button",
+      className: "btn btn-sm swap-btn",
+      dataset: { role: "translate-swap" },
+      "aria-pressed": "false",
+      title: "手动反转并临时锁定翻译方向，再次点击或清空输入恢复自动",
+      onClick: function () {
+        var trimmedNow = String(srcTextarea.value || "").trim();
+        if (!trimmedNow || (state.translate && state.translate.phase === "loading")) return;
+        call(hooks, "onSwapDirection", {
+          text: trimmedNow,
+          lang_pair: getTranslateLangPair()
+        });
+      }
+    }, [V3.dom.icon("swap", "ic ic-sm"), translateSwapLabel]);
+
+    var translatePairSelect = V3.dom.el("select", {
+      "aria-label": "翻译语言对",
+      dataset: { role: "translate-lang-pair" },
       onChange: function (ev) {
-        userPickedTranslateLang = true;
-        var val = ev.target.value;
-        state = V3.defaults.merge(state, { translate: { target_lang: val } });
-        renderTranslatePanel(false);
+        call(hooks, "onChangeLangPair", ev.target.value);
       }
     });
 
-    function getTranslateTargetLang() {
-      return (state.translate && state.translate.target_lang) || state.translate_target_lang || "zh";
+    function getTranslateLangPair() {
+      return (state.translate && state.translate.lang_pair) || state.translate_lang_pair || "zh-en";
     }
 
     function submitTranslateText() {
       var text = String(srcTextarea.value || "").trim();
-      var targetLang = getTranslateTargetLang();
+      var langPair = getTranslateLangPair();
       if (!text) {
         state = V3.defaults.merge(state, {
           copyStatus: null,
@@ -322,12 +363,15 @@
         translate: { sourceText: srcTextarea.value, copyStatus: null, error: null, message: "" }
       });
       renderTranslatePanel(false);
-      call(hooks, "onTranslateText", { text: text, target_lang: targetLang });
+      call(hooks, "onTranslateText", {
+        text: text,
+        lang_pair: langPair,
+        trigger: "manual"
+      });
     }
 
     function submitTranslateImage(file) {
       if (!file) return;
-      var targetLang = getTranslateTargetLang();
       state = V3.defaults.merge(state, {
         copyStatus: null,
         copyKind: null,
@@ -336,13 +380,17 @@
       renderTranslatePanel(false);
       call(hooks, "onSubmitImage", {
         file: file,
-        target_lang: targetLang,
-        mode: "translate"
+        mode: "translate",
+        lang_pair: getTranslateLangPair(),
+        panel: "translate"
       });
     }
 
     srcTextarea.addEventListener("input", function () {
-      state.translate = Object.assign({}, state.translate, { sourceText: srcTextarea.value });
+      var val = srcTextarea.value;
+      state.translate = Object.assign({}, state.translate, { sourceText: val });
+      renderTranslatePanel(false);
+      call(hooks, "onTranslateInput", { text: val });
     });
 
     srcTextarea.addEventListener("keydown", function (ev) {
@@ -355,23 +403,12 @@
     var translateInputBox = V3.dom.el("div", { className: "studio-box" }, [
       V3.dom.el("div", { className: "box-head" }, [
         V3.dom.el("span", { text: "原文输入 / 粘贴截图 OCR" }),
-        V3.dom.el("span", { className: "mono", text: "Ctrl+Enter 提交" })
+        srcAutoHint
       ]),
       srcTextarea,
       V3.dom.el("div", { className: "box-foot" }, [
-        V3.dom.el("span", { text: "支持拖入图片或 Ctrl+V 粘贴剪贴板图片" }),
-        V3.dom.el("div", { className: "box-foot-right" }, [
-          V3.dom.el("button", {
-            type: "button",
-            className: "btn btn-sm",
-            dataset: { role: "copy-source" },
-            onClick: function () {
-              var raw = srcTextarea.value || (state.translate && state.translate.ocr_text) || "";
-              if (!raw) return;
-              call(hooks, "onCopy", { text: raw, kind: "source" });
-            }
-          }, [V3.dom.icon("copy"), document.createTextNode("复制原文")])
-        ])
+        srcMetaEl,
+        V3.dom.el("div", { className: "box-foot-right" }, [copySourceBtn])
       ])
     ]);
 
@@ -392,7 +429,7 @@
     });
 
     var translateOutBody = V3.dom.el("div", { className: "box-body", dataset: { role: "translate-output" } });
-    var translateOutMeta = V3.dom.el("span", { className: "mono" });
+    var translateOutMeta = V3.dom.el("span", { className: "mono", dataset: { role: "translate-meta" } });
     var translateCopyFeedback = V3.dom.el("span", { className: "saved", hidden: true });
     var copyTranslationBtn = V3.dom.el("button", {
       type: "button",
@@ -400,16 +437,20 @@
       dataset: { role: "copy-translation" },
       onClick: function () {
         var tr = state.translate || {};
-        var mainText = tr.text || (tr.target_lang === "raw" ? tr.ocr_text : "") || "";
+        var mainText = tr.text || "";
         if (!mainText) return;
         call(hooks, "onCopy", { text: mainText, kind: "translation" });
       }
-    }, [V3.dom.icon("copy"), document.createTextNode("复制译文")]);
+    }, [V3.dom.icon("copy", "ic ic-sm"), document.createTextNode("复制译文")]);
 
     var translateOutputBox = V3.dom.el("div", { className: "studio-box" }, [
       V3.dom.el("div", { className: "box-head" }, [
         V3.dom.el("span", { text: "本地输出" }),
-        translateTargetSelect
+        V3.dom.el("div", { className: "box-head-controls" }, [
+          translateDirBadge,
+          translateSwapBtn,
+          translatePairSelect
+        ])
       ]),
       translateOutBody,
       V3.dom.el("div", { className: "box-foot" }, [
@@ -429,17 +470,16 @@
     ]);
 
     /* ---------- 2. OCR 面板（拖拽 / 选择文件 / Ctrl+V + 预览 URL 回收） ---------- */
-    var ocrTargetSelect = V3.dom.el("select", {
+    var ocrModeSelect = V3.dom.el("select", {
       "aria-label": "OCR 处理方式",
-      dataset: { role: "ocr-target-lang" },
+      dataset: { role: "ocr-mode" },
       onChange: function (ev) {
         var val = ev.target.value;
-        state = V3.defaults.merge(state, {
-          ocr: {
-            target_lang: val,
-            mode: val === "raw" ? "raw" : "translate"
-          }
-        });
+        if (val === "raw") {
+          state = V3.defaults.merge(state, { ocr: { mode: "raw" } });
+        } else {
+          state = V3.defaults.merge(state, { ocr: { mode: "translate", lang_pair: val } });
+        }
         renderOcrPanel();
       }
     });
@@ -452,8 +492,12 @@
       dataset: { role: "ocr-file-input" }
     });
 
-    function getOcrTargetLang() {
-      return (state.ocr && state.ocr.target_lang) || "raw";
+    function getOcrMode() {
+      return (state.ocr && state.ocr.mode === "translate") ? "translate" : "raw";
+    }
+
+    function getOcrLangPair() {
+      return (state.ocr && state.ocr.lang_pair) || state.translate_lang_pair || "zh-en";
     }
 
     function handleOcrFile(file) {
@@ -469,7 +513,7 @@
           ownedPreviewUrl = null;
         }
       }
-      var targetLang = getOcrTargetLang();
+      var ocrMode = getOcrMode();
       state = V3.defaults.merge(state, {
         copyStatus: null,
         copyKind: null,
@@ -482,11 +526,15 @@
         }
       });
       renderOcrPanel();
-      call(hooks, "onSubmitImage", {
+      var imgPayload = {
         file: file,
-        target_lang: targetLang,
-        mode: targetLang === "raw" ? "ocr" : "translate"
-      });
+        mode: ocrMode,
+        panel: "ocr"
+      };
+      if (ocrMode === "translate") {
+        imgPayload.lang_pair = getOcrLangPair();
+      }
+      call(hooks, "onSubmitImage", imgPayload);
     }
 
     ocrFileInput.addEventListener("change", function () {
@@ -537,7 +585,7 @@
     var ocrLeftBox = V3.dom.el("div", { className: "studio-box" }, [
       V3.dom.el("div", { className: "box-head" }, [
         V3.dom.el("span", { text: "图片输入" }),
-        ocrTargetSelect
+        ocrModeSelect
       ]),
       ocrFileInput,
       ocrPreviewWrap,
@@ -564,6 +612,9 @@
                   phase: "empty",
                   fileName: "",
                   previewUrl: "",
+                  source_lang: null,
+                  target_lang: null,
+                  direction_mode: null,
                   ocr_text: "",
                   text: "",
                   error: null,
@@ -586,7 +637,7 @@
       dataset: { role: "copy-ocr" },
       onClick: function () {
         var oc = state.ocr || {};
-        var rawText = oc.ocr_text || (oc.target_lang === "raw" ? oc.text : "") || "";
+        var rawText = oc.ocr_text || (getOcrMode() === "raw" ? oc.text : "") || "";
         if (!rawText) return;
         call(hooks, "onCopy", { text: rawText, kind: "ocr" });
       }
@@ -798,6 +849,15 @@
         var notice = V3.setupPanel.headerNotice(state);
         pageSubEl.textContent = notice.text;
         pageSubEl.className = "studio-sub" + (notice.tone && notice.tone !== "muted" ? " tone-" + notice.tone : "");
+      } else if (panel === "translate") {
+        pageSubEl.className = "studio-sub";
+        if (state.translate_auto_enabled === true) {
+          pageSubEl.textContent = "停止输入 1 秒自动判定语言并翻译 · Ctrl+V 粘贴截图自动提取文字并翻译 · 本地离线运行";
+        } else if (state.translate_auto_enabled === false) {
+          pageSubEl.textContent = "自动翻译已关闭 · 按 Ctrl+Enter 或点击「立即翻译」触发 · Ctrl+V 粘贴截图自动识别";
+        } else {
+          pageSubEl.textContent = meta.sub;
+        }
       } else {
         pageSubEl.className = "studio-sub";
         pageSubEl.textContent = meta.sub;
@@ -805,7 +865,8 @@
 
       V3.dom.empty(headActionsEl);
       if (panel === "translate") {
-        var loading = state.translate && state.translate.phase === "loading";
+        var trPhase = (state.translate && state.translate.phase) || "empty";
+        var loading = trPhase === "loading";
         headActionsEl.appendChild(V3.dom.el("button", {
           type: "button",
           className: "btn",
@@ -818,19 +879,29 @@
               translate: {
                 phase: "empty",
                 sourceText: "",
+                source_lang: null,
+                target_lang: null,
+                direction_mode: null,
+                chunks: null,
+                debouncePending: false,
+                manualOverride: null,
                 text: "",
                 ocr_text: "",
+                elapsedMs: null,
                 error: null,
                 message: "",
-                copyStatus: null
+                details: null,
+                copyStatus: null,
+                copyKind: null
               }
             });
             renderTranslatePanel(false);
+            call(hooks, "onClearTranslate");
           }
         }, [V3.dom.icon("trash"), document.createTextNode("清空")]));
         headActionsEl.appendChild(V3.dom.el("button", {
           type: "button",
-          className: "btn primary",
+          className: (state.translate_auto_enabled === false && trPhase !== "result") ? "btn primary" : "btn",
           disabled: loading,
           dataset: { role: "translate-submit" },
           text: loading ? "处理中…" : "立即翻译 (Ctrl+Enter)",
@@ -852,18 +923,22 @@
           text: ocrLoading ? "识别中…" : "开始识别",
           onClick: function () {
             if (!currentOcrFile) return;
-            var targetLang = getOcrTargetLang();
+            var ocrMode = getOcrMode();
             state = V3.defaults.merge(state, {
               copyStatus: null,
               copyKind: null,
               ocr: { copyStatus: null, error: null, message: "" }
             });
             renderOcrPanel();
-            call(hooks, "onSubmitImage", {
+            var resubmitPayload = {
               file: currentOcrFile,
-              target_lang: targetLang,
-              mode: targetLang === "raw" ? "ocr" : "translate"
-            });
+              mode: ocrMode,
+              panel: "ocr"
+            };
+            if (ocrMode === "translate") {
+              resubmitPayload.lang_pair = getOcrLangPair();
+            }
+            call(hooks, "onSubmitImage", resubmitPayload);
           }
         }));
       } else if (panel === "history") {
@@ -915,24 +990,27 @@
       }
     }
 
-    function populateTargetOptions(selectEl, selectedVal, isOcrMode) {
-      var opts = isOcrMode
-        ? [
-            { value: "raw", label: "纯提取文字（不翻译）" },
-            { value: "zh", label: "提取并译为：中文" },
-            { value: "en", label: "提取并译为：英文" },
-            { value: "ja", label: "提取并译为：日文" },
-            { value: "ko", label: "提取并译为：韩文" }
-          ]
-        : (state.targetLangOptions && state.targetLangOptions.length
-            ? state.targetLangOptions
-            : [
-                { value: "zh", label: "译为：中文" },
-                { value: "en", label: "译为：英文" },
-                { value: "ja", label: "译为：日文" },
-                { value: "ko", label: "译为：韩文" },
-                { value: "raw", label: "仅识别文字（不翻译）" }
-              ]);
+    function getLangPairOptions() {
+      return state.langPairOptions && state.langPairOptions.length
+        ? state.langPairOptions
+        : V3.labels.LANG_PAIR_OPTIONS;
+    }
+
+    function populateLangPairOptions(selectEl, selectedVal) {
+      var opts = getLangPairOptions();
+      V3.dom.empty(selectEl);
+      opts.forEach(function (item) {
+        var option = V3.dom.el("option", { value: item.value, text: item.label });
+        if (item.value === selectedVal) option.selected = true;
+        selectEl.appendChild(option);
+      });
+    }
+
+    function populateOcrModeOptions(selectEl, selectedVal) {
+      var pairOpts = getLangPairOptions().map(function (item) {
+        return { value: item.value, label: "提取并翻译：" + item.label };
+      });
+      var opts = [{ value: "raw", label: "纯提取文字（不翻译）" }].concat(pairOpts);
       V3.dom.empty(selectEl);
       opts.forEach(function (item) {
         var option = V3.dom.el("option", { value: item.value, text: item.label });
@@ -943,23 +1021,73 @@
 
     function renderTranslatePanel(syncInputText) {
       var tr = state.translate || {};
-      var targetLang = getTranslateTargetLang();
-      populateTargetOptions(translateTargetSelect, targetLang, false);
+      var langPair = getTranslateLangPair();
+      populateLangPairOptions(translatePairSelect, langPair);
       if (syncInputText && typeof tr.sourceText === "string" && document.activeElement !== srcTextarea) {
         srcTextarea.value = tr.sourceText;
       }
 
-      V3.dom.empty(translateOutBody);
+      var rawInput = srcTextarea.value || "";
+      var trimmed = rawInput.trim();
       var phase = tr.phase || "empty";
+      var loading = phase === "loading";
+
+      srcTextarea.placeholder = state.translate_auto_enabled === true
+        ? "在此输入或粘贴需要翻译的文字（停顿 1 秒后自动翻译），或按 Ctrl+V 粘贴截图…"
+        : "在此输入或粘贴需要翻译的文字，或直接按 Ctrl+V 粘贴剪贴板截图…";
+      srcMetaEl.textContent = "支持拖入图片或 Ctrl+V 粘贴截图 · " + trimmed.length + " 字";
+      copySourceBtn.disabled = !(rawInput || tr.ocr_text);
+
+      V3.dom.empty(srcAutoHint);
+      if (tr.debouncePending === true) {
+        srcAutoHint.className = "auto-hint pending";
+        srcAutoHint.appendChild(V3.dom.el("span", { className: "auto-pulse", "aria-hidden": "true" }));
+        srcAutoHint.appendChild(document.createTextNode("等待停顿 · 1 秒后自动翻译…"));
+      } else if (state.translate_auto_enabled === true) {
+        srcAutoHint.className = "auto-hint";
+        srcAutoHint.textContent = "停顿 1s 自动翻译 · Ctrl+Enter 立即";
+      } else if (state.translate_auto_enabled === false) {
+        srcAutoHint.className = "auto-hint";
+        srcAutoHint.textContent = "自动翻译已关闭 · Ctrl+Enter 提交";
+      } else {
+        srcAutoHint.className = "auto-hint";
+        srcAutoHint.textContent = "Ctrl+Enter 提交";
+      }
+
+      var lock = tr.manualOverride && tr.manualOverride.source_lang && tr.manualOverride.target_lang
+        ? tr.manualOverride
+        : null;
+      var isLocked = !!lock;
+      translateSwapBtn.disabled = !trimmed || loading;
+      translateSwapBtn.setAttribute("aria-pressed", String(isLocked));
+      translateSwapLabel.textContent = isLocked ? "恢复自动" : "互换";
+
+      V3.dom.empty(translateDirBadge);
+      if (isLocked) {
+        translateDirBadge.className = "badge warn";
+        translateDirBadge.appendChild(V3.dom.icon("lock", "ic ic-xs"));
+        translateDirBadge.appendChild(document.createTextNode("手动：" + V3.labels.directionLabel(lock.source_lang, lock.target_lang)));
+      } else if (phase === "result" && tr.source_lang && tr.target_lang) {
+        translateDirBadge.className = "badge accent";
+        translateDirBadge.textContent = "自动：" + V3.labels.directionLabel(tr.source_lang, tr.target_lang);
+      } else {
+        translateDirBadge.className = "badge";
+        translateDirBadge.textContent = "自动判定";
+      }
+
+      V3.dom.empty(translateOutBody);
       var mainText = "";
 
       if (phase === "loading") {
+        var loadingHint = trimmed.length > 260
+          ? "正在本地分段翻译（长文本不截断）…"
+          : "正在本地判定方向并翻译…";
         translateOutBody.appendChild(V3.dom.el("div", {
           className: "box-loading",
           role: "status",
           "aria-live": "polite"
         }, [
-          document.createTextNode("正在本地处理…"),
+          document.createTextNode(loadingHint),
           V3.dom.el("div", { className: "progress", "aria-hidden": "true" }, [V3.dom.el("i")])
         ]));
       } else if (phase === "error") {
@@ -973,14 +1101,7 @@
           })
         ]));
       } else if (phase === "result") {
-        mainText = tr.text || (targetLang === "raw" ? tr.ocr_text : "") || "";
-        if (targetLang === "raw" || (!tr.text && tr.ocr_text)) {
-          translateOutBody.appendChild(V3.dom.el("span", {
-            className: "badge accent",
-            style: "align-self:flex-start",
-            text: "识别文字（未翻译）"
-          }));
-        }
+        mainText = tr.text || "";
         translateOutBody.appendChild(V3.dom.el("div", {
           className: "studio-result-text",
           dataset: { role: "translation-text" },
@@ -1004,10 +1125,17 @@
             V3.dom.el("div", { className: "studio-sub-text", text: tr.ocr_text })
           ]));
         }
+      } else if (tr.debouncePending === true) {
+        translateOutBody.appendChild(V3.dom.el("div", {
+          className: "box-empty",
+          text: "检测到输入变化，停止输入满 1 秒后将自动请求本地翻译。也可立即按 Ctrl+Enter 提交。"
+        }));
       } else {
         var emptyHint = state.connection === "disconnected"
           ? "尚未连接本地服务。输入文字按 Ctrl+Enter 或粘贴图片即可触发处理。"
-          : "在左侧输入文字按 Ctrl+Enter 翻译，或按 Ctrl+V 粘贴截图自动提取识别。";
+          : (state.translate_auto_enabled === false
+              ? "自动翻译已关闭。在左侧输入文字后按 Ctrl+Enter 或点击「立即翻译」触发，或按 Ctrl+V 粘贴截图。"
+              : "在左侧输入或粘贴文字，停止输入 1 秒后自动识别语言并翻译；也可按 Ctrl+V 粘贴截图。");
         translateOutBody.appendChild(V3.dom.el("div", { className: "box-empty", text: emptyHint }));
       }
 
@@ -1016,6 +1144,9 @@
         metaBits.push(V3.labels.FIXED_MODELS.ollama);
         if (typeof tr.elapsedMs === "number" && isFinite(tr.elapsedMs)) {
           metaBits.push(Math.round(tr.elapsedMs) + "ms");
+        }
+        if (typeof tr.chunks === "number" && isFinite(tr.chunks) && tr.chunks > 1) {
+          metaBits.push("共 " + Math.round(tr.chunks) + " 段");
         }
       }
       translateOutMeta.textContent = metaBits.join(" · ");
@@ -1035,8 +1166,9 @@
 
     function renderOcrPanel() {
       var oc = state.ocr || {};
-      var targetLang = getOcrTargetLang();
-      populateTargetOptions(ocrTargetSelect, targetLang, true);
+      var ocrMode = getOcrMode();
+      var selectedVal = ocrMode === "raw" ? "raw" : getOcrLangPair();
+      populateOcrModeOptions(ocrModeSelect, selectedVal);
 
       if (oc.previewUrl) {
         ocrPreviewWrap.hidden = false;
@@ -1074,8 +1206,8 @@
           })
         ]));
       } else if (phase === "result") {
-        rawOcr = oc.ocr_text || (targetLang === "raw" ? oc.text : "") || "";
-        transText = targetLang !== "raw" && oc.text ? oc.text : "";
+        rawOcr = oc.ocr_text || (ocrMode === "raw" ? oc.text : "") || "";
+        transText = ocrMode === "translate" && oc.text ? oc.text : "";
 
         ocrOutBody.appendChild(V3.dom.el("div", {}, [
           V3.dom.el("div", { className: "muted", style: "font-size:var(--fs-xs);margin-bottom:4px", text: "OCR 识别原文" }),
@@ -1087,12 +1219,13 @@
         ]));
 
         if (transText) {
+          var dirTitle = V3.labels.directionLabel(oc.source_lang, oc.target_lang);
           ocrOutBody.appendChild(V3.dom.el("div", {
             className: "studio-sub-block",
             dataset: { role: "ocr-translated-block" }
           }, [
             V3.dom.el("div", { className: "studio-sub-head" }, [
-              V3.dom.el("span", { text: "译文（" + V3.labels.targetLang(targetLang) + "）" })
+              V3.dom.el("span", { text: dirTitle ? ("译文（" + dirTitle + "）") : "译文" })
             ]),
             V3.dom.el("div", { className: "studio-sub-text", text: transText })
           ]));
@@ -1260,8 +1393,13 @@
       if (patch.theme) {
         state.theme = applyThemeAttr(patch.theme);
       }
-      if (patch.translate_target_lang && !userPickedTranslateLang && !(patch.translate && patch.translate.target_lang)) {
-        state.translate = Object.assign({}, state.translate, { target_lang: patch.translate_target_lang });
+      if (patch.translate_lang_pair) {
+        if (!(patch.translate && patch.translate.lang_pair)) {
+          state.translate = Object.assign({}, state.translate, { lang_pair: patch.translate_lang_pair });
+        }
+        if (!(patch.ocr && patch.ocr.lang_pair)) {
+          state.ocr = Object.assign({}, state.ocr, { lang_pair: patch.translate_lang_pair });
+        }
       }
       renderAll(syncInput);
     }

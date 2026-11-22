@@ -55,6 +55,50 @@ if (Object.prototype.hasOwnProperty.call(V3.labels, "SETUP_MENUS")) {
   fail("labels.js 仍导出已废弃的 SETUP_MENUS");
 } else pass("labels.js 已清理废弃导出 SETUP_MENUS");
 
+if (
+  Object.prototype.hasOwnProperty.call(V3.labels, "TARGET_LANG_OPTIONS") ||
+  Object.prototype.hasOwnProperty.call(V3.labels, "targetLang")
+) {
+  fail("labels.js 仍导出已废弃的 TARGET_LANG_OPTIONS 或 targetLang");
+} else pass("labels.js 已清理废弃导出 TARGET_LANG_OPTIONS 与 targetLang");
+
+if (
+  !Array.isArray(V3.labels.LANG_PAIR_OPTIONS) ||
+  V3.labels.LANG_PAIR_OPTIONS.length !== 1 ||
+  V3.labels.LANG_PAIR_OPTIONS[0].value !== "zh-en" ||
+  V3.labels.LANG_PAIR_OPTIONS[0].label !== "中 ⇄ 英" ||
+  !V3.labels.LANG_PAIR_PARTS ||
+  !Array.isArray(V3.labels.LANG_PAIR_PARTS["zh-en"]) ||
+  V3.labels.LANG_PAIR_PARTS["zh-en"].join(",") !== "zh,en" ||
+  !V3.labels.LANG_SHORT_NAME ||
+  V3.labels.LANG_SHORT_NAME.zh !== "中" ||
+  V3.labels.LANG_SHORT_NAME.en !== "英"
+) {
+  fail("labels.js 语言对常量不正确");
+} else pass("labels.js 导出 LANG_PAIR_OPTIONS / LANG_PAIR_PARTS / LANG_SHORT_NAME");
+
+if (
+  V3.labels.langPairLabel("zh-en") !== "中 ⇄ 英" ||
+  V3.labels.langPairLabel("zh-ja") !== "zh-ja" ||
+  V3.labels.langPairLabel(null) !== ""
+) {
+  fail("langPairLabel 行为不正确");
+} else pass("langPairLabel 正常映射并原样回退未知语言对");
+
+if (
+  V3.labels.directionLabel("zh", "en") !== "中 → 英" ||
+  V3.labels.directionLabel("en", "zh") !== "英 → 中" ||
+  V3.labels.directionLabel("ja", "zh") !== "ja → 中" ||
+  V3.labels.directionLabel(null, "en") !== ""
+) {
+  fail("directionLabel 行为不正确");
+} else pass("directionLabel 正常格式化方向且对未知语种不吞码");
+
+const iconsSrc = fs.readFileSync(path.join(v3js, "icons.js"), "utf8");
+if (!iconsSrc.includes('id="i-swap"') || !iconsSrc.includes('id="i-lock"')) {
+  fail("icons.js 缺少 i-swap 或 i-lock 图标定义");
+} else pass("icons.js 包含 i-swap 与 i-lock 图标定义");
+
 if (V3.labels.source("desktop") !== "本机" || V3.labels.source("web") !== "手机" || V3.labels.source("resend") !== "重发") {
   fail("来源标签不正确");
 } else pass("UtteranceSource 中文标签正确");
@@ -99,7 +143,13 @@ if (
   home.ollama.modelStatus !== "unknown" ||
   home.polish_enabled !== null ||
   home.keywordsDraft !== null ||
-  home.translate_target_lang !== null ||
+  home.translate_lang_pair !== null ||
+  home.translate_auto_enabled !== null ||
+  home.langPairOptions !== null ||
+  home.translateSettingsSaved !== false ||
+  Object.prototype.hasOwnProperty.call(home, "translate_target_lang") ||
+  Object.prototype.hasOwnProperty.call(home, "targetLangOptions") ||
+  Object.prototype.hasOwnProperty.call(home, "targetLangSaved") ||
   home.hotkey_voice !== "" ||
   home.hotkey_ocr !== "" ||
   home.hotkey_annotate !== "" ||
@@ -108,14 +158,26 @@ if (
   home.apiPaths !== null ||
   home.history.records.length !== 0 ||
   home.translate.phase !== "empty" ||
+  home.translate.lang_pair !== "zh-en" ||
+  home.translate.source_lang !== null ||
+  home.translate.target_lang !== null ||
+  home.translate.direction_mode !== null ||
+  home.translate.chunks !== null ||
+  home.translate.debouncePending !== false ||
+  home.translate.manualOverride !== null ||
   home.translate.text !== "" ||
   home.ocr.phase !== "empty" ||
+  home.ocr.mode !== "raw" ||
+  home.ocr.lang_pair !== "zh-en" ||
+  home.ocr.source_lang !== null ||
+  home.ocr.target_lang !== null ||
+  home.ocr.direction_mode !== null ||
   home.ocr.ocr_text !== "" ||
   home.lanEntries !== null ||
   home.tokenPresent !== false
 ) {
   fail("homeState 默认状态不合法：" + JSON.stringify(home));
-} else pass("homeState 统一桌面默认状态合法（未连接、含全部设置字段且无成功示例/明文令牌）");
+} else pass("homeState 统一桌面默认状态合法（未连接、含语言对/自动开关契约字段且无旧键/成功示例/明文令牌）");
 
 function ev(init) {
   return Object.assign({ ctrlKey: false, altKey: false, shiftKey: false, metaKey: false, key: "", code: "" }, init || {});

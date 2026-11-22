@@ -131,5 +131,5 @@ def test_existing_config_is_not_rewritten_on_load_or_unrelated_update(tmp_path: 
     path = tmp_path / ".config.json"
     path.write_text(json.dumps({"hotkey_voice": "ctrl+alt+z", "hotkey_screenshot": "alt+x", "hotkey_repeat": "ctrl+alt+r"}), encoding="utf-8")
     store = ConfigStore(path)
-    view = apply_config_update(store, AppConfigUpdate(translate_target_lang="en"))
+    view = apply_config_update(store, AppConfigUpdate(translate_auto_enabled=False))
     assert (view.hotkey_voice, view.hotkey_screenshot, view.hotkey_repeat) == ("ctrl+alt+z", "alt+x", "ctrl+alt+r")

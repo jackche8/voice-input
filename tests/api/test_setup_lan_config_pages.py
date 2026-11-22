@@ -176,24 +176,45 @@ def test_config_api_never_returns_legacy_secrets(tmp_path):
     runtime, app = _app(tmp_path)
     cfg_path = runtime.config.path
     data = json.loads(cfg_path.read_text(encoding="utf-8"))
-    data.update({"baidu_appid": "fixture-appid", "baidu_appkey": "fixture-secret", "whisper_model": "large-v3"})
+    data.update({
+        "baidu_appid": "fixture-appid",
+        "baidu_appkey": "fixture-secret",
+        "whisper_model": "large-v3",
+        "translate_target_lang": "en",
+    })
     cfg_path.write_text(json.dumps(data), encoding="utf-8")
     client = local_client(app)
     got = client.get("/api/v1/config").json()
     assert "fixture-secret" not in json.dumps(got) and "baidu_appkey" not in got and "whisper_model" not in got
+    assert "translate_target_lang" not in got
+    assert got["translate_lang_pair"] == "zh-en" and got["translate_auto_enabled"] is True
     saved = client.post(
         "/api/v1/config",
-        json={"custom_keywords": [" Alpha ", "", "Beta"], "hotkey_voice": "Control+Alt+Z", "polish_enabled": True},
+        json={
+            "custom_keywords": [" Alpha ", "", "Beta"],
+            "hotkey_voice": "Control+Alt+Z",
+            "polish_enabled": True,
+            "translate_lang_pair": " ZH-EN ",
+            "translate_auto_enabled": False,
+        },
         headers=local_headers(),
     )
     assert saved.status_code == 200, saved.text
     out = saved.json()
     assert out["custom_keywords"] == ["Alpha", "Beta"] and out["hotkey_voice"] == "ctrl+alt+z"
     assert out["polish_enabled"] is True and "baidu_appkey" not in out
+    assert out["translate_lang_pair"] == "zh-en" and out["translate_auto_enabled"] is False
+    assert "translate_target_lang" not in out
     disk = json.loads(cfg_path.read_text(encoding="utf-8"))
     assert disk["baidu_appkey"] == "fixture-secret", "旧键在磁盘保留，不丢数据"
+    assert disk["translate_target_lang"] == "en"
+    assert disk["translate_lang_pair"] == "zh-en" and disk["translate_auto_enabled"] is False
     rejected = client.post("/api/v1/config", json={"baidu_appkey": "x"}, headers=local_headers())
     assert rejected.status_code == 400
+    rejected_legacy = client.post("/api/v1/config", json={"translate_target_lang": "en"}, headers=local_headers())
+    assert rejected_legacy.status_code == 400 and rejected_legacy.json()["error"] == "invalid_request"
+    bad_pair = client.post("/api/v1/config", json={"translate_lang_pair": "fr-de"}, headers=local_headers())
+    assert bad_pair.status_code == 400 and bad_pair.json()["error"] == "invalid_request"
     bad_key = client.post("/api/v1/config", json={"hotkey_voice": "z"}, headers=local_headers())
     assert bad_key.status_code == 400
 

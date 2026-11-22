@@ -1,0 +1,1437 @@
+<!doctype html>
+<!--
+  v3.5 本地翻译优化 · 模板 A「原地最小扩展」（最简设计）
+  设计原则：最小改动现有 Studio C 双栏 `.studio-split` `.box-head` 与设置页 `renderShot` 结构。
+  显示的数据：
+    - 配置态：translate_lang_pair（如 "zh-en"，展示为「中 ⇄ 英」）、translate_auto_enabled（bool，默认 true）、
+      langPairOptions（后端/字典提供的语言对列表，当前仅中⇄英，预留扩展）。
+    - 翻译结果（后端权威返回，前端绝不重算方向）：text、source_lang、target_lang、direction_mode（"auto" | "manual"）、
+      chunks（分段数，可选）、ocr_text（粘贴截图时）、elapsedMs、error/message/details。
+    - 前端本地交互态：sourceText、debouncePending（停顿 1s 计时状态）、manualDirectionOverride（null | {source, target}）、
+      phase（empty | loading | result | error）、copyStatus。
+  触发的动作：
+    - onTranslateText({ text, lang_pair, source_lang?, target_lang?, trigger: "auto" | "manual" })（停顿 1s 防抖或 Ctrl+Enter / 立即翻译；空输入不发请求；单调序号丢弃过期响应）
+    - onSwapDirection()（点击 ⇄ 临时反转并锁定方向；再次点击或清空输入恢复自动判定；有文本时立即按新方向重译）
+    - onChangeLangPair(pair)（切换语言对；当前仅中⇄英，预留扩展）
+    - onToggleAutoTranslate(enabled)（设置页切换「停止输入 1 秒后自动翻译」并持久化到 /api/v1/config）
+    - onSubmitImage({ file, lang_pair, mode })（Ctrl+V 或拖入截图，沿用既有图片翻译流）
+    - onCopy({ text, kind }) / onClear()（清空文本、清空结果并自动解除手动方向锁定）
+  基于的既有文件：
+    - static/v3/css/theme.css（完整 Studio C 令牌与暗/亮双主题、color-scheme 下拉框样式）
+    - static/v3/css/studio.css（.studio-window / .rail / .studio-split / .studio-box / .box-head / .box-body / .box-foot / .setup-tabs / .rows）
+    - static/v3/js/home.js（工作台翻译面板、右侧 .box-head 控件与底部反馈）
+    - static/v3/js/setup-panel.js（renderShot 翻译设置区）
+    - static/v3/js/icons.js（现有图标精灵，新增 i-swap 与 i-lock 两个同规范描边图标）
+    - static/v3/js/defaults.js / labels.js / business/home-controller.js / business/map-setup.js / business/setup-actions.js
+-->
+<html lang="zh-CN" data-theme="dark">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>v3.5 本地翻译优化 · 模板 A「原地最小扩展」（最简设计）</title>
+<style>
+/* ==================== 1. 既有 theme.css Studio C 令牌（原样沿用） ==================== */
+:root {
+  color-scheme: light;
+  --font-sans: "Noto Sans CJK SC", "PingFang SC", "Microsoft YaHei", system-ui, -apple-system, sans-serif;
+  --font-mono: "JetBrains Mono", "Noto Sans Mono CJK SC", "SFMono-Regular", Consolas, ui-monospace, monospace;
+  --fs-xs: 12px;
+  --fs-sm: 13px;
+  --fs-md: 14px;
+  --fs-lg: 16px;
+  --fs-xl: 20px;
+  --sp-1: 4px;
+  --sp-2: 8px;
+  --sp-3: 12px;
+  --sp-4: 16px;
+  --sp-5: 24px;
+  --sp-6: 32px;
+  --radius-sm: 6px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+  --radius-xl: 14px;
+  --radius-pill: 999px;
+  --c-bg: #f4f6fa;
+  --c-rail: #eef1f6;
+  --c-surface: #ffffff;
+  --c-surface-2: #f1f4f9;
+  --c-text: #1b1f2a;
+  --c-muted: #5d6578;
+  --c-border: #d8dee9;
+  --c-accent: #2563eb;
+  --c-accent-hover: #1d4ed8;
+  --c-accent-solid: #2563eb;
+  --c-accent-solid-hover: #1d4ed8;
+  --c-on-accent: #ffffff;
+  --c-accent-soft: #dbeafe;
+  --c-ok: #16a34a;
+  --c-ok-soft: #dcfce7;
+  --c-warn: #b45309;
+  --c-warn-soft: #fef3c7;
+  --c-danger: #dc2626;
+  --c-danger-solid: #dc2626;
+  --c-danger-soft: #fee2e2;
+  --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.06);
+  --shadow-studio: 0 12px 32px rgba(15, 23, 42, 0.08);
+  --dur-fast: 120ms;
+  --focus-ring: 0 0 0 3px var(--c-accent-soft), 0 0 0 1px var(--c-accent);
+}
+
+[data-theme="light"] {
+  color-scheme: light;
+  --c-bg: #f4f6fa;
+  --c-rail: #eef1f6;
+  --c-surface: #ffffff;
+  --c-surface-2: #f1f4f9;
+  --c-text: #1b1f2a;
+  --c-muted: #5d6578;
+  --c-border: #d8dee9;
+  --c-accent: #2563eb;
+  --c-accent-hover: #1d4ed8;
+  --c-accent-solid: #2563eb;
+  --c-accent-solid-hover: #1d4ed8;
+  --c-on-accent: #ffffff;
+  --c-accent-soft: #dbeafe;
+  --c-ok: #16a34a;
+  --c-ok-soft: #dcfce7;
+  --c-warn: #b45309;
+  --c-warn-soft: #fef3c7;
+  --c-danger: #dc2626;
+  --c-danger-solid: #dc2626;
+  --c-danger-soft: #fee2e2;
+  --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.06);
+  --shadow-studio: 0 12px 32px rgba(15, 23, 42, 0.08);
+}
+
+[data-theme="dark"] {
+  color-scheme: dark;
+  --c-bg: #0d1117;
+  --c-rail: #131820;
+  --c-surface: #161b22;
+  --c-surface-2: #1f2630;
+  --c-text: #e6edf3;
+  --c-muted: #8b949e;
+  --c-border: #30363d;
+  --c-accent: #58a6ff;
+  --c-accent-hover: #79c0ff;
+  --c-accent-solid: #1f6feb;
+  --c-accent-solid-hover: #1d4ed8;
+  --c-on-accent: #ffffff;
+  --c-accent-soft: rgba(56, 139, 253, 0.16);
+  --c-ok: #3fb950;
+  --c-ok-soft: rgba(63, 185, 80, 0.16);
+  --c-warn: #d29922;
+  --c-warn-soft: rgba(210, 153, 34, 0.16);
+  --c-danger: #f85149;
+  --c-danger-solid: #c92a2a;
+  --c-danger-soft: rgba(248, 81, 73, 0.16);
+  --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.28);
+  --shadow-studio: 0 16px 40px rgba(0, 0, 0, 0.35);
+}
+
+*, *::before, *::after { box-sizing: border-box; }
+html, body { margin: 0; }
+body {
+  font-family: var(--font-sans);
+  color: var(--c-text);
+  background: var(--c-bg);
+  font-size: var(--fs-md);
+  line-height: 1.5;
+}
+[hidden] { display: none !important; }
+
+.ic {
+  width: 16px;
+  height: 16px;
+  flex: none;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.ic-sm { width: 14px; height: 14px; }
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--sp-1);
+  font: inherit;
+  font-size: var(--fs-sm);
+  padding: 6px 14px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--c-border);
+  background: var(--c-surface);
+  color: var(--c-text);
+  cursor: pointer;
+  transition: border-color var(--dur-fast), background-color var(--dur-fast), color var(--dur-fast);
+}
+.btn:hover:not(:disabled) { border-color: var(--c-accent); }
+.btn.primary {
+  background: var(--c-accent-solid);
+  border-color: var(--c-accent-solid);
+  color: var(--c-on-accent);
+}
+.btn.primary:hover:not(:disabled) {
+  background: var(--c-accent-solid-hover);
+  border-color: var(--c-accent-solid-hover);
+}
+.btn:disabled { opacity: 0.55; cursor: not-allowed; }
+.btn:focus-visible { outline: none; box-shadow: var(--focus-ring); }
+.btn-sm { padding: 3px 10px; font-size: var(--fs-xs); }
+
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-1);
+  font-size: var(--fs-xs);
+  padding: 2px 8px;
+  border-radius: var(--radius-pill);
+  background: var(--c-bg);
+  color: var(--c-muted);
+  white-space: nowrap;
+}
+.badge.ok { background: var(--c-ok-soft); color: var(--c-ok); }
+.badge.warn { background: var(--c-warn-soft); color: var(--c-warn); }
+.badge.danger { background: var(--c-danger-soft); color: var(--c-danger); }
+.badge.accent { background: var(--c-accent-soft); color: var(--c-accent); }
+
+.mono { font-family: var(--font-mono); }
+.muted { color: var(--c-muted); }
+.saved { font-size: var(--fs-xs); color: var(--c-ok); }
+.hint { font-size: var(--fs-xs); color: var(--c-muted); margin: 0 0 var(--sp-2); line-height: 1.6; }
+
+.dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  display: inline-block;
+  flex: none;
+  background: var(--c-border);
+}
+.dot.ok { background: var(--c-ok); }
+.dot.warn { background: var(--c-warn); }
+.dot.err { background: var(--c-danger); }
+
+.progress {
+  height: 4px;
+  border-radius: var(--radius-pill);
+  background: var(--c-border);
+  overflow: hidden;
+}
+.progress > i {
+  display: block;
+  height: 100%;
+  width: 45%;
+  background: var(--c-accent);
+  border-radius: var(--radius-pill);
+  animation: v3-indeterminate 1.4s ease-in-out infinite;
+}
+@keyframes v3-indeterminate {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(240%); }
+}
+
+.switch {
+  position: relative;
+  width: 40px;
+  height: 22px;
+  border-radius: var(--radius-pill);
+  background: var(--c-border);
+  border: 0;
+  cursor: pointer;
+  flex: none;
+  padding: 0;
+}
+.switch::after {
+  content: "";
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--c-surface);
+  transition: left var(--dur-fast);
+}
+.switch[aria-checked="true"] { background: var(--c-accent); }
+.switch[aria-checked="true"]::after { left: 21px; }
+.switch:focus-visible { outline: none; box-shadow: var(--focus-ring); }
+
+.field {
+  width: 100%;
+  font: inherit;
+  font-size: var(--fs-sm);
+  padding: var(--sp-2) var(--sp-3);
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-md);
+  background: var(--c-surface);
+  color: var(--c-text);
+}
+.field:focus-visible { outline: none; box-shadow: var(--focus-ring); }
+select.field { width: auto; min-width: 160px; }
+select {
+  color-scheme: inherit;
+  background-color: var(--c-surface);
+  color: var(--c-text);
+}
+select option, select optgroup {
+  background-color: var(--c-surface);
+  color: var(--c-text);
+}
+
+.rows {
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-md);
+  background: var(--c-surface);
+}
+.row {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  padding: var(--sp-3) var(--sp-4);
+  border-top: 1px solid var(--c-border);
+}
+.row:first-child { border-top: 0; }
+.row-main { flex: 1; min-width: 0; }
+.row-title { font-weight: 600; }
+.row-sub { font-size: var(--fs-xs); color: var(--c-muted); margin-top: 2px; }
+
+.actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--sp-2);
+  margin-top: var(--sp-2);
+  align-items: center;
+}
+
+/* ==================== 2. 模板预览切换栏（非正式界面组成部分） ==================== */
+.preview-bar {
+  position: sticky;
+  top: 0;
+  z-index: 100;
+  background: var(--c-rail);
+  border-bottom: 1px solid var(--c-border);
+  padding: var(--sp-2) var(--sp-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+}
+.preview-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--sp-3);
+  flex-wrap: wrap;
+}
+.preview-head strong { font-size: var(--fs-md); color: var(--c-accent); }
+.preview-head span { font-size: var(--fs-xs); color: var(--c-muted); }
+.preview-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+.preview-controls button {
+  font: inherit;
+  font-size: var(--fs-xs);
+  padding: 4px 10px;
+  border-radius: var(--radius-pill);
+  border: 1px solid var(--c-border);
+  background: var(--c-surface);
+  color: var(--c-text);
+  cursor: pointer;
+  transition: border-color var(--dur-fast), background-color var(--dur-fast), color var(--dur-fast);
+}
+.preview-controls button:hover { border-color: var(--c-accent); color: var(--c-accent); }
+.preview-controls button.on {
+  background: var(--c-accent-solid);
+  border-color: var(--c-accent-solid);
+  color: var(--c-on-accent);
+  font-weight: 600;
+}
+.preview-controls button:focus-visible { outline: none; box-shadow: var(--focus-ring); }
+.preview-sep { width: 1px; height: 16px; background: var(--c-border); margin: 0 2px; }
+
+.stage-wrap {
+  max-width: 1320px;
+  margin: var(--sp-4) auto var(--sp-6);
+  padding: 0 var(--sp-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-4);
+}
+
+/* ==================== 3. 既有 studio.css 工作台骨架 ==================== */
+.studio-window {
+  display: grid;
+  grid-template-columns: 232px minmax(0, 1fr);
+  min-height: 600px;
+  background: var(--c-bg);
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-xl);
+  overflow: hidden;
+  box-shadow: var(--shadow-studio);
+}
+
+.rail {
+  background: var(--c-rail);
+  border-right: 1px solid var(--c-border);
+  padding: var(--sp-4) 10px;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+}
+.rail-head {
+  padding: 0 10px 14px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: var(--sp-2);
+}
+.rail-brand {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  font-weight: 700;
+  font-size: 15px;
+  color: var(--c-text);
+}
+.rail-conn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: var(--fs-xs);
+  color: var(--c-muted);
+}
+.rail .nav-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-2);
+  width: 100%;
+  font: inherit;
+  font-size: var(--fs-sm);
+  padding: 8px 12px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--c-muted);
+  cursor: pointer;
+  text-align: left;
+  transition: background-color var(--dur-fast), color var(--dur-fast);
+}
+.rail .nav-item:hover { color: var(--c-text); background: var(--c-surface-2); }
+.rail .nav-item.on {
+  background: var(--c-accent-soft);
+  color: var(--c-accent);
+  font-weight: 600;
+}
+.rail .nav-item:focus-visible { outline: none; box-shadow: var(--focus-ring); }
+.nav-item-label { display: inline-flex; align-items: center; gap: var(--sp-2); min-width: 0; }
+.rail-sep { height: 1px; background: var(--c-border); margin: var(--sp-2) 8px; }
+.rail-foot {
+  margin-top: auto;
+  padding: 12px 10px 4px;
+  border-top: 1px solid var(--c-border);
+  font-size: var(--fs-xs);
+  color: var(--c-muted);
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+}
+.rail-status-list { display: flex; flex-direction: column; gap: 5px; }
+.rail-status-row { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.rail-status-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rail-keys {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding-top: var(--sp-2);
+  border-top: 1px dashed var(--c-border);
+}
+.rail-key-row { display: flex; align-items: center; justify-content: space-between; gap: var(--sp-2); }
+.rail-key-kbd {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  border: 1px solid var(--c-border);
+  background: var(--c-surface-2);
+  color: var(--c-text);
+  white-space: nowrap;
+}
+
+.studio-main {
+  padding: 20px 26px 28px;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-4);
+  min-width: 0;
+}
+.studio-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: var(--sp-3);
+  flex-wrap: wrap;
+}
+.studio-head h1 { margin: 0; font-size: var(--fs-xl); color: var(--c-text); line-height: 1.25; }
+.studio-sub { margin-top: 3px; font-size: var(--fs-xs); color: var(--c-muted); }
+.studio-actions { display: flex; align-items: center; gap: var(--sp-2); flex-wrap: wrap; }
+.studio-panel { flex: 1; display: flex; flex-direction: column; gap: var(--sp-4); min-height: 0; }
+
+.studio-split {
+  flex: 1;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 14px;
+  min-height: 430px;
+}
+.studio-box {
+  background: var(--c-surface);
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-lg);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  min-width: 0;
+  max-height: 520px;
+}
+.box-head {
+  padding: 9px 14px;
+  border-bottom: 1px solid var(--c-border);
+  background: var(--c-surface-2);
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+  font-size: var(--fs-xs);
+  color: var(--c-muted);
+  min-height: 42px;
+}
+.box-head select {
+  font: inherit;
+  font-size: var(--fs-xs);
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-sm);
+  padding: 4px 8px;
+}
+.box-head select:focus-visible { outline: none; box-shadow: var(--focus-ring); }
+
+.box-editor {
+  flex: 1;
+  width: 100%;
+  min-height: 280px;
+  border: 0;
+  resize: none;
+  padding: 14px 16px;
+  background: transparent;
+  color: var(--c-text);
+  font: inherit;
+  font-size: 15px;
+  line-height: 1.7;
+  outline: none;
+}
+.box-editor::placeholder { color: var(--c-muted); }
+
+.box-body {
+  flex: 1;
+  padding: 14px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+  overflow: auto;
+  min-height: 280px;
+}
+.box-empty {
+  margin: auto 0;
+  text-align: center;
+  color: var(--c-muted);
+  font-size: var(--fs-sm);
+  line-height: 1.7;
+  padding: var(--sp-4);
+}
+.box-loading {
+  margin: auto 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--sp-3);
+  color: var(--c-accent);
+  font-size: var(--fs-sm);
+  padding: var(--sp-4);
+}
+.box-loading .progress { width: 180px; }
+.box-error {
+  padding: var(--sp-3) var(--sp-4);
+  border-radius: var(--radius-md);
+  background: var(--c-danger-soft);
+  color: var(--c-danger);
+  font-size: var(--fs-sm);
+  line-height: 1.65;
+  display: flex;
+  align-items: flex-start;
+  gap: var(--sp-2);
+}
+.studio-result-text {
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 15px;
+  line-height: 1.75;
+  color: var(--c-text);
+}
+.box-foot {
+  padding: 8px 14px;
+  border-top: 1px solid var(--c-border);
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+  font-size: var(--fs-xs);
+  color: var(--c-muted);
+}
+.box-foot-right {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  margin-left: auto;
+}
+
+/* ==================== 4. 模板 A 最小增量样式（仅 ~25 行） ==================== */
+.box-head-controls {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.swap-btn {
+  padding: 3px 8px;
+  font-size: var(--fs-xs);
+  min-height: 26px;
+}
+.swap-btn[aria-pressed="true"] {
+  background: var(--c-warn-soft);
+  border-color: var(--c-warn);
+  color: var(--c-warn);
+  font-weight: 600;
+}
+.auto-hint {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: var(--fs-xs);
+  color: var(--c-muted);
+}
+.auto-hint.pending { color: var(--c-accent); font-weight: 500; }
+.auto-pulse {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--c-accent);
+  animation: v3-pulse 1s ease-in-out infinite;
+}
+@keyframes v3-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.3; }
+}
+
+/* ==================== 5. 既有设置面板样式 ==================== */
+.setup-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-1);
+  padding: var(--sp-1);
+  border-radius: var(--radius-lg);
+  background: var(--c-surface);
+  border: 1px solid var(--c-border);
+}
+.setup-tabs button {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  font: inherit;
+  font-size: var(--fs-sm);
+  padding: 6px 14px;
+  border: 0;
+  border-radius: var(--radius-pill);
+  background: transparent;
+  color: var(--c-muted);
+  cursor: pointer;
+}
+.setup-tabs button.on {
+  background: var(--c-accent-soft);
+  color: var(--c-accent);
+  font-weight: 600;
+}
+.setup-pane { display: flex; flex-direction: column; gap: var(--sp-3); }
+.setup-section { display: flex; flex-direction: column; gap: var(--sp-2); }
+.setup-section h2 { margin: 0; font-size: var(--fs-lg); color: var(--c-text); }
+
+/* ==================== 6. 设计说明与回调日志 ==================== */
+.notes-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  gap: var(--sp-3);
+}
+.note-card {
+  background: var(--c-surface);
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-lg);
+  padding: var(--sp-4);
+  font-size: var(--fs-sm);
+}
+.note-card h3 { margin: 0 0 var(--sp-2); font-size: var(--fs-md); color: var(--c-text); }
+.note-card ul { margin: 0; padding-left: 18px; color: var(--c-muted); }
+.note-card li { margin: 4px 0; line-height: 1.55; }
+.note-card strong { color: var(--c-text); }
+.note-card code {
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  color: var(--c-accent);
+  background: var(--c-surface-2);
+  padding: 1px 5px;
+  border-radius: 4px;
+}
+.event-log {
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  color: var(--c-muted);
+  background: var(--c-surface-2);
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-md);
+  padding: var(--sp-2) var(--sp-3);
+  max-height: 108px;
+  overflow: auto;
+  white-space: pre-wrap;
+  line-height: 1.55;
+}
+
+@media (max-width: 860px) {
+  .studio-window { grid-template-columns: 1fr; }
+  .rail { border-right: 0; border-bottom: 1px solid var(--c-border); }
+  .studio-main { padding: var(--sp-4); }
+  .studio-split { grid-template-columns: 1fr; }
+  .row { flex-wrap: wrap; }
+}
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+</style>
+</head>
+<body>
+<!-- 共享 SVG 图标精灵（沿用 icons.js，仅新增 i-swap / i-lock） -->
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false">
+  <symbol id="i-mic" viewBox="0 0 24 24"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/></symbol>
+  <symbol id="i-copy" viewBox="0 0 24 24"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h8"/></symbol>
+  <symbol id="i-alert" viewBox="0 0 24 24"><path d="M12 3 2 21h20L12 3zM12 10v5M12 18h.01"/></symbol>
+  <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M20 11a8 8 0 1 0-2.3 5.7M20 4v7h-7"/></symbol>
+  <symbol id="i-globe" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18"/></symbol>
+  <symbol id="i-scan" viewBox="0 0 24 24"><path d="M4 8V5a1 1 0 0 1 1-1h3M16 4h3a1 1 0 0 1 1 1v3M20 16v3a1 1 0 0 1-1 1h-3M8 20H5a1 1 0 0 1-1-1v-3M7 12h10"/></symbol>
+  <symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></symbol>
+  <symbol id="i-phone" viewBox="0 0 24 24"><rect x="7" y="2" width="10" height="20" rx="2"/><path d="M12 18h.01"/></symbol>
+  <symbol id="i-settings" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3h.1a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8v.1a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></symbol>
+  <symbol id="i-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></symbol>
+  <symbol id="i-moon" viewBox="0 0 24 24"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></symbol>
+  <symbol id="i-trash" viewBox="0 0 24 24"><path d="M3 6h18M8 6V4h8v2M6 6l1 14h10l1-14"/></symbol>
+  <symbol id="i-swap" viewBox="0 0 24 24"><path d="M4 8h15m0 0-4-4m4 4-4 4M20 16H5m0 0 4-4m-4 4 4 4"/></symbol>
+  <symbol id="i-lock" viewBox="0 0 24 24"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></symbol>
+</svg>
+
+<header class="preview-bar">
+  <div class="preview-head">
+    <strong>模板 A「原地最小扩展」· 最简设计</strong>
+    <span>直接沿用现有双栏 .studio-split 与右侧 .box-head，仅把单一目标语言换成「方向徽章 + ⇄ 互换 + 语言对」</span>
+  </div>
+  <div class="preview-controls" id="preview-controls">
+    <button type="button" data-preset="empty">空态</button>
+    <button type="button" data-preset="debounce">输入停顿自动触发</button>
+    <button type="button" data-preset="auto_zh_en" class="on">自动：中→英</button>
+    <button type="button" data-preset="manual_en_zh">手动锁定：英→中</button>
+    <button type="button" data-preset="long_text">超长译文</button>
+    <button type="button" data-preset="loading">翻译中</button>
+    <button type="button" data-preset="error">失败态</button>
+    <span class="preview-sep" aria-hidden="true"></span>
+    <button type="button" data-preset="setup">设置页视图</button>
+    <span class="preview-sep" aria-hidden="true"></span>
+    <button type="button" id="btn-theme">主题：深色（切浅色）</button>
+  </div>
+</header>
+
+<main class="stage-wrap">
+  <div class="studio-window">
+    <!-- 左侧边栏（与现有 home.js 完全一致） -->
+    <aside class="rail">
+      <div class="rail-head">
+        <span class="rail-brand"><svg class="ic"><use href="#i-mic"/></svg>Voice Studio</span>
+        <span class="rail-conn"><span class="dot ok" aria-hidden="true"></span><span>已就绪</span></span>
+      </div>
+      <div role="navigation" aria-label="工作台导航">
+        <button type="button" class="nav-item on" id="nav-translate">
+          <span class="nav-item-label"><svg class="ic"><use href="#i-globe"/></svg>翻译框 · 主页</span>
+        </button>
+        <button type="button" class="nav-item" disabled style="opacity:.65;cursor:default">
+          <span class="nav-item-label"><svg class="ic"><use href="#i-scan"/></svg>图片 OCR 识别</span>
+        </button>
+        <button type="button" class="nav-item" disabled style="opacity:.65;cursor:default">
+          <span class="nav-item-label"><svg class="ic"><use href="#i-clock"/></svg>语音与翻译历史</span>
+        </button>
+        <button type="button" class="nav-item" disabled style="opacity:.65;cursor:default">
+          <span class="nav-item-label"><svg class="ic"><use href="#i-phone"/></svg>手机扫码语音</span>
+        </button>
+        <button type="button" class="nav-item" id="nav-setup">
+          <span class="nav-item-label"><svg class="ic"><use href="#i-settings"/></svg>模型与热键设置</span>
+          <span class="dot ok" aria-hidden="true"></span>
+        </button>
+      </div>
+      <div class="rail-sep" aria-hidden="true"></div>
+      <button type="button" class="nav-item" id="rail-theme-btn">
+        <span class="nav-item-label" id="rail-theme-label"><svg class="ic"><use href="#i-moon"/></svg>外观主题</span>
+        <span class="badge" id="rail-theme-badge">深色</span>
+      </button>
+      <div class="rail-foot">
+        <div class="rail-status-list">
+          <div class="rail-status-row"><span class="dot ok" aria-hidden="true"></span><span class="rail-status-text">Qwen3-ASR-1.7B 就绪</span></div>
+          <div class="rail-status-row"><span class="dot ok" aria-hidden="true"></span><span class="rail-status-text">qwen3.5:4b 就绪</span></div>
+        </div>
+        <div class="rail-keys" aria-label="全局快捷键">
+          <div class="rail-key-row"><span>语音输入</span><kbd class="rail-key-kbd">Ctrl+Alt+Z</kbd></div>
+          <div class="rail-key-row"><span>截图翻译</span><kbd class="rail-key-kbd">Ctrl+Alt+X</kbd></div>
+          <div class="rail-key-row"><span>纯 OCR 识别</span><kbd class="rail-key-kbd">Ctrl+Alt+O</kbd></div>
+          <div class="rail-key-row"><span>重复上次输入</span><kbd class="rail-key-kbd">Ctrl+Alt+R</kbd></div>
+          <div class="rail-key-row"><span>截屏标注</span><kbd class="rail-key-kbd">Ctrl+Alt+A</kbd></div>
+        </div>
+      </div>
+    </aside>
+
+    <!-- 右侧主工作区 -->
+    <div class="studio-main">
+      <header class="studio-head">
+        <div>
+          <h1 id="page-title">本地翻译与 OCR 工作台</h1>
+          <div class="studio-sub" id="page-sub">停止输入 1 秒自动识别语言并翻译 · Ctrl+V 粘贴截图自动提取文字并翻译 · 本地离线运行</div>
+        </div>
+        <div class="studio-actions" id="head-actions-translate">
+          <button type="button" class="btn" id="btn-clear"><svg class="ic"><use href="#i-trash"/></svg>清空</button>
+          <button type="button" class="btn" id="btn-submit">立即翻译 (Ctrl+Enter)</button>
+        </div>
+        <div class="studio-actions" id="head-actions-setup" hidden>
+          <button type="button" class="btn" disabled><svg class="ic"><use href="#i-refresh"/></svg>刷新状态</button>
+        </div>
+      </header>
+
+      <!-- 视图 1：翻译工作台面板（保持现有 .studio-split 结构） -->
+      <section class="studio-panel" id="panel-translate">
+        <div class="studio-split">
+          <!-- 左栏：原文输入 -->
+          <div class="studio-box">
+            <div class="box-head">
+              <span>原文输入 / 粘贴截图 OCR</span>
+              <span class="auto-hint" id="auto-hint">停顿 1s 自动翻译</span>
+            </div>
+            <textarea
+              class="box-editor"
+              id="src-input"
+              aria-label="原文输入或粘贴截图"
+              placeholder="在此输入或粘贴需要翻译的文字（停顿 1 秒后自动翻译），或按 Ctrl+V 粘贴截图…"
+            ></textarea>
+            <div class="box-foot">
+              <span id="src-meta">支持拖入图片或 Ctrl+V 粘贴截图 · 0 字</span>
+              <div class="box-foot-right">
+                <button type="button" class="btn btn-sm" id="btn-copy-src">
+                  <svg class="ic ic-sm"><use href="#i-copy"/></svg>复制原文
+                </button>
+              </div>
+            </div>
+          </div>
+
+          <!-- 右栏：译文输出（原地扩展 .box-head） -->
+          <div class="studio-box">
+            <div class="box-head">
+              <span>本地输出</span>
+              <div class="box-head-controls">
+                <span class="badge" id="dir-badge">自动判定</span>
+                <button
+                  type="button"
+                  class="btn btn-sm swap-btn"
+                  id="btn-swap"
+                  aria-pressed="false"
+                  title="手动反转并临时锁定翻译方向，再次点击或清空输入恢复自动"
+                >
+                  <svg class="ic ic-sm"><use href="#i-swap"/></svg>
+                  <span id="swap-label">互换</span>
+                </button>
+                <select id="lang-pair-select" aria-label="翻译语言对">
+                  <option value="zh-en" selected>中 ⇄ 英</option>
+                </select>
+              </div>
+            </div>
+
+            <div class="box-body" id="out-body"></div>
+
+            <div class="box-foot">
+              <span class="mono" id="out-meta"></span>
+              <div class="box-foot-right">
+                <span class="saved" id="copy-feedback" hidden>已复制</span>
+                <button type="button" class="btn primary btn-sm" id="btn-copy-out">
+                  <svg class="ic ic-sm"><use href="#i-copy"/></svg>复制译文
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- 视图 2：设置页（沿用 setup-panel.js renderShot 结构） -->
+      <section class="studio-panel" id="panel-setup" hidden>
+        <div class="setup-tabs" role="tablist" aria-label="设置分类">
+          <button type="button" role="tab" aria-selected="false">模型与服务<span class="dot ok" aria-hidden="true"></span></button>
+          <button type="button" role="tab" aria-selected="false">语音与润色</button>
+          <button type="button" role="tab" aria-selected="true" class="on">截图翻译</button>
+          <button type="button" role="tab" aria-selected="false">快捷键</button>
+          <button type="button" role="tab" aria-selected="false">开放接口</button>
+          <button type="button" role="tab" aria-selected="false">系统检测</button>
+        </div>
+
+        <div class="setup-pane" role="tabpanel">
+          <div class="setup-section">
+            <h2>翻译设置</h2>
+            <div class="rows">
+              <div class="row">
+                <div class="row-main">
+                  <div class="row-title">翻译语言对</div>
+                  <div class="row-sub">工作台文本翻译与截屏翻译（Ctrl+Alt+X）共用。后端按中英文字符占比自动判定源语言与译文方向，本地 qwen3.5:4b 离线运行。</div>
+                </div>
+                <select class="field" id="setup-pair-select" aria-label="翻译语言对">
+                  <option value="zh-en" selected>中 ⇄ 英</option>
+                </select>
+              </div>
+              <div class="row">
+                <div class="row-main">
+                  <div class="row-title">停止输入 1 秒后自动翻译</div>
+                  <div class="row-sub">仅作用于工作台文本输入框。默认开启；关闭后需按 Ctrl+Enter 或点击「立即翻译」触发。</div>
+                </div>
+                <button
+                  type="button"
+                  class="switch"
+                  role="switch"
+                  id="setup-auto-switch"
+                  aria-checked="true"
+                  aria-label="停止输入 1 秒后自动翻译"
+                ></button>
+              </div>
+            </div>
+            <div class="actions">
+              <span class="saved" id="setup-saved" hidden>已保存</span>
+            </div>
+          </div>
+        </div>
+      </section>
+    </div>
+  </div>
+
+  <!-- 业务回调观察（供评审验证交互契约） -->
+  <div class="note-card">
+    <h3>前端触发动作日志（模拟后端响应 · 方向仅由后端判定并返回）</h3>
+    <div class="event-log" id="event-log"></div>
+  </div>
+
+  <!-- 模板元信息（供方案与契约制定） -->
+  <div class="notes-grid">
+    <div class="note-card">
+      <h3>显示的数据</h3>
+      <ul>
+        <li><strong>配置态</strong>：<code>translate_lang_pair</code>（当前 <code>"zh-en"</code>，展示「中 ⇄ 英」）、<code>translate_auto_enabled</code>（默认 <code>true</code>）、<code>langPairOptions</code>（预留扩展）。</li>
+        <li><strong>后端译文态</strong>：<code>text</code>、<code>source_lang</code>、<code>target_lang</code>、<code>direction_mode</code>（<code>auto</code> / <code>manual</code>）、<code>chunks</code>（长文本分段数）、<code>elapsedMs</code>、<code>error/message</code>。方向完全以服务端返回为准。</li>
+        <li><strong>本地 UI 态</strong>：<code>phase</code>（空/加载/结果/错误）、<code>debouncePending</code>、<code>manualOverride</code>（null 或反转方向）。</li>
+      </ul>
+    </div>
+    <div class="note-card">
+      <h3>触发的动作</h3>
+      <ul>
+        <li><strong>停顿 1s / Ctrl+Enter / 立即翻译</strong> → <code>onTranslateText({ text, lang_pair, source_lang?, target_lang? })</code>；空输入不发请求，单调序号丢弃过期响应。</li>
+        <li><strong>点击 ⇄ 互换</strong> → 临时锁定反转方向并立即重译；<strong>再次点击 ⇄</strong> 或 <strong>清空输入</strong> 恢复自动判定。</li>
+        <li><strong>设置页开关 / 语言对</strong> → <code>onToggleAutoTranslate(bool)</code> / <code>onChangeLangPair(pair)</code> 写入配置。</li>
+      </ul>
+    </div>
+    <div class="note-card">
+      <h3>基于既有文件（最小改动）</h3>
+      <ul>
+        <li><code>static/v3/css/theme.css</code>：零新增颜色，完全复用暗/亮双主题与 <code>color-scheme</code> 下拉框。</li>
+        <li><code>static/v3/css/studio.css</code>：沿用 <code>.studio-split</code> / <code>.box-head</code>，仅增 <code>.box-head-controls</code> 与 <code>.swap-btn</code>。</li>
+        <li><code>static/v3/js/home.js</code>：右侧 <code>.box-head</code> 替换旧单一目标语言下拉，接入防抖与互换回调。</li>
+        <li><code>static/v3/js/setup-panel.js</code>：<code>renderShot</code> 替换为语言对下拉 + 自动翻译 <code>.switch</code> 行。</li>
+      </ul>
+    </div>
+  </div>
+</main>
+
+<script>
+(function () {
+  "use strict";
+
+  var SAMPLES = {
+    zh_en: {
+      source: "本地使用 Ollama 运行 qwen3.5:4b 时，如果上下文窗口 num_ctx 保持默认 2048，长段落翻译会触发截断且不报错。改为按 token 预算自动分段后，既能保持语义连贯，也能在失败时如实提示。",
+      result: "When running qwen3.5:4b locally with Ollama, keeping num_ctx at the default 2048 causes long-paragraph translations to be silently truncated without raising an error. Splitting input into segments within a token budget preserves semantic continuity and reports failures accurately when they occur.",
+      source_lang: "zh",
+      target_lang: "en",
+      chunks: 1,
+      elapsedMs: 860
+    },
+    en_zh: {
+      source: "In v3.5, both the Workbench text panel and Screenshot Translate (Ctrl+Alt+X) share one language-pair rule. Direction is decided by the backend, while the swap button temporarily locks the reversed direction until clicked again or cleared.",
+      result: "在 v3.5 中，工作台文本面板与截屏翻译（Ctrl+Alt+X）共用同一套语言对规则。翻译方向由后端判定，手动互换按钮可临时锁定反转方向，再次点击或清空输入即可恢复自动判定。",
+      source_lang: "en",
+      target_lang: "zh",
+      chunks: 1,
+      elapsedMs: 940
+    },
+    long: {
+      source: "第一段：本次本地翻译优化将工作台文本翻译与截屏翻译（Ctrl+Alt+X）统一为同一套语言对配置，当前首先提供「中 ⇄ 英」双向互译，并在数据结构层面预留后续扩展日文、韩文等语言对的槽位，不再维护旧版单一目标语言字段。\n\n第二段：中英混合文本的源语言判定统一收口到后端纯逻辑层，依据中英文有效字符占比判定主语种；前端只呈现服务端返回的方向结论，绝不在浏览器侧重复计算。用户在工作台点击 ⇄ 互换按钮可临时锁定反转方向，再次点击或清空输入后立即恢复自动模式。\n\n第三段：针对此前长文本命中 Ollama num_ctx=2048 导致静默截断的问题，后端改为按 token 预算自动分段并顺序拼接，严禁丢弃 done_reason。前端结果框保持固定视口高度并支持流畅纵向滚动，底部模型信息、分段计数与「复制译文」按钮始终固定可见。\n\n第四段：工作台默认启用「停止输入 1 秒后自动翻译」，空输入不发请求，连续编辑时以单调递增序号丢弃过期响应；用户可随时按 Ctrl+Enter 立即提交，或在设置页关闭自动翻译开关。",
+      result: "Paragraph 1: This local translation upgrade unifies the workbench text panel and Screenshot Translate (Ctrl+Alt+X) under a single language-pair configuration. It launches with bidirectional Chinese-English (zh ⇄ en) while keeping the schema extensible for future pairs, removing the legacy single target-language field without dual-track fallback.\n\nParagraph 2: Source-language detection for mixed Chinese-English input lives exclusively in the backend logic layer, determined by the dominant CJK vs. Latin character ratio. The frontend renders only the authoritative direction returned by the server and never recomputes it locally. Clicking the ⇄ button temporarily locks the reversed direction; clicking it again or clearing the input immediately restores auto mode.\n\nParagraph 3: To eliminate silent truncation previously triggered when long passages hit Ollama's num_ctx=2048 limit, the backend now splits long input according to a strict token budget and checks done_reason on every chunk. The output pane preserves a steady viewport height with smooth vertical scrolling while keeping model metadata, segment count, and the Copy Translation button pinned at the bottom.\n\nParagraph 4: Auto-translation after a 1-second typing pause is enabled by default. Blank input never fires a request, and monotonic request sequence IDs discard stale out-of-order responses. Users can still press Ctrl+Enter to translate immediately or turn auto-translation off in Settings.",
+      source_lang: "zh",
+      target_lang: "en",
+      chunks: 3,
+      elapsedMs: 2840
+    }
+  };
+
+  var LANG_NAME = { zh: "中", en: "英" };
+  var state = {
+    view: "translate",
+    theme: "dark",
+    autoEnabled: true,
+    langPair: "zh-en",
+    phase: "result",
+    sourceText: SAMPLES.zh_en.source,
+    translatedText: SAMPLES.zh_en.result,
+    detectedSource: "zh",
+    detectedTarget: "en",
+    manualOverride: null,
+    debouncePending: false,
+    debounceLeftMs: 0,
+    chunks: 1,
+    elapsedMs: SAMPLES.zh_en.elapsedMs,
+    errorText: "",
+    copied: false,
+    setupSaved: false,
+    reqSeq: 1
+  };
+
+  var debounceTimer = null;
+  var mockNetTimer = null;
+  var logs = [];
+
+  var el = {
+    controls: document.getElementById("preview-controls"),
+    btnTheme: document.getElementById("btn-theme"),
+    railThemeBtn: document.getElementById("rail-theme-btn"),
+    railThemeLabel: document.getElementById("rail-theme-label"),
+    railThemeBadge: document.getElementById("rail-theme-badge"),
+    navTranslate: document.getElementById("nav-translate"),
+    navSetup: document.getElementById("nav-setup"),
+    pageTitle: document.getElementById("page-title"),
+    pageSub: document.getElementById("page-sub"),
+    headTranslate: document.getElementById("head-actions-translate"),
+    headSetup: document.getElementById("head-actions-setup"),
+    panelTranslate: document.getElementById("panel-translate"),
+    panelSetup: document.getElementById("panel-setup"),
+    srcInput: document.getElementById("src-input"),
+    srcMeta: document.getElementById("src-meta"),
+    autoHint: document.getElementById("auto-hint"),
+    dirBadge: document.getElementById("dir-badge"),
+    btnSwap: document.getElementById("btn-swap"),
+    swapLabel: document.getElementById("swap-label"),
+    outBody: document.getElementById("out-body"),
+    outMeta: document.getElementById("out-meta"),
+    copyFeedback: document.getElementById("copy-feedback"),
+    btnCopyOut: document.getElementById("btn-copy-out"),
+    btnCopySrc: document.getElementById("btn-copy-src"),
+    btnClear: document.getElementById("btn-clear"),
+    btnSubmit: document.getElementById("btn-submit"),
+    setupAutoSwitch: document.getElementById("setup-auto-switch"),
+    setupSaved: document.getElementById("setup-saved"),
+    eventLog: document.getElementById("event-log")
+  };
+
+  function logEvent(msg) {
+    var now = new Date();
+    var ts = String(now.getHours()).padStart(2, "0") + ":" + String(now.getMinutes()).padStart(2, "0") + ":" + String(now.getSeconds()).padStart(2, "0");
+    logs.unshift("[" + ts + "] " + msg);
+    if (logs.length > 14) logs.length = 14;
+    el.eventLog.textContent = logs.join("\n");
+  }
+
+  function clearTimers() {
+    if (debounceTimer) { clearTimeout(debounceTimer); debounceTimer = null; }
+    if (mockNetTimer) { clearTimeout(mockNetTimer); mockNetTimer = null; }
+  }
+
+  /* 仅用于静态模板交互演示：模拟后端按中英文字符占比判定方向并返回结果（真实代码在后端 logic 层执行） */
+  function mockBackendTranslate(text, override, trigger) {
+    clearTimers();
+    var seq = ++state.reqSeq;
+    state.debouncePending = false;
+    state.phase = "loading";
+    state.errorText = "";
+    state.copied = false;
+    logEvent("onTranslateText({ seq: " + seq + ", trigger: \"" + trigger + "\", lang_pair: \"" + state.langPair + "\"" + (override ? ", source_lang: \"" + override.source + "\", target_lang: \"" + override.target + "\"" : " /* 自动判定 */") + ", chars: " + text.length + " })");
+    render();
+
+    mockNetTimer = setTimeout(function () {
+      if (seq !== state.reqSeq) return;
+      var zhCount = (text.match(/[\u4e00-\u9fff]/g) || []).length;
+      var enCount = (text.match(/[A-Za-z]/g) || []).length;
+      var src = override ? override.source : (zhCount >= enCount ? "zh" : "en");
+      var tgt = override ? override.target : (src === "zh" ? "en" : "zh");
+      var outText = "";
+      if (text.trim() === SAMPLES.zh_en.source) outText = src === "zh" ? SAMPLES.zh_en.result : "（手动锁定英→中模拟译文）" + SAMPLES.zh_en.source;
+      else if (text.trim() === SAMPLES.en_zh.source) outText = src === "en" ? SAMPLES.en_zh.result : "（手动锁定中→英模拟译文）" + SAMPLES.en_zh.source;
+      else if (text.trim() === SAMPLES.long.source) outText = SAMPLES.long.result;
+      else outText = "[后端模拟译文 · " + LANG_NAME[src] + " → " + LANG_NAME[tgt] + "] " + text;
+
+      state.phase = "result";
+      state.detectedSource = src;
+      state.detectedTarget = tgt;
+      state.translatedText = outText;
+      state.chunks = text.length > 300 ? 3 : 1;
+      state.elapsedMs = text.length > 300 ? 2420 : 780;
+      logEvent("← backend TranslateResponse({ seq: " + seq + ", source_lang: \"" + src + "\", target_lang: \"" + tgt + "\", direction_mode: \"" + (override ? "manual" : "auto") + "\", chunks: " + state.chunks + " })");
+      render();
+    }, 520);
+  }
+
+  function applyTheme(theme) {
+    state.theme = theme === "light" ? "light" : "dark";
+    document.documentElement.dataset.theme = state.theme;
+    var isDark = state.theme === "dark";
+    el.btnTheme.textContent = isDark ? "主题：深色（切浅色）" : "主题：浅色（切深色）";
+    el.railThemeBadge.textContent = isDark ? "深色" : "浅色";
+    el.railThemeLabel.innerHTML = '<svg class="ic"><use href="#i-' + (isDark ? "moon" : "sun") + '"/></svg>外观主题';
+  }
+
+  function setPresetButton(name) {
+    var btns = el.controls.querySelectorAll("button[data-preset]");
+    for (var i = 0; i < btns.length; i++) {
+      btns[i].classList.toggle("on", btns[i].dataset.preset === name);
+    }
+  }
+
+  function applyPreset(name) {
+    clearTimers();
+    state.copied = false;
+    state.setupSaved = false;
+    setPresetButton(name);
+
+    if (name === "setup") {
+      state.view = "setup";
+      logEvent("切换预览：设置页 · 截图翻译（翻译语言对 + 自动翻译开关）");
+      render();
+      return;
+    }
+
+    state.view = "translate";
+    if (name === "empty") {
+      state.phase = "empty";
+      state.sourceText = "";
+      state.translatedText = "";
+      state.detectedSource = null;
+      state.detectedTarget = null;
+      state.manualOverride = null;
+      state.debouncePending = false;
+      state.errorText = "";
+      logEvent("状态切换：空态（未发请求，方向为自动判定）");
+    } else if (name === "debounce") {
+      state.autoEnabled = true;
+      state.phase = "empty";
+      state.sourceText = "工作台支持停止输入 1 秒后自动翻译，空输入不发请求，快速连续输入只显示最新结果";
+      state.translatedText = "";
+      state.detectedSource = null;
+      state.detectedTarget = null;
+      state.manualOverride = null;
+      state.debouncePending = true;
+      state.debounceLeftMs = 600;
+      state.errorText = "";
+      logEvent("状态切换：输入停顿自动触发（防抖 1s 倒计时中，尚未发送请求）");
+    } else if (name === "auto_zh_en") {
+      state.phase = "result";
+      state.sourceText = SAMPLES.zh_en.source;
+      state.translatedText = SAMPLES.zh_en.result;
+      state.detectedSource = "zh";
+      state.detectedTarget = "en";
+      state.manualOverride = null;
+      state.debouncePending = false;
+      state.chunks = 1;
+      state.elapsedMs = SAMPLES.zh_en.elapsedMs;
+      state.errorText = "";
+      logEvent("状态切换：自动判定 中→英（混合文本由后端按字符占比判定）");
+    } else if (name === "manual_en_zh") {
+      state.phase = "result";
+      state.sourceText = SAMPLES.en_zh.source;
+      state.translatedText = SAMPLES.en_zh.result;
+      state.detectedSource = "en";
+      state.detectedTarget = "zh";
+      state.manualOverride = { source: "en", target: "zh" };
+      state.debouncePending = false;
+      state.chunks = 1;
+      state.elapsedMs = SAMPLES.en_zh.elapsedMs;
+      state.errorText = "";
+      logEvent("状态切换：手动锁定 英→中（点击 ⇄ 临时锁定；再次点击或清空恢复自动）");
+    } else if (name === "long_text") {
+      state.phase = "result";
+      state.sourceText = SAMPLES.long.source;
+      state.translatedText = SAMPLES.long.result;
+      state.detectedSource = "zh";
+      state.detectedTarget = "en";
+      state.manualOverride = null;
+      state.debouncePending = false;
+      state.chunks = 3;
+      state.elapsedMs = SAMPLES.long.elapsedMs;
+      state.errorText = "";
+      logEvent("状态切换：超长译文（后端按预算分 3 段完整返回，不截断，译文栏独立滚动）");
+    } else if (name === "loading") {
+      state.phase = "loading";
+      state.sourceText = SAMPLES.long.source;
+      state.translatedText = "";
+      state.debouncePending = false;
+      state.errorText = "";
+      logEvent("状态切换：翻译中（长文本分段处理中，保持区域高度不抖动）");
+    } else if (name === "error") {
+      state.phase = "error";
+      state.sourceText = SAMPLES.zh_en.source;
+      state.translatedText = "";
+      state.debouncePending = false;
+      state.errorText = "翻译失败：Ollama 本地模型响应超时（translate_failed），本次未返回截断译文，请确认服务正常后按 Ctrl+Enter 重试。";
+      logEvent("状态切换：失败态（错误如实直达用户，严禁降级或返回半截译文）");
+    }
+    render();
+  }
+
+  function render() {
+    var isSetup = state.view === "setup";
+    el.navTranslate.classList.toggle("on", !isSetup);
+    el.navSetup.classList.toggle("on", isSetup);
+    el.panelTranslate.hidden = isSetup;
+    el.panelSetup.hidden = !isSetup;
+    el.headTranslate.hidden = isSetup;
+    el.headSetup.hidden = !isSetup;
+
+    if (isSetup) {
+      el.pageTitle.textContent = "模型与热键设置";
+      el.pageSub.textContent = "全部就绪 · 按住 ctrl+alt+z 说话，ctrl+alt+x 截图翻译，ctrl+alt+o 纯 OCR 识别，ctrl+alt+a 截屏标注";
+      el.setupAutoSwitch.setAttribute("aria-checked", String(state.autoEnabled));
+      el.setupSaved.hidden = !state.setupSaved;
+      return;
+    }
+
+    el.pageTitle.textContent = "本地翻译与 OCR 工作台";
+    el.pageSub.textContent = state.autoEnabled
+      ? "停止输入 1 秒自动判定语言并翻译 · Ctrl+V 粘贴截图自动提取文字并翻译 · 本地离线运行"
+      : "自动翻译已关闭 · 按 Ctrl+Enter 或点击「立即翻译」触发 · Ctrl+V 粘贴截图自动识别";
+
+    if (el.srcInput.value !== state.sourceText) {
+      el.srcInput.value = state.sourceText;
+    }
+    var trimmed = state.sourceText.trim();
+    el.srcMeta.textContent = "支持拖入图片或 Ctrl+V 粘贴截图 · " + trimmed.length + " 字";
+    el.btnCopySrc.disabled = !trimmed;
+    el.btnSubmit.disabled = state.phase === "loading";
+    el.btnSubmit.textContent = state.phase === "loading" ? "处理中…" : "立即翻译 (Ctrl+Enter)";
+    el.btnSubmit.className = (!state.autoEnabled && state.phase !== "result") ? "btn primary" : "btn";
+
+    if (state.debouncePending) {
+      el.autoHint.className = "auto-hint pending";
+      el.autoHint.innerHTML = '<span class="auto-pulse" aria-hidden="true"></span>等待停顿 · 1 秒后自动翻译…';
+    } else if (state.autoEnabled) {
+      el.autoHint.className = "auto-hint";
+      el.autoHint.textContent = "停顿 1s 自动翻译 · Ctrl+Enter 立即";
+    } else {
+      el.autoHint.className = "auto-hint";
+      el.autoHint.textContent = "自动翻译已关闭 · Ctrl+Enter 提交";
+    }
+
+    /* 方向徽章与 ⇄ 互换按钮：颜色 + 图标 + 文字双编码 */
+    var isLocked = !!state.manualOverride;
+    el.btnSwap.disabled = !trimmed || state.phase === "loading";
+    el.btnSwap.setAttribute("aria-pressed", String(isLocked));
+    el.swapLabel.textContent = isLocked ? "恢复自动" : "互换";
+
+    if (isLocked) {
+      el.dirBadge.className = "badge warn";
+      el.dirBadge.innerHTML = '<svg class="ic ic-sm" style="width:12px;height:12px"><use href="#i-lock"/></svg>手动：' + LANG_NAME[state.manualOverride.source] + " → " + LANG_NAME[state.manualOverride.target];
+    } else if (state.detectedSource && state.detectedTarget && state.phase === "result") {
+      el.dirBadge.className = "badge accent";
+      el.dirBadge.textContent = "自动：" + LANG_NAME[state.detectedSource] + " → " + LANG_NAME[state.detectedTarget];
+    } else {
+      el.dirBadge.className = "badge";
+      el.dirBadge.textContent = "自动判定";
+    }
+
+    /* 输出内容四态 */
+    el.outBody.innerHTML = "";
+    if (state.phase === "loading") {
+      var loadingHint = trimmed.length > 260
+        ? "正在本地分段翻译（长文本不截断）…"
+        : "正在本地判定方向并翻译…";
+      el.outBody.innerHTML =
+        '<div class="box-loading" role="status" aria-live="polite">' +
+          '<span>' + loadingHint + '</span>' +
+          '<div class="progress" aria-hidden="true"><i></i></div>' +
+        '</div>';
+    } else if (state.phase === "error") {
+      el.outBody.innerHTML =
+        '<div class="box-error" role="alert">' +
+          '<svg class="ic"><use href="#i-alert"/></svg>' +
+          '<span>' + state.errorText + '</span>' +
+        '</div>';
+    } else if (state.phase === "result") {
+      var resNode = document.createElement("div");
+      resNode.className = "studio-result-text";
+      resNode.textContent = state.translatedText;
+      el.outBody.appendChild(resNode);
+    } else if (state.debouncePending) {
+      el.outBody.innerHTML =
+        '<div class="box-empty">检测到输入变化，停止输入满 1 秒后将自动请求本地翻译。<br/>也可立即按 <span class="mono">Ctrl+Enter</span> 提交。</div>';
+    } else {
+      el.outBody.innerHTML =
+        '<div class="box-empty">' +
+        (state.autoEnabled
+          ? "在左侧输入或粘贴文字，停止输入 1 秒后自动识别语言并翻译；也可按 Ctrl+V 粘贴截图。"
+          : "自动翻译已关闭。在左侧输入文字后按 Ctrl+Enter 或点击「立即翻译」触发。") +
+        '</div>';
+    }
+
+    if (state.phase === "result") {
+      var meta = ["qwen3.5:4b", state.elapsedMs + "ms"];
+      if (state.chunks > 1) meta.push("共 " + state.chunks + " 段");
+      el.outMeta.textContent = meta.join(" · ");
+    } else {
+      el.outMeta.textContent = "";
+    }
+
+    el.copyFeedback.hidden = !state.copied;
+    el.btnCopyOut.disabled = state.phase !== "result" || !state.translatedText;
+  }
+
+  /* 交互绑定 */
+  el.controls.addEventListener("click", function (ev) {
+    var btn = ev.target.closest("button[data-preset]");
+    if (btn) applyPreset(btn.dataset.preset);
+  });
+
+  el.btnTheme.addEventListener("click", function () {
+    applyTheme(state.theme === "dark" ? "light" : "dark");
+  });
+  el.railThemeBtn.addEventListener("click", function () {
+    applyTheme(state.theme === "dark" ? "light" : "dark");
+  });
+
+  el.navTranslate.addEventListener("click", function () {
+    state.view = "translate";
+    setPresetButton("");
+    render();
+  });
+  el.navSetup.addEventListener("click", function () {
+    applyPreset("setup");
+  });
+
+  el.srcInput.addEventListener("input", function () {
+    state.sourceText = el.srcInput.value;
+    state.copied = false;
+    clearTimers();
+    var trimmed = state.sourceText.trim();
+    if (!trimmed) {
+      state.phase = "empty";
+      state.translatedText = "";
+      state.detectedSource = null;
+      state.detectedTarget = null;
+      state.manualOverride = null;
+      state.debouncePending = false;
+      state.errorText = "";
+      logEvent("输入清空 → 取消防抖并恢复自动方向判定（不发请求）");
+      render();
+      return;
+    }
+    if (state.autoEnabled) {
+      state.debouncePending = true;
+      render();
+      debounceTimer = setTimeout(function () {
+        mockBackendTranslate(state.sourceText.trim(), state.manualOverride, "auto_1s");
+      }, 1000);
+    } else {
+      state.debouncePending = false;
+      render();
+    }
+  });
+
+  el.srcInput.addEventListener("keydown", function (ev) {
+    if ((ev.ctrlKey || ev.metaKey) && ev.key === "Enter") {
+      ev.preventDefault();
+      el.btnSubmit.click();
+    }
+  });
+
+  el.btnSubmit.addEventListener("click", function () {
+    var trimmed = state.sourceText.trim();
+    if (!trimmed) {
+      state.phase = "error";
+      state.errorText = "请先输入或粘贴需要翻译的文字，或按 Ctrl+V 粘贴截图。";
+      render();
+      return;
+    }
+    mockBackendTranslate(trimmed, state.manualOverride, "manual");
+  });
+
+  el.btnSwap.addEventListener("click", function () {
+    var trimmed = state.sourceText.trim();
+    if (!trimmed) return;
+    if (state.manualOverride) {
+      state.manualOverride = null;
+      logEvent("再次点击 ⇄ → 解除手动锁定，恢复后端自动判定");
+      mockBackendTranslate(trimmed, null, "restore_auto");
+    } else {
+      var curSrc = state.detectedSource || "zh";
+      var curTgt = state.detectedTarget || "en";
+      state.manualOverride = { source: curTgt, target: curSrc };
+      logEvent("点击 ⇄ → 临时锁定反转方向 " + LANG_NAME[curTgt] + " → " + LANG_NAME[curSrc]);
+      mockBackendTranslate(trimmed, state.manualOverride, "swap_lock");
+    }
+  });
+
+  el.btnClear.addEventListener("click", function () {
+    applyPreset("empty");
+    logEvent("点击「清空」→ 清空输入/输出并恢复自动方向判定");
+  });
+
+  el.btnCopyOut.addEventListener("click", function () {
+    state.copied = true;
+    logEvent("onCopy({ kind: \"translation\", chars: " + state.translatedText.length + " })");
+    render();
+  });
+  el.btnCopySrc.addEventListener("click", function () {
+    logEvent("onCopy({ kind: \"source\", chars: " + state.sourceText.length + " })");
+  });
+
+  el.setupAutoSwitch.addEventListener("click", function () {
+    state.autoEnabled = !state.autoEnabled;
+    state.setupSaved = true;
+    logEvent("onToggleAutoTranslate(" + state.autoEnabled + ") → POST /api/v1/config");
+    render();
+  });
+
+  var qs = new URLSearchParams(window.location.search);
+  applyTheme(qs.get("theme") || "dark");
+  applyPreset(qs.get("preset") || "auto_zh_en");
+})();
+</script>
+</body>
+</html>

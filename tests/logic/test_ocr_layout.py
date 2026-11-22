@@ -8,7 +8,7 @@ import pytest
 from PIL import Image, ImageDraw
 
 from _contracts import ErrorCode, LogicError
-from _ocr import OCR_BORDER_PX
+from _ocr import OCR_BORDER_PX, OCR_TIMEOUT_S
 from _ocr_layout import extract_ocr_layout, sample_ring_colors
 
 
@@ -32,7 +32,7 @@ def test_coordinates_undo_padding_and_upscale_and_blocks_carry_lines():
         return pad + scale * v
 
     def fake_data_runner(ocr_img: Image.Image, lang: str, timeout: int = 0) -> dict:
-        assert timeout == 15
+        assert timeout == OCR_TIMEOUT_S
         assert ocr_img.mode == "L" and ocr_img.size == (320 * scale + 2 * pad, 200 * scale + 2 * pad)
         # 模拟：
         # 1) 第 1、2 行相邻中文（同一块、逐行保留，去汉字间空格）

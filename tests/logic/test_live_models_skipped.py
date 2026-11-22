@@ -12,7 +12,7 @@ from _ocr import DEFAULT_OCR_LANG, get_cached_languages
 from _ocr_layout import extract_ocr_layout
 from _ollama import DEFAULT_OLLAMA_BASE_URL, OllamaClient
 from _ocr_text import is_cjk_or_fullwidth
-from _translate import translate_blocks
+from _translate import resolve_translation_direction, translate_blocks
 from tests.logic.ocr_samples import all_samples, fonts_missing
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -89,10 +89,18 @@ def test_real_qwen35_4b_translates_ocr_screens_in_budget_batches(name: str) -> N
                         event_hooks={"request": [on_request], "response": [on_response]})
     sample = all_samples()[name]
     t0 = time.perf_counter()
-    _w, _h, _text, blocks = extract_ocr_layout(sample.png)
+    _w, _h, ocr_text, blocks = extract_ocr_layout(sample.png)
     ocr_s = time.perf_counter() - t0
+    direction = resolve_translation_direction(ocr_text)
     with OllamaClient(base_url=url, client=http) as client:
-        done = translate_blocks(blocks, target_lang="zh", client=client, model="qwen3.5:4b")
+        done = translate_blocks(
+            blocks,
+            source_lang=direction.source_lang,
+            target_lang=direction.target_lang,
+            lang_pair=direction.lang_pair,
+            client=client,
+            model="qwen3.5:4b",
+        )
     total_s = time.perf_counter() - t0
     http.close()
     print(f"\n[{name}] words={sample.words} OCR={ocr_s:.2f}s total={total_s:.2f}s batches={len(replies)} {replies}")

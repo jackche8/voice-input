@@ -7,6 +7,7 @@ from _contracts import (
     ASR_STREAMING_BLOCKERS,
     AckResult,
     AppConfig,
+    AppConfigUpdate,
     ComponentName,
     ComponentReport,
     ComponentState,
@@ -40,9 +41,13 @@ from _contracts import (
     SessionPartialEvent,
     SessionSSEEventEnvelope,
     SttResponse,
+    TranslateDirectionMode,
+    TranslateRequest,
     TranslateResponse,
     UtteranceResendNeedsConfirmation,
     UtteranceResendRequest,
+    validate_direction_override,
+    validate_lang_pair,
     UtteranceSource,
     build_openapi_skeleton,
     contract_models,
@@ -225,7 +230,43 @@ def test_job_state_values_and_record_focus_is_per_job():
 def test_success_bodies_are_explicit_ok():
     assert SttResponse(text="a").ok is True
     assert PolishResponse(text="a").ok is True
-    assert TranslateResponse(text="b", target_lang="en").ok is True
+    assert (
+        TranslateResponse(
+            text="b",
+            lang_pair="zh-en",
+            source_lang="zh",
+            target_lang="en",
+            direction_mode=TranslateDirectionMode.auto,
+        ).ok
+        is True
+    )
+
+
+def test_translate_request_and_lang_pair_single_source_validation():
+    assert validate_lang_pair(" ZH-EN ") == "zh-en"
+    assert validate_direction_override("zh-en", None, None) == ("zh-en", None)
+    assert validate_direction_override(" ZH-EN ", " EN ", " ZH ") == ("zh-en", ("en", "zh"))
+
+    req = TranslateRequest(text="你好", lang_pair=" ZH-EN ", source_lang=" ZH ", target_lang=" EN ")
+    assert (req.lang_pair, req.source_lang, req.target_lang) == ("zh-en", "zh", "en")
+
+    for bad_kwargs in (
+        {"text": "   "},
+        {"text": "hi", "lang_pair": "fr-de"},
+        {"text": "hi", "lang_pair": ""},
+        {"text": "hi", "source_lang": "zh"},
+        {"text": "hi", "target_lang": "zh"},
+        {"text": "hi", "source_lang": "zh", "target_lang": "   "},
+        {"text": "hi", "source_lang": "zh", "target_lang": "zh"},
+        {"text": "hi", "source_lang": "zh", "target_lang": "ja"},
+    ):
+        with pytest.raises(ValidationError):
+            TranslateRequest(**bad_kwargs)
+
+    with pytest.raises(ValidationError):
+        AppConfig(translate_lang_pair="fr-de")
+    with pytest.raises(ValidationError):
+        AppConfigUpdate(translate_target_lang="en")  # type: ignore[call-arg]
 
 
 def test_product_events_are_typed_not_style_text():

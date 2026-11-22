@@ -32,14 +32,45 @@ class _FakeTransport(httpx.BaseTransport):
             return httpx.Response(200, json={"session_id": f"sess:{payload.get('context', '')}"})
         if request.method == "POST" and url.endswith("/api/v1/ocr-inplace"):
             raw = request.read().decode("utf-8", errors="ignore")
-            assert 'name="target_lang"' in raw and 'name="image"' in raw
+            assert 'name="mode"' in raw and 'name="image"' in raw
+            if 'name="mode"\r\n\r\nraw' in raw:
+                return httpx.Response(
+                    200,
+                    json={
+                        "ok": True,
+                        "text": "Hello World",
+                        "ocr_text": "Hello World",
+                        "mode": "raw",
+                        "lang_pair": None,
+                        "source_lang": None,
+                        "target_lang": None,
+                        "direction_mode": None,
+                        "image_width": 200,
+                        "image_height": 80,
+                        "blocks": [
+                            {
+                                "bbox": [10, 10, 120, 30],
+                                "lines": [{"bbox": [10, 10, 120, 30], "text": "Hello World", "soft_wrap": False}],
+                                "ocr_text": "Hello World",
+                                "translated_text": "Hello World",
+                                "bg_color": "#ffffff",
+                                "fg_color": "#0f172a",
+                            }
+                        ],
+                    },
+                )
+            assert 'name="lang_pair"' in raw
             return httpx.Response(
                 200,
                 json={
                     "ok": True,
                     "text": "你好世界",
                     "ocr_text": "Hello World",
+                    "mode": "translate",
+                    "lang_pair": "zh-en",
+                    "source_lang": "en",
                     "target_lang": "zh",
+                    "direction_mode": "auto",
                     "image_width": 200,
                     "image_height": 80,
                     "blocks": [
@@ -113,9 +144,13 @@ def test_desktop_api_context_ocr_inplace_sse_and_no_proxy(monkeypatch):
         body2 = json.loads(transport.requests[-1].content.decode())
         assert body2 == {"language": "zh", "context": "PySide6, Qwen3-ASR"}
 
-        res = api.ocr_inplace(b"\x89PNG\r\n\x1a\nfake", target_lang="zh", lang="chi_sim+eng")
+        res = api.ocr_inplace(b"\x89PNG\r\n\x1a\nfake", mode="translate", lang_pair="zh-en", lang="chi_sim+eng")
         assert res["text"] == "你好世界" and res["ocr_text"] == "Hello World"
+        assert res["mode"] == "translate" and res["lang_pair"] == "zh-en" and res["direction_mode"] == "auto"
         assert len(res["blocks"]) == 1 and res["blocks"][0]["bbox"] == [10, 10, 120, 30]
+
+        raw_res = api.ocr_inplace(b"\x89PNG\r\n\x1a\nfake", mode="raw")
+        assert raw_res["mode"] == "raw" and raw_res["text"] == "Hello World" and raw_res["lang_pair"] is None
 
         stop = threading.Event()
         events = list(api.iter_product_events(stop_event=stop))

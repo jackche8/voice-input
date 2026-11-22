@@ -17,7 +17,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Literal, Protocol
 
-from _contracts import ErrorCode, OcrTextBlock
+from _contracts import DEFAULT_TRANSLATE_LANG_PAIR, ErrorCode, OcrTextBlock
 from _desktop.api import api_error_code, api_error_reason
 from _desktop.status import PlatformStatus
 
@@ -463,8 +463,10 @@ class CaptureFlow:
     def _run_inplace(self, gen: int, mode: CaptureMode, overlay: OverlayHandle, cropped_png: bytes) -> None:
         """后台：识别（翻译模式再翻译）后把结果或失败原因交给浮窗；浮窗已关或已被新一次截屏取代则丢弃。"""
         try:
-            target_lang = self._target_lang() if mode == "translate" else "raw"
-            resp = self.api.ocr_inplace(cropped_png, target_lang=target_lang)
+            if mode == "translate":
+                resp = self.api.ocr_inplace(cropped_png, mode="translate", lang_pair=self._lang_pair())
+            else:
+                resp = self.api.ocr_inplace(cropped_png, mode="raw")
             blocks = _parse_blocks(resp["blocks"])
             full_text, full_ocr = str(resp["text"]), str(resp["ocr_text"])
         except Exception as exc:
@@ -476,9 +478,9 @@ class CaptureFlow:
             return
         self._apply_to_overlay(gen, overlay, lambda: overlay.set_result(blocks, full_text, full_ocr))
 
-    def _target_lang(self) -> str:
+    def _lang_pair(self) -> str:
         cfg = self.api.get_config() or {}
-        return str(cfg.get("translate_target_lang") or "zh").strip() or "zh"
+        return str(cfg.get("translate_lang_pair") or DEFAULT_TRANSLATE_LANG_PAIR).strip() or DEFAULT_TRANSLATE_LANG_PAIR
 
     def _apply_to_overlay(self, gen: int, overlay: OverlayHandle, update: Callable[[], None]) -> None:
         if not self._is_current(gen):

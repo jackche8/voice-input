@@ -200,13 +200,17 @@ def _make_capture_harness(
     return flow, status, posted, selectors, overlays, copied
 
 
-def _ocr_payload(text: str, target_lang: str) -> dict:
+def _ocr_payload(text: str, mode: str = "raw", lang_pair: str | None = None) -> dict:
     """/api/v1/ocr-inplace 的单块响应（契约 OcrInplaceResponse；raw 时译文 = 原文）。"""
     return {
         "ok": True,
         "text": text,
         "ocr_text": text,
-        "target_lang": target_lang,
+        "mode": mode,
+        "lang_pair": lang_pair,
+        "source_lang": "en" if mode == "translate" else None,
+        "target_lang": "zh" if mode == "translate" else None,
+        "direction_mode": "auto" if mode == "translate" else None,
         "image_width": 200,
         "image_height": 80,
         "blocks": [{
@@ -224,18 +228,33 @@ def _ocr_payload(text: str, target_lang: str) -> dict:
 def test_capture_flow_translate_reuses_selector_and_renders_inplace_blocks():
     class Api:
         def __init__(self) -> None:
-            self.calls: list[tuple[str, str]] = []
+            self.calls: list[tuple[str, str | None, str]] = []
 
         def get_config(self) -> dict:
-            return {"translate_target_lang": "en"}
+            # 用非默认语言对验证 CaptureFlow 真实透传配置中的 translate_lang_pair 而非落回默认
+            return {"translate_lang_pair": "zh-ja"}
 
-        def ocr_inplace(self, png: bytes, *, target_lang: str, lang=None) -> dict:
-            self.calls.append((target_lang, png.decode("latin1")))
+        def ocr_inplace(
+            self,
+            png: bytes,
+            *,
+            mode: str = "translate",
+            lang_pair: str | None = None,
+            source_lang: str | None = None,
+            target_lang: str | None = None,
+            lang=None,
+        ) -> dict:
+            del source_lang, target_lang, lang
+            self.calls.append((mode, lang_pair, png.decode("latin1")))
             return {
                 "ok": True,
                 "text": "Hello World",
                 "ocr_text": "你好世界",
-                "target_lang": target_lang,
+                "mode": mode,
+                "lang_pair": lang_pair,
+                "source_lang": "zh",
+                "target_lang": "en",
+                "direction_mode": "auto",
                 "image_width": 200,
                 "image_height": 80,
                 "blocks": [
@@ -269,7 +288,7 @@ def test_capture_flow_translate_reuses_selector_and_renders_inplace_blocks():
     assert len(ov.blocks) == 1 and isinstance(ov.blocks[0], OcrTextBlock)
     assert ov.blocks[0].bg_color == "#112233" and ov.full_text == "Hello World" and ov.full_ocr == "你好世界"
     assert flow._test_region_calls == [((100, 200, 300, 120), (0, 0, 1920, 1080))]  # type: ignore[attr-defined]
-    assert api.calls == [("en", "region-png")]
+    assert api.calls == [("translate", "zh-ja", "region-png")]
 
     # 菜单「复制译文」走平台剪贴板，并把写入结果交回浮窗
     assert ov.on_copy_text(ov.full_text) is True
@@ -287,9 +306,9 @@ def test_capture_flow_translate_reuses_selector_and_renders_inplace_blocks():
 def test_capture_flow_translate_error_shows_only_the_reason_on_the_overlay():
     class FailingApi:
         def get_config(self) -> dict:
-            return {"translate_target_lang": "zh"}
+            return {"translate_lang_pair": "zh-en"}
 
-        def ocr_inplace(self, png: bytes, *, target_lang: str, lang=None) -> dict:
+        def ocr_inplace(self, png: bytes, *, mode: str = "translate", lang_pair: str | None = None, lang=None) -> dict:
             raise ApiError(503, ErrorCode.translate_failed.value, "Ollama 17947 未启动")
 
     flow, status, posted, selectors, overlays, _copied = _make_capture_harness(FailingApi())
@@ -302,15 +321,15 @@ def test_capture_flow_translate_error_shows_only_the_reason_on_the_overlay():
 
 
 def test_capture_flow_ocr_opens_the_same_overlay_and_copies_only_on_request():
-    """T16：纯 OCR 打开同一个浮窗（mode=ocr、target_lang=raw），不自动写剪贴板；菜单复制写原文全文并返回成败。"""
+    """T16：纯 OCR 打开同一个浮窗（mode=ocr、请求 mode=raw），不自动写剪贴板；菜单复制写原文全文并返回成败。"""
 
     class OcrApi:
         def __init__(self) -> None:
-            self.target_langs: list[str] = []
+            self.modes: list[tuple[str, str | None]] = []
 
-        def ocr_inplace(self, png: bytes, *, target_lang: str, lang=None) -> dict:
-            self.target_langs.append(target_lang)
-            return _ocr_payload("跨平台纯OCR", "raw")
+        def ocr_inplace(self, png: bytes, *, mode: str = "translate", lang_pair: str | None = None, lang=None) -> dict:
+            self.modes.append((mode, lang_pair))
+            return _ocr_payload("跨平台纯OCR", mode="raw")
 
     results = iter([True, False])
 
@@ -328,7 +347,7 @@ def test_capture_flow_ocr_opens_the_same_overlay_and_copies_only_on_request():
     assert selectors[0].mode_label == "纯 OCR 识别"
     selectors[0].on_selected((10, 10, 100, 40))
     ov = overlays[0]
-    assert ov.mode == "ocr" and api.target_langs == ["raw"]
+    assert ov.mode == "ocr" and api.modes == [("raw", None)]
     assert ov.full_ocr == "跨平台纯OCR" and ov.error is None
     assert copies == []  # 不自动复制
     assert [ov.on_copy_text(ov.full_ocr) for _ in range(3)] == [True, False, False]  # 成功 / 返回失败 / 抛异常
@@ -339,7 +358,7 @@ def test_capture_flow_ocr_opens_the_same_overlay_and_copies_only_on_request():
 
 def test_capture_flow_ocr_failure_shows_in_the_overlay_and_cancel_closes_everything():
     class EmptyOcrApi:
-        def ocr_inplace(self, png: bytes, *, target_lang: str, lang=None) -> dict:
+        def ocr_inplace(self, png: bytes, *, mode: str = "translate", lang_pair: str | None = None, lang=None) -> dict:
             raise ApiError(503, ErrorCode.ocr_failed.value, "没有识别到文字")
 
     flow, status, posted, selectors, overlays, copied = _make_capture_harness(EmptyOcrApi())
@@ -360,12 +379,12 @@ def test_capture_flows_send_no_busy_or_idle_and_only_overlay_less_failures_send_
 
     class Api:
         def get_config(self) -> dict:
-            return {"translate_target_lang": "zh"}
+            return {"translate_lang_pair": "zh-en"}
 
-        def ocr_inplace(self, png: bytes, *, target_lang: str, lang=None) -> dict:
+        def ocr_inplace(self, png: bytes, *, mode: str = "translate", lang_pair: str | None = None, lang=None) -> dict:
             if next(replies) == "fail":
                 raise ApiError(503, ErrorCode.translate_failed.value, "Ollama 未响应")
-            return _ocr_payload("Hello", target_lang)
+            return _ocr_payload("Hello", mode=mode, lang_pair=lang_pair)
 
     flow, status, posted, selectors, overlays, _copied = _make_capture_harness(Api())
     for trigger in (flow.trigger_translate, flow.trigger_ocr):
@@ -402,9 +421,9 @@ def test_capture_flow_direct_region_capture_and_repeat_storm_guard():
         def __init__(self) -> None:
             self.seen_pngs: list[bytes] = []
 
-        def ocr_inplace(self, png: bytes, *, target_lang: str, lang=None) -> dict:
+        def ocr_inplace(self, png: bytes, *, mode: str = "translate", lang_pair: str | None = None, lang=None) -> dict:
             self.seen_pngs.append(png)
-            return _ocr_payload("直接选区OCR", target_lang)
+            return _ocr_payload("直接选区OCR", mode=mode, lang_pair=lang_pair)
 
     api = Api()
     flow, status, posted, selectors, overlays, copied = _make_capture_harness(api)
@@ -685,11 +704,11 @@ def test_capture_flow_annotate_mode_exclusion_copy_and_save(tmp_path: Path):
             self.ocr_calls = 0
 
         def get_config(self) -> dict:
-            return {"translate_target_lang": "zh"}
+            return {"translate_lang_pair": "zh-en"}
 
-        def ocr_inplace(self, png: bytes, *, target_lang: str, lang=None) -> dict:
+        def ocr_inplace(self, png: bytes, *, mode: str = "translate", lang_pair: str | None = None, lang=None) -> dict:
             self.ocr_calls += 1
-            return _ocr_payload("译文", target_lang)
+            return _ocr_payload("译文", mode=mode, lang_pair=lang_pair)
 
     copy_outcomes = iter([None, "xclip 不可用"])
 
@@ -769,8 +788,8 @@ def test_capture_flow_handle_escape_unified_routing_and_close_overlay_separation
     且 close_overlay 仅走 close_silent 不再接 Esc。"""
 
     class Api:
-        def ocr_inplace(self, png: bytes, *, target_lang: str, lang=None) -> dict:
-            return _ocr_payload("OCR", target_lang)
+        def ocr_inplace(self, png: bytes, *, mode: str = "translate", lang_pair: str | None = None, lang=None) -> dict:
+            return _ocr_payload("OCR", mode=mode, lang_pair=lang_pair)
 
     flow, _status, _posted, selectors, overlays, _copied = _make_capture_harness(Api(), two_step_escape=True)
     annotators: list[FakeAnnotator] = flow._test_annotators  # type: ignore[attr-defined]

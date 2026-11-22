@@ -14,6 +14,7 @@ from _contracts import (
     AppConfigView,
     ErrorCode,
     LogicError,
+    validate_lang_pair,
 )
 
 _LOCKS_GUARD = threading.Lock()
@@ -109,7 +110,8 @@ def config_view(config: AppConfig) -> AppConfigView:
     return AppConfigView(
         polish_enabled=config.polish_enabled is True,
         custom_keywords=list(config.custom_keywords),
-        translate_target_lang=config.translate_target_lang,
+        translate_lang_pair=config.translate_lang_pair,
+        translate_auto_enabled=config.translate_auto_enabled,
         hotkey_voice=config.hotkey_voice,
         hotkey_screenshot=config.hotkey_screenshot,
         hotkey_ocr=config.hotkey_ocr,
@@ -124,6 +126,15 @@ def _normalized_update(update: AppConfigUpdate) -> dict[str, object]:
     from _hotkey import validate_hotkey
 
     fields = update.model_dump(exclude_none=True)
+    if "translate_lang_pair" in fields:
+        try:
+            fields["translate_lang_pair"] = validate_lang_pair(str(fields["translate_lang_pair"]))
+        except ValueError as exc:
+            raise LogicError(
+                ErrorCode.invalid_request,
+                str(exc),
+                {"field": "translate_lang_pair"},
+            ) from exc
     for name in _HOTKEY_FIELDS:
         if name in fields:
             try:

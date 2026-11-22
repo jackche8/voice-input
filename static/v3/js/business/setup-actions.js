@@ -132,6 +132,10 @@
           statusNotice: null
         }, flags || {});
         root.applyConfig(next, config);
+        if (next.translate_lang_pair) {
+          next.translate = Object.assign({}, next.translate || {}, { lang_pair: next.translate_lang_pair });
+          next.ocr = Object.assign({}, next.ocr || {}, { lang_pair: next.translate_lang_pair });
+        }
         setState(next);
         return config;
       }, function (err) {
@@ -159,8 +163,27 @@
       onSaveKeywords: function (value) {
         return saveConfig({ custom_keywords: root.parseKeywords(value) }, { keywordsSaved: true, keywordsDraft: null });
       },
-      onChangeTargetLang: function (value) {
-        return saveConfig({ translate_target_lang: value }, { targetLangSaved: true });
+      onChangeLangPair: function (value) {
+        if (typeof opts.onInvalidateTranslate === "function") opts.onInvalidateTranslate();
+        else if (typeof opts.onCancelDebounce === "function") opts.onCancelDebounce();
+        setState({ translate: { debouncePending: false, manualOverride: null } });
+        return saveConfig(
+          { translate_lang_pair: value },
+          { translateSettingsSaved: true, translate: { debouncePending: false, manualOverride: null } }
+        );
+      },
+      onToggleAutoTranslate: function (enabled) {
+        var nextEnabled = !!enabled;
+        if (!nextEnabled) {
+          if (typeof opts.onCancelDebounce === "function") opts.onCancelDebounce();
+          setState({ translate: { debouncePending: false } });
+        }
+        return saveConfig(
+          { translate_auto_enabled: nextEnabled },
+          nextEnabled
+            ? { translateSettingsSaved: true }
+            : { translateSettingsSaved: true, translate: { debouncePending: false } }
+        );
       },
       onSaveHotkeys: function (keys) {
         var patch = {

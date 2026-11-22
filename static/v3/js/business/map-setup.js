@@ -8,7 +8,8 @@
   var LEGAL_CONFIG_KEYS = [
     "polish_enabled",
     "custom_keywords",
-    "translate_target_lang",
+    "translate_lang_pair",
+    "translate_auto_enabled",
     "hotkey_voice",
     "hotkey_screenshot",
     "hotkey_ocr",
@@ -37,7 +38,8 @@
     if (!config || typeof config !== "object") return state;
     state.polish_enabled = config.polish_enabled;
     state.custom_keywords = Array.isArray(config.custom_keywords) ? config.custom_keywords.slice() : [];
-    state.translate_target_lang = config.translate_target_lang != null ? config.translate_target_lang : null;
+    state.translate_lang_pair = config.translate_lang_pair != null ? config.translate_lang_pair : null;
+    state.translate_auto_enabled = typeof config.translate_auto_enabled === "boolean" ? config.translate_auto_enabled : null;
     state.hotkey_voice = config.hotkey_voice || "";
     state.hotkey_screenshot = config.hotkey_screenshot || "";
     state.hotkey_ocr = config.hotkey_ocr || "";

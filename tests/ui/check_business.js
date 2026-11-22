@@ -429,15 +429,15 @@ async function runUnit() {
       return jsonRes(200, setupWorld.check);
     } },
     { path: "/api/v1/config", method: "GET", handler: function () {
-      return jsonRes(200, { polish_enabled: false, custom_keywords: ["Alpha"], translate_target_lang: "zh", hotkey_voice: "ctrl+alt+z", hotkey_screenshot: "ctrl+alt+x", hotkey_ocr: "ctrl+alt+o", hotkey_repeat: "ctrl+alt+r", hotkey_annotate: "ctrl+alt+a", autostart_enabled: true, ollama_model: "qwen3.5:4b" });
+      return jsonRes(200, { polish_enabled: false, custom_keywords: ["Alpha"], translate_lang_pair: "zh-en", translate_auto_enabled: true, hotkey_voice: "ctrl+alt+z", hotkey_screenshot: "ctrl+alt+x", hotkey_ocr: "ctrl+alt+o", hotkey_repeat: "ctrl+alt+r", hotkey_annotate: "ctrl+alt+a", autostart_enabled: true, ollama_model: "qwen3.5:4b" });
     } },
     { path: "/api/v1/config", method: "POST", handler: function (rec) {
       const body = JSON.parse(rec.body);
       setupWorld.lastConfig = body;
-      if (Object.prototype.hasOwnProperty.call(body, "baidu_appkey") || Object.prototype.hasOwnProperty.call(body, "ollama_model")) {
+      if (Object.prototype.hasOwnProperty.call(body, "baidu_appkey") || Object.prototype.hasOwnProperty.call(body, "ollama_model") || Object.prototype.hasOwnProperty.call(body, "translate_target_lang")) {
         return jsonRes(400, { ok: false, error: "invalid_request", message: "未知或只读字段" });
       }
-      return jsonRes(200, Object.assign({ polish_enabled: false, custom_keywords: [], translate_target_lang: "zh", hotkey_voice: "ctrl+alt+z", hotkey_screenshot: "ctrl+alt+x", hotkey_ocr: "ctrl+alt+o", hotkey_repeat: "ctrl+alt+r", hotkey_annotate: "ctrl+alt+a", autostart_enabled: true, ollama_model: "qwen3.5:4b" }, body));
+      return jsonRes(200, Object.assign({ polish_enabled: false, custom_keywords: [], translate_lang_pair: "zh-en", translate_auto_enabled: true, hotkey_voice: "ctrl+alt+z", hotkey_screenshot: "ctrl+alt+x", hotkey_ocr: "ctrl+alt+o", hotkey_repeat: "ctrl+alt+r", hotkey_annotate: "ctrl+alt+a", autostart_enabled: true, ollama_model: "qwen3.5:4b" }, body));
     } },
     { path: "/api/v1/history", method: "GET", handler: function () {
       return jsonRes(200, { records: [{ timestamp: "t", raw_text: "a", final_text: "a", job_id: "j1", source: "web", polish: "off" }], total: 1, skipped_malformed: 0 });
@@ -725,13 +725,36 @@ async function runUnit() {
       return jsonRes(200, {
         polish_enabled: true,
         custom_keywords: ["Qwen"],
-        translate_target_lang: "zh",
+        translate_lang_pair: "zh-en",
+        translate_auto_enabled: true,
         hotkey_voice: "ctrl+alt+z",
         hotkey_screenshot: "ctrl+alt+x",
         hotkey_ocr: "ctrl+alt+o",
         hotkey_repeat: "ctrl+alt+r",
-        hotkey_annotate: "ctrl+alt+a"
+        hotkey_annotate: "ctrl+alt+a",
+        autostart_enabled: true,
+        ollama_model: "qwen3.5:4b"
       });
+    } },
+    { path: "/api/v1/config", method: "POST", handler: function (rec) {
+      const body = JSON.parse(rec.body || "{}");
+      homeWorld.lastConfig = body;
+      if (Object.prototype.hasOwnProperty.call(body, "translate_target_lang")) {
+        return jsonRes(400, { ok: false, error: "invalid_request", message: "已删除旧字段 translate_target_lang" });
+      }
+      return jsonRes(200, Object.assign({
+        polish_enabled: true,
+        custom_keywords: ["Qwen"],
+        translate_lang_pair: "zh-en",
+        translate_auto_enabled: true,
+        hotkey_voice: "ctrl+alt+z",
+        hotkey_screenshot: "ctrl+alt+x",
+        hotkey_ocr: "ctrl+alt+o",
+        hotkey_repeat: "ctrl+alt+r",
+        hotkey_annotate: "ctrl+alt+a",
+        autostart_enabled: true,
+        ollama_model: "qwen3.5:4b"
+      }, body));
     } },
     { path: "/api/v1/history", method: "GET", handler: function (rec) {
       const q = new URLSearchParams(String(rec.url).split("?")[1] || "");
@@ -767,43 +790,97 @@ async function runUnit() {
     { path: "/api/v1/translate", method: "POST", handler: function (rec) {
       const body = JSON.parse(rec.body || "{}");
       homeWorld.lastTranslate = body;
+      homeWorld.translateBodies = (homeWorld.translateBodies || []).concat([body]);
       if (homeWorld.translateDelay) {
         return new Promise(function (resolve) {
-          homeWorld.resolveDelayedTranslate = function () {
-            resolve(jsonRes(200, { ok: true, text: "迟到译文", target_lang: body.target_lang }));
+          homeWorld.resolveDelayedTranslate = function (customRes) {
+            resolve(customRes || jsonRes(200, {
+              ok: true,
+              text: "迟到译文",
+              lang_pair: body.lang_pair || "zh-en",
+              source_lang: body.source_lang || "en",
+              target_lang: body.target_lang || "zh",
+              direction_mode: body.source_lang ? "manual" : "auto",
+              chunks: 1
+            }));
+          };
+          homeWorld.rejectDelayedTranslate = function () {
+            resolve(jsonRes(503, { ok: false, error: "translate_failed", message: "迟到错误" }));
           };
         });
       }
       if (homeWorld.translateFail) {
         return jsonRes(502, { ok: false, error: "translate_failed", message: "本地模型无响应", details: { ocr_text: "不应被当成译文" } });
       }
-      return jsonRes(200, { ok: true, text: "你好世界", target_lang: body.target_lang });
+      const isManual = !!(body.source_lang && body.target_lang);
+      const isZh = /[\u4e00-\u9fff]/.test(body.text || "");
+      const src = isManual ? body.source_lang : (isZh ? "zh" : "en");
+      const tgt = isManual ? body.target_lang : (src === "zh" ? "en" : "zh");
+      return jsonRes(200, {
+        ok: true,
+        text: (src === "zh" && tgt === "en") ? ("EN:" + body.text) : "你好世界",
+        lang_pair: body.lang_pair || "zh-en",
+        source_lang: src,
+        target_lang: tgt,
+        direction_mode: isManual ? "manual" : "auto",
+        chunks: (body.text || "").length > 100 ? 2 : 1
+      });
     } },
     { path: "/api/v1/ocr-translate", method: "POST", handler: function (rec) {
       const fd = rec.body;
-      if (!(fd instanceof FormData) || !fd.get("target_lang") || !fd.get("image")) {
+      if (!(fd instanceof FormData) || !fd.get("mode") || !fd.get("image")) {
         return jsonRes(422, { ok: false, error: "invalid_request", message: "缺少字段" });
       }
-      const lang = fd.get("target_lang");
-      homeWorld.lastOcrLang = lang;
+      const mode = fd.get("mode");
+      const langPair = fd.get("lang_pair");
+      homeWorld.lastOcrForm = { mode: mode, lang_pair: langPair, hasTargetLang: fd.get("target_lang") != null };
       if (homeWorld.ocrFail) {
         return jsonRes(502, { ok: false, error: "translate_failed", message: "翻译服务异常", details: { ocr_text: "DO_NOT_FAKE_TRANSLATION" } });
       }
-      if (lang === "raw") {
-        return jsonRes(200, { ok: true, text: "Pure OCR line", ocr_text: "Pure OCR line", target_lang: "raw" });
+      if (mode === "raw") {
+        return jsonRes(200, {
+          ok: true,
+          text: "Pure OCR line",
+          ocr_text: "Pure OCR line",
+          mode: "raw",
+          lang_pair: null,
+          source_lang: null,
+          target_lang: null,
+          direction_mode: null,
+          chunks: null
+        });
       }
-      return jsonRes(200, { ok: true, text: "版本说明 3.2", ocr_text: "Release notes 3.2", target_lang: lang });
+      return jsonRes(200, {
+        ok: true,
+        text: "版本说明 3.2",
+        ocr_text: "Release notes 3.2",
+        mode: "translate",
+        lang_pair: langPair || "zh-en",
+        source_lang: "en",
+        target_lang: "zh",
+        direction_mode: "auto",
+        chunks: 1
+      });
     } }
   ];
 
   const homeCopied = [];
   let fakeClock = 1000;
+  const homeTimers = [];
   const homeCtl = B.createHomeController({
     client: B.createHttp({ catalog: catalog, context: localCtx, fetch: homeWorld.fetch, origin: "https://127.0.0.1:17945" }),
     context: localCtx,
     catalog: catalog,
     clipboard: { writeText: function (t) { homeCopied.push(t); return Promise.resolve(); } },
-    now: function () { fakeClock += 45; return fakeClock; }
+    now: function () { fakeClock += 45; return fakeClock; },
+    setTimeout: function (fn, ms) {
+      const entry = { fn: fn, ms: ms, cleared: false };
+      homeTimers.push(entry);
+      return homeTimers.length;
+    },
+    clearTimeout: function (id) {
+      if (homeTimers[id - 1]) homeTimers[id - 1].cleared = true;
+    }
   });
   const homeView = fakeView(catalogCtx.V3.defaults.homeState());
   homeCtl.bind(homeView);
@@ -816,14 +893,16 @@ async function runUnit() {
     hs.ollama.modelStatus === "ready" &&
     hs.hotkey_ocr === "ctrl+alt+o" &&
     hs.hotkey_annotate === "ctrl+alt+a" &&
-    hs.translate_target_lang === "zh" &&
+    hs.translate_lang_pair === "zh-en" &&
+    hs.translate_auto_enabled === true &&
+    hs.translateSettingsSaved === false &&
     hs.history.records.length === 1 &&
     hs.lanEntries &&
     hs.lanEntries[0].urlMasked.indexOf("hom****eak") >= 0 &&
     !hs.lanEntries[0].url &&
     JSON.stringify(hs).indexOf("home-secret-lan-token-do-not-leak") < 0
   ) {
-    pass("home-controller start 并行加载状态/四热键/历史/脱敏局域网入口，明文令牌不进 setState");
+    pass("home-controller start 并行加载状态/五热键/语言对与自动开关/历史/脱敏局域网入口，明文令牌不进 setState");
   } else fail("home-controller start 映射异常：" + JSON.stringify(hs));
 
   await homeCtl.hooks.onCopy({ kind: "lan_url", index: 0 });
@@ -836,48 +915,249 @@ async function runUnit() {
     pass("home-controller 复制局域网网址从私有闭包写出明文，state 始终零泄露");
   } else fail("home-controller LAN 复制异常：" + JSON.stringify({ copied: homeCopied, copyStatus: homeView.getState().copyStatus }));
 
-  await homeCtl.hooks.onTranslateText({ text: "Hello world", target_lang: "zh" });
+  await homeCtl.hooks.onTranslateText({ text: "Hello world", lang_pair: "zh-en", trigger: "manual" });
   const hTr = homeView.getState().translate;
-  if (hTr.phase === "result" && hTr.text === "你好世界" && hTr.ocr_text === "" && hTr.target_lang === "zh" && typeof hTr.elapsedMs === "number" && hTr.elapsedMs >= 45) {
-    pass("home-controller 文本翻译走 OpenAPI translate 并记录耗时");
-  } else fail("home-controller 文本翻译异常：" + JSON.stringify(hTr));
+  if (
+    hTr.phase === "result" &&
+    hTr.text === "你好世界" &&
+    hTr.ocr_text === "" &&
+    hTr.lang_pair === "zh-en" &&
+    hTr.source_lang === "en" &&
+    hTr.target_lang === "zh" &&
+    hTr.direction_mode === "auto" &&
+    hTr.chunks === 1 &&
+    homeWorld.lastTranslate &&
+    homeWorld.lastTranslate.lang_pair === "zh-en" &&
+    !("source_lang" in homeWorld.lastTranslate) &&
+    !("target_lang" in homeWorld.lastTranslate) &&
+    typeof hTr.elapsedMs === "number" &&
+    hTr.elapsedMs >= 45
+  ) {
+    pass("home-controller 文本翻译走新 TranslateRequest(lang_pair) 并映射后端权威方向与耗时");
+  } else fail("home-controller 文本翻译异常：" + JSON.stringify({ hTr: hTr, last: homeWorld.lastTranslate }));
 
-  const callsBeforeRaw = homeWorld.calls.length;
-  await homeCtl.hooks.onTranslateText({ text: "Raw pass through", target_lang: "raw" });
-  const hRaw = homeView.getState().translate;
-  if (homeWorld.calls.length === callsBeforeRaw && hRaw.phase === "result" && hRaw.text === "Raw pass through" && hRaw.target_lang === "raw") {
-    pass("home-controller target_lang=raw 直接回填，不发网络请求");
-  } else fail("home-controller raw 模式异常：" + JSON.stringify(hRaw));
+  /* 1s 防抖自动翻译：连续编辑取消前序定时器、仅发 1 次最新请求 */
+  homeTimers.length = 0;
+  const callsBeforeDeb = homeWorld.calls.length;
+  homeCtl.hooks.onTranslateInput({ text: "你" });
+  homeCtl.hooks.onTranslateInput({ text: "你好中文" });
+  if (
+    homeTimers.length === 2 &&
+    homeTimers[0].cleared === true &&
+    homeTimers[1].cleared === false &&
+    homeTimers[1].ms === 1000 &&
+    homeView.getState().translate.debouncePending === true &&
+    homeWorld.calls.length === callsBeforeDeb
+  ) {
+    pass("onTranslateInput 连续编辑取消前序定时器并排 1000ms 防抖，停顿前零请求");
+  } else fail("1s 防抖排期异常：" + JSON.stringify({ timers: homeTimers.map(function (t) { return { ms: t.ms, cleared: t.cleared }; }), pending: homeView.getState().translate.debouncePending, deltaCalls: homeWorld.calls.length - callsBeforeDeb }));
+  if (homeTimers[1] && !homeTimers[1].cleared) {
+    homeTimers[1].fn();
+    await waitFor(function () { return homeView.getState().translate.phase === "result" && homeView.getState().translate.text === "EN:你好中文"; });
+  }
+  const debRes = homeView.getState().translate;
+  if (
+    homeWorld.calls.length === callsBeforeDeb + 1 &&
+    debRes.source_lang === "zh" &&
+    debRes.target_lang === "en" &&
+    debRes.direction_mode === "auto" &&
+    debRes.debouncePending === false
+  ) {
+    pass("1000ms 防抖到期自动发起 1 次翻译并回填后端权威方向");
+  } else fail("防抖触发结果异常：" + JSON.stringify({ callsDelta: homeWorld.calls.length - callsBeforeDeb, debRes: debRes }));
+
+  /* 非空编辑竞态治理：在途旧响应与在途旧错误均因 translateReqId++ 被丢弃，并立即退出旧 loading */
+  homeWorld.translateDelay = true;
+  const staleOkP = homeCtl.hooks.onTranslateText({ text: "First inflight", lang_pair: "zh-en", trigger: "manual" });
+  const staleLoadingBeforeEdit = homeView.getState().translate.phase === "loading";
+  homeCtl.hooks.onTranslateInput({ text: "Second edited" });
+  const exitedLoadingOnEdit = homeView.getState().translate.phase !== "loading";
+  homeWorld.resolveDelayedTranslate();
+  await staleOkP;
+  if (staleLoadingBeforeEdit && exitedLoadingOnEdit && homeView.getState().translate.text !== "迟到译文" && homeView.getState().translate.debouncePending === true) {
+    pass("非空编辑推进 translateReqId：立即退出旧 loading 并丢弃在途旧成功响应");
+  } else fail("非空编辑旧响应竞态防护失败：" + JSON.stringify(homeView.getState().translate));
+
+  const staleErrP = homeCtl.hooks.onTranslateText({ text: "Fail inflight", lang_pair: "zh-en", trigger: "manual" });
+  homeCtl.hooks.onTranslateInput({ text: "Edited after fail inflight" });
+  homeWorld.rejectDelayedTranslate();
+  await staleErrP;
+  if (homeView.getState().translate.phase !== "error" && !/迟到错误/.test(homeView.getState().translate.message || "")) {
+    pass("非空编辑推进 translateReqId：丢弃在途旧失败错误，不污染当前编辑态");
+  } else fail("非空编辑旧错误竞态防护失败：" + JSON.stringify(homeView.getState().translate));
+  homeWorld.translateDelay = false;
+
+  /* ⇄ 手动互换锁定：首击锁反转、失败保锁可见、再点恢复自动、空输入 0 请求清锁、首次无译文回退 LANG_PAIR_PARTS 反转 */
+  await homeCtl.hooks.onTranslateText({ text: "中文自动", lang_pair: "zh-en", trigger: "manual" });
+  await homeCtl.hooks.onSwapDirection({ text: "中文自动", lang_pair: "zh-en" });
+  const lockedRes = homeView.getState().translate;
+  if (
+    homeWorld.lastTranslate &&
+    homeWorld.lastTranslate.source_lang === "en" &&
+    homeWorld.lastTranslate.target_lang === "zh" &&
+    lockedRes.manualOverride &&
+    lockedRes.manualOverride.source_lang === "en" &&
+    lockedRes.manualOverride.target_lang === "zh" &&
+    lockedRes.direction_mode === "manual"
+  ) {
+    pass("onSwapDirection 首击锁定反转方向并携带成对 source_lang/target_lang 重译");
+  } else fail("onSwapDirection 首击锁定异常：" + JSON.stringify({ sent: homeWorld.lastTranslate, lockedRes: lockedRes }));
 
   homeWorld.translateFail = true;
-  await homeCtl.hooks.onTranslateText({ text: "Fail me", target_lang: "zh" });
+  await homeCtl.hooks.onTranslateText({ text: "Fail while locked", lang_pair: "zh-en", trigger: "manual" });
   const hTrErr = homeView.getState().translate;
-  if (hTrErr.phase === "error" && hTrErr.error === "translate_failed" && hTrErr.text === "" && /无响应/.test(hTrErr.message || "")) {
-    pass("home-controller 翻译失败如实呈现错误，不伪造译文");
+  if (
+    hTrErr.phase === "error" &&
+    hTrErr.error === "translate_failed" &&
+    hTrErr.text === "" &&
+    /无响应/.test(hTrErr.message || "") &&
+    hTrErr.manualOverride &&
+    hTrErr.manualOverride.source_lang === "en" &&
+    hTrErr.manualOverride.target_lang === "zh"
+  ) {
+    pass("home-controller 翻译失败如实呈现错误、不伪造译文且保留手动锁态可见");
   } else fail("home-controller 翻译失败状态错误：" + JSON.stringify(hTrErr));
   homeWorld.translateFail = false;
 
+  await homeCtl.hooks.onSwapDirection({ text: "中文自动", lang_pair: "zh-en" });
+  const restoredRes = homeView.getState().translate;
+  if (
+    restoredRes.manualOverride === null &&
+    restoredRes.direction_mode === "auto" &&
+    !("source_lang" in homeWorld.lastTranslate) &&
+    !("target_lang" in homeWorld.lastTranslate)
+  ) {
+    pass("onSwapDirection 已锁态再点清除 manualOverride 并恢复后端自动判定");
+  } else fail("onSwapDirection 恢复自动异常：" + JSON.stringify({ sent: homeWorld.lastTranslate, restoredRes: restoredRes }));
+
+  /* 清空输入 / 空文本：0 请求、清锁、清防抖 */
+  await homeCtl.hooks.onSwapDirection({ text: "中文自动", lang_pair: "zh-en" });
+  const callsBeforeBlank = homeWorld.calls.length;
+  homeCtl.hooks.onTranslateInput({ text: "   " });
+  const blankTr = homeView.getState().translate;
+  if (
+    homeWorld.calls.length === callsBeforeBlank &&
+    blankTr.phase === "empty" &&
+    blankTr.manualOverride === null &&
+    blankTr.debouncePending === false &&
+    !homeCtl._debug.debouncePending()
+  ) {
+    pass("空白输入 0 请求、取消防抖、清 manualOverride 并归 empty");
+  } else fail("空白输入处理异常：" + JSON.stringify({ callsDelta: homeWorld.calls.length - callsBeforeBlank, blankTr: blankTr }));
+
+  /* 首次未译出时点 ⇄ 取 LANG_PAIR_PARTS["zh-en"] 反转对（en → zh）锁定 */
+  homeCtl.hooks.onTranslateInput({ text: "Fresh text before result" });
+  await homeCtl.hooks.onSwapDirection({ text: "Fresh text before result", lang_pair: "zh-en" });
+  if (
+    homeWorld.lastTranslate.source_lang === "en" &&
+    homeWorld.lastTranslate.target_lang === "zh" &&
+    homeView.getState().translate.manualOverride &&
+    homeView.getState().translate.manualOverride.source_lang === "en" &&
+    homeView.getState().translate.manualOverride.target_lang === "zh"
+  ) {
+    pass("未译出首条时点击 ⇄ 回退 LANG_PAIR_PARTS 反转对（en→zh）锁定并重译");
+  } else fail("无首条结果时 ⇄ 回退异常：" + JSON.stringify({ sent: homeWorld.lastTranslate, tr: homeView.getState().translate }));
+
+  /* onClearTranslate 停防抖、推 reqId、清锁归 empty */
+  homeCtl.hooks.onTranslateInput({ text: "Before clear" });
+  const pendingBeforeClear = homeCtl._debug.debouncePending();
+  homeCtl.hooks.onClearTranslate();
+  if (
+    pendingBeforeClear === true &&
+    homeCtl._debug.debouncePending() === false &&
+    homeView.getState().translate.phase === "empty" &&
+    homeView.getState().translate.manualOverride === null
+  ) {
+    pass("onClearTranslate 停止防抖、清锁并复位 state.translate 为 empty");
+  } else fail("onClearTranslate 异常：" + JSON.stringify({ pendingBeforeClear: pendingBeforeClear, pendingNow: homeCtl._debug.debouncePending(), tr: homeView.getState().translate }));
+
+  /* 切语言对清锁停防抖；关闭自动翻译开关停防抖且后续输入不排定时 */
+  await homeCtl.hooks.onSwapDirection({ text: "Lock before pair change", lang_pair: "zh-en" });
+  homeCtl.hooks.onTranslateInput({ text: "Lock before pair change 2" });
+  await homeCtl.hooks.onChangeLangPair("zh-en");
+  if (
+    homeWorld.lastConfig &&
+    homeWorld.lastConfig.translate_lang_pair === "zh-en" &&
+    homeCtl._debug.debouncePending() === false &&
+    homeView.getState().translate.manualOverride === null &&
+    homeView.getState().translateSettingsSaved === true
+  ) {
+    pass("onChangeLangPair 停防抖、清锁、提交 translate_lang_pair 并置 translateSettingsSaved");
+  } else fail("onChangeLangPair 异常：" + JSON.stringify({ cfg: homeWorld.lastConfig, tr: homeView.getState().translate, saved: homeView.getState().translateSettingsSaved }));
+
+  homeCtl.hooks.onTranslateInput({ text: "Pending before toggle off" });
+  const pendingBeforeToggleOff = homeCtl._debug.debouncePending();
+  await homeCtl.hooks.onToggleAutoTranslate(false);
+  const pendingAfterToggleOff = homeCtl._debug.debouncePending();
+  const uiPendingAfterToggleOff = homeView.getState().translate.debouncePending;
+  const timersBeforeOffInput = homeTimers.length;
+  homeCtl.hooks.onTranslateInput({ text: "Input while auto off" });
+  if (
+    pendingBeforeToggleOff === true &&
+    pendingAfterToggleOff === false &&
+    uiPendingAfterToggleOff === false &&
+    homeView.getState().translate_auto_enabled === false &&
+    homeView.getState().translate.debouncePending === false &&
+    homeTimers.length === timersBeforeOffInput &&
+    homeView.getState().translateSettingsSaved === true
+  ) {
+    pass("onToggleAutoTranslate(false) 立即停防抖清 debouncePending，关闭后输入不再排期");
+  } else fail("onToggleAutoTranslate(false) 异常：" + JSON.stringify({ pendingBefore: pendingBeforeToggleOff, pendingAfterToggleOff: pendingAfterToggleOff, uiPendingAfterToggleOff: uiPendingAfterToggleOff, auto: homeView.getState().translate_auto_enabled }));
+  await homeCtl.hooks.onToggleAutoTranslate(true);
+
+  /* 图片槽位消歧：工作台粘图清锁停防抖；OCR 面板 raw/translate 均路由到 state.ocr */
+  await homeCtl.hooks.onSwapDirection({ text: "Locked before image", lang_pair: "zh-en" });
+  homeCtl.hooks.onTranslateInput({ text: "Locked before image 2" });
   const imgBlob = new Blob([new Uint8Array([137, 80, 78, 71])], { type: "image/png" });
-  await homeCtl.hooks.onSubmitImage({ file: imgBlob, target_lang: "zh", mode: "translate" });
+  await homeCtl.hooks.onSubmitImage({ file: imgBlob, mode: "translate", lang_pair: "zh-en", panel: "translate" });
   const hImgTr = homeView.getState().translate;
-  if (hImgTr.phase === "result" && hImgTr.text === "版本说明 3.2" && hImgTr.ocr_text === "Release notes 3.2") {
-    pass("home-controller mode=translate 图片提交更新 state.translate（含 text 与 ocr_text）");
-  } else fail("home-controller 图片翻译异常：" + JSON.stringify(hImgTr));
+  if (
+    hImgTr.phase === "result" &&
+    hImgTr.text === "版本说明 3.2" &&
+    hImgTr.ocr_text === "Release notes 3.2" &&
+    hImgTr.source_lang === "en" &&
+    hImgTr.target_lang === "zh" &&
+    hImgTr.direction_mode === "auto" &&
+    hImgTr.manualOverride === null &&
+    homeCtl._debug.debouncePending() === false &&
+    homeWorld.lastOcrForm &&
+    homeWorld.lastOcrForm.mode === "translate" &&
+    homeWorld.lastOcrForm.lang_pair === "zh-en" &&
+    homeWorld.lastOcrForm.hasTargetLang === false
+  ) {
+    pass("home-controller 翻译面板图片提交清锁停防抖、传正交表单 mode=translate&lang_pair 并更新 state.translate");
+  } else fail("home-controller 图片翻译异常：" + JSON.stringify({ hImgTr: hImgTr, form: homeWorld.lastOcrForm }));
 
-  await homeCtl.hooks.onSubmitImage({ file: imgBlob, target_lang: "raw", mode: "ocr" });
+  await homeCtl.hooks.onSubmitImage({ file: imgBlob, mode: "raw", panel: "ocr" });
   const hImgOcr = homeView.getState().ocr;
-  if (hImgOcr.phase === "result" && hImgOcr.ocr_text === "Pure OCR line" && hImgOcr.text === "") {
-    pass("home-controller mode=ocr 纯提取更新 state.ocr（仅 ocr_text，不重复译文）");
-  } else fail("home-controller 图片纯 OCR 异常：" + JSON.stringify(hImgOcr));
+  if (
+    hImgOcr.phase === "result" &&
+    hImgOcr.mode === "raw" &&
+    hImgOcr.ocr_text === "Pure OCR line" &&
+    hImgOcr.text === "" &&
+    hImgOcr.source_lang === null &&
+    homeWorld.lastOcrForm &&
+    homeWorld.lastOcrForm.mode === "raw" &&
+    homeWorld.lastOcrForm.lang_pair === null
+  ) {
+    pass("home-controller OCR 面板 mode=raw 仅传 mode=raw 并更新 state.ocr（无译文）");
+  } else fail("home-controller 图片纯 OCR 异常：" + JSON.stringify({ hImgOcr: hImgOcr, form: homeWorld.lastOcrForm }));
 
-  await homeCtl.hooks.onSubmitImage({ file: imgBlob, target_lang: "zh", mode: "ocr" });
+  await homeCtl.hooks.onSubmitImage({ file: imgBlob, mode: "translate", lang_pair: "zh-en", panel: "ocr" });
   const hImgOcrTr = homeView.getState().ocr;
-  if (hImgOcrTr.phase === "result" && hImgOcrTr.ocr_text === "Release notes 3.2" && hImgOcrTr.text === "版本说明 3.2") {
-    pass("home-controller OCR 面板提取并翻译同时写入 ocr_text 与 text");
+  if (
+    hImgOcrTr.phase === "result" &&
+    hImgOcrTr.mode === "translate" &&
+    hImgOcrTr.ocr_text === "Release notes 3.2" &&
+    hImgOcrTr.text === "版本说明 3.2" &&
+    hImgOcrTr.source_lang === "en" &&
+    hImgOcrTr.target_lang === "zh"
+  ) {
+    pass("home-controller OCR 面板提取并翻译同时写入 ocr_text、text 与后端权威方向");
   } else fail("home-controller OCR 翻译异常：" + JSON.stringify(hImgOcrTr));
 
   homeWorld.ocrFail = true;
-  await homeCtl.hooks.onSubmitImage({ file: imgBlob, target_lang: "zh", mode: "translate" });
+  await homeCtl.hooks.onSubmitImage({ file: imgBlob, mode: "translate", lang_pair: "zh-en", panel: "translate" });
   const hImgErr = homeView.getState().translate;
   if (hImgErr.phase === "error" && hImgErr.error === "translate_failed" && hImgErr.text === "" && hImgErr.ocr_text === "") {
     pass("home-controller 图片翻译失败严禁拿 ocr_text 冒充译文");
@@ -904,20 +1184,23 @@ async function runUnit() {
 
   homeCtl.hooks.onToggleTheme({ theme: "light" });
   homeCtl.hooks.onSelectPanel({ panel: "ocr" });
-  await homeCtl.hooks.onSubmitImage({ file: imgBlob, target_lang: "zh", mode: "translate" });
+  await homeCtl.hooks.onSubmitImage({ file: imgBlob, mode: "translate", lang_pair: "zh-en" });
   if (homeView.getState().theme === "light" && homeView.getState().activePanel === "ocr" && homeView.getState().ocr.text === "版本说明 3.2") {
-    pass("home-controller 支持主题/面板切换，且在 OCR 面板选译文模式时更新 state.ocr");
+    pass("home-controller 支持主题/面板切换，未显式传 panel 时按 activePanel=ocr 路由到 state.ocr");
   } else fail("home-controller 主题或 OCR 面板路由异常");
 
-  /* destroy 防异步回调污染 */
+  /* destroy 清待执行防抖定时器并防异步回调污染 */
   homeWorld.translateDelay = true;
-  const inflight = homeCtl.hooks.onTranslateText({ text: "Late", target_lang: "zh" });
+  const inflight = homeCtl.hooks.onTranslateText({ text: "Late", lang_pair: "zh-en", trigger: "manual" });
+  homeCtl.hooks.onTranslateInput({ text: "Pending debounce before destroy" });
+  const pendingBeforeDestroy = homeCtl._debug.debouncePending();
   homeCtl.destroy();
+  const pendingAfterHomeDestroy = homeCtl._debug.debouncePending();
   homeWorld.resolveDelayedTranslate();
   await inflight;
-  if (homeCtl._debug.isDestroyed() && homeView.getState().translate.text !== "迟到译文") {
-    pass("home-controller destroy 后迟到响应不污染已销毁视图");
-  } else fail("home-controller destroy 防护失效：" + JSON.stringify(homeView.getState().translate));
+  if (homeCtl._debug.isDestroyed() && pendingBeforeDestroy === true && pendingAfterHomeDestroy === false && homeView.getState().translate.text !== "迟到译文") {
+    pass("home-controller destroy 清掉待执行防抖定时器且迟到响应不污染已销毁视图");
+  } else fail("home-controller destroy 防护失效：" + JSON.stringify({ pendingBeforeDestroy: pendingBeforeDestroy, pendingAfterHomeDestroy: pendingAfterHomeDestroy, tr: homeView.getState().translate }));
   homeWorld.translateDelay = false;
 
   /* 非本机（局域网 & file://）主页阻止发出 fetch */
@@ -929,8 +1212,8 @@ async function runUnit() {
   const lanHomeView = fakeView(catalogCtx.V3.defaults.homeState());
   lanHomeCtl.bind(lanHomeView);
   await lanHomeCtl.start();
-  await lanHomeCtl.hooks.onTranslateText({ text: "hello", target_lang: "zh" });
-  await lanHomeCtl.hooks.onSubmitImage({ file: imgBlob, target_lang: "zh", mode: "translate" });
+  await lanHomeCtl.hooks.onTranslateText({ text: "hello", lang_pair: "zh-en", trigger: "manual" });
+  await lanHomeCtl.hooks.onSubmitImage({ file: imgBlob, mode: "translate", lang_pair: "zh-en", panel: "translate" });
   if (lanHomeWorld.calls.length === 0 && lanHomeView.getState().connection === "error" && lanHomeView.getState().translate.phase === "error") {
     pass("home-controller 在局域网显式报错且零 fetch");
   } else fail("home-controller 局域网未阻止：" + JSON.stringify({ calls: lanHomeWorld.calls.length, st: lanHomeView.getState().connection }));
@@ -1562,7 +1845,7 @@ async function runUnit() {
   });
   startReqWorld.routes = [
     { path: "/api/setup/check", method: "GET", handler: function () { return jsonRes(200, startReqWorld.check); } },
-    { path: "/api/v1/config", method: "GET", handler: function () { return jsonRes(200, { polish_enabled: false, custom_keywords: [], translate_target_lang: "zh", hotkey_voice: "ctrl+alt+z", hotkey_screenshot: "ctrl+alt+x", hotkey_repeat: "ctrl+alt+r", ollama_model: "qwen3.5:4b" }); } },
+    { path: "/api/v1/config", method: "GET", handler: function () { return jsonRes(200, { polish_enabled: false, custom_keywords: [], translate_lang_pair: "zh-en", translate_auto_enabled: true, hotkey_voice: "ctrl+alt+z", hotkey_screenshot: "ctrl+alt+x", hotkey_repeat: "ctrl+alt+r", ollama_model: "qwen3.5:4b" }); } },
     { path: "/api/v1/config", method: "POST", handler: function (rec) {
       const body = JSON.parse(rec.body);
       if (body.hotkey_voice && body.hotkey_voice === body.hotkey_screenshot) {
@@ -1639,7 +1922,7 @@ async function runUnit() {
   };
   const bootFetch = async function (url) {
     if (String(url).indexOf("/api/setup/check") >= 0) return jsonRes(200, { ok: true, asr: { status: "ready", sidecar_running: true }, ollama: { installed: true, running: true, model_status: "ready" }, capabilities: [] });
-    if (String(url).indexOf("/api/v1/config") >= 0) return jsonRes(200, { polish_enabled: true, custom_keywords: [], translate_target_lang: "zh", hotkey_voice: "ctrl+alt+z", hotkey_screenshot: "ctrl+alt+x", hotkey_ocr: "ctrl+alt+o", hotkey_repeat: "ctrl+alt+r" });
+    if (String(url).indexOf("/api/v1/config") >= 0) return jsonRes(200, { polish_enabled: true, custom_keywords: [], translate_lang_pair: "zh-en", translate_auto_enabled: true, hotkey_voice: "ctrl+alt+z", hotkey_screenshot: "ctrl+alt+x", hotkey_ocr: "ctrl+alt+o", hotkey_repeat: "ctrl+alt+r" });
     if (String(url).indexOf("/api/v1/history") >= 0) return jsonRes(200, { records: [], total: 0, skipped_malformed: 0 });
     if (String(url).indexOf("/api/v1/lan-access") >= 0) return jsonRes(200, { port: 17945, token: "", token_masked: "", entries: [], message: "" });
     return jsonRes(404, { ok: false, error: "not_found", message: "missing" });
@@ -1786,7 +2069,8 @@ async function runUnit() {
       return Promise.resolve(jsonRes(200, {
         polish_enabled: true,
         custom_keywords: [],
-        translate_target_lang: "zh",
+        translate_lang_pair: "zh-en",
+        translate_auto_enabled: true,
         hotkey_voice: raceCallCount === 1 ? "ctrl+alt+1" : "ctrl+alt+2",
         hotkey_screenshot: "ctrl+alt+x",
         hotkey_ocr: "ctrl+alt+o",
@@ -2019,6 +2303,53 @@ function runAsgi() {
         }
         if (!dupRejected || !setupView.getState().hotkeySaveError) {
           throw new Error("隔离 ASGI 第五键冲突未拒保存或未写 hotkeySaveError：" + JSON.stringify({ dupRejected: dupRejected, err: setupView.getState().hotkeySaveError }));
+        }
+        /* 真 HTTP 往返验证新翻译契约：config / translate(auto & manual swap) / ocr-translate(translate & raw) */
+        if (setupView.getState().translate_lang_pair !== "zh-en" || setupView.getState().translate_auto_enabled !== true) {
+          throw new Error("隔离 ASGI 默认翻译配置未映射：" + JSON.stringify({ pair: setupView.getState().translate_lang_pair, auto: setupView.getState().translate_auto_enabled }));
+        }
+        await setupCtl.hooks.onToggleAutoTranslate(false);
+        if (setupView.getState().translate_auto_enabled !== false || setupView.getState().translateSettingsSaved !== true) {
+          throw new Error("隔离 ASGI 保存 translate_auto_enabled=false 未回读");
+        }
+        await setupCtl.hooks.onToggleAutoTranslate(true);
+        await setupCtl.hooks.onChangeLangPair("zh-en");
+        if (setupView.getState().translate_lang_pair !== "zh-en" || setupView.getState().translate_auto_enabled !== true) {
+          throw new Error("隔离 ASGI 保存 translate_lang_pair 未回读");
+        }
+        const legacyCfgRes = await fetch(origin + "/api/v1/config", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ translate_target_lang: "en" })
+        });
+        if (legacyCfgRes.status !== 400) {
+          throw new Error("隔离 ASGI 传入旧键 translate_target_lang 应返回 400，实际 " + legacyCfgRes.status);
+        }
+        await setupCtl.hooks.onTranslateText({ text: "本地运行 Ollama 翻译测试", lang_pair: "zh-en", trigger: "manual" });
+        const asgiAutoTr = setupView.getState().translate;
+        if (asgiAutoTr.phase !== "result" || asgiAutoTr.source_lang !== "zh" || asgiAutoTr.target_lang !== "en" || asgiAutoTr.direction_mode !== "auto" || asgiAutoTr.text !== "[zh->en]本地运行 Ollama 翻译测试") {
+          throw new Error("隔离 ASGI 自动翻译契约异常：" + JSON.stringify(asgiAutoTr));
+        }
+        await setupCtl.hooks.onSwapDirection({ text: "本地运行 Ollama 翻译测试", lang_pair: "zh-en" });
+        const asgiManualTr = setupView.getState().translate;
+        if (asgiManualTr.phase !== "result" || asgiManualTr.source_lang !== "en" || asgiManualTr.target_lang !== "zh" || asgiManualTr.direction_mode !== "manual" || !asgiManualTr.manualOverride || asgiManualTr.text !== "[en->zh]本地运行 Ollama 翻译测试") {
+          throw new Error("隔离 ASGI 互换锁定翻译契约异常：" + JSON.stringify(asgiManualTr));
+        }
+        await setupCtl.hooks.onSwapDirection({ text: "本地运行 Ollama 翻译测试", lang_pair: "zh-en" });
+        const asgiRestoredTr = setupView.getState().translate;
+        if (asgiRestoredTr.phase !== "result" || asgiRestoredTr.direction_mode !== "auto" || asgiRestoredTr.manualOverride !== null || asgiRestoredTr.source_lang !== "zh" || asgiRestoredTr.target_lang !== "en") {
+          throw new Error("隔离 ASGI 再次点击 ⇄ 未恢复自动方向：" + JSON.stringify(asgiRestoredTr));
+        }
+        const asgiImg = new Blob(["Hello ASGI OCR"], { type: "text/plain" });
+        await setupCtl.hooks.onSubmitImage({ file: asgiImg, mode: "translate", lang_pair: "zh-en", panel: "translate" });
+        const asgiImgTr = setupView.getState().translate;
+        if (asgiImgTr.phase !== "result" || asgiImgTr.ocr_text !== "Hello ASGI OCR" || asgiImgTr.text !== "[en->zh]Hello ASGI OCR" || asgiImgTr.source_lang !== "en" || asgiImgTr.target_lang !== "zh" || asgiImgTr.direction_mode !== "auto") {
+          throw new Error("隔离 ASGI 图片翻译契约异常：" + JSON.stringify(asgiImgTr));
+        }
+        await setupCtl.hooks.onSubmitImage({ file: asgiImg, mode: "raw", panel: "ocr" });
+        const asgiImgRaw = setupView.getState().ocr;
+        if (asgiImgRaw.phase !== "result" || asgiImgRaw.mode !== "raw" || asgiImgRaw.ocr_text !== "Hello ASGI OCR" || asgiImgRaw.text !== "" || asgiImgRaw.source_lang !== null) {
+          throw new Error("隔离 ASGI 纯 OCR 契约异常：" + JSON.stringify(asgiImgRaw));
         }
         setupCtl.destroy();
         const lan = await client.call("lan_access_api_v1_lan_access_get");

@@ -8,7 +8,7 @@ from __future__ import annotations
 from enum import StrEnum
 from typing import Annotated, Any, Literal, Union
 
-from pydantic import BaseModel, ConfigDict, Field, RootModel, model_validator
+from pydantic import BaseModel, ConfigDict, Field, RootModel, field_validator, model_validator
 
 from _ports import DEFAULT_ASR_PORT, DEFAULT_OLLAMA_PORT
 
@@ -510,17 +510,93 @@ class PolishResponse(BaseModel):
     text: str
 
 
+DEFAULT_TRANSLATE_LANG_PAIR = "zh-en"
+TRANSLATE_LANG_PAIRS: dict[str, tuple[str, str]] = {
+    "zh-en": ("zh", "en"),
+}
+
+
+class TranslateDirectionMode(StrEnum):
+    """翻译方向判定模式：auto 由后端自动判定，manual 为显式成对指定。"""
+
+    auto = "auto"
+    manual = "manual"
+
+
+class OcrTranslateMode(StrEnum):
+    """OCR 能力接口的处理模式：translate 识别并翻译，raw 仅识别原文。"""
+
+    translate = "translate"
+    raw = "raw"
+
+
+def validate_lang_pair(lang_pair: str) -> str:
+    """单源语言对校验与规范化（供契约模型、配置更新、翻译逻辑与路由共用）。非法值抛 ValueError。"""
+    if not isinstance(lang_pair, str):
+        raise ValueError(f"翻译语言对必须是字符串，收到 {type(lang_pair).__name__}")
+    norm = lang_pair.strip().lower()
+    if norm not in TRANSLATE_LANG_PAIRS:
+        raise ValueError(f"不支持的翻译语言对: {lang_pair!r}，可选值: {sorted(TRANSLATE_LANG_PAIRS)}")
+    return norm
+
+
+def validate_direction_override(
+    lang_pair: str,
+    source_lang: str | None,
+    target_lang: str | None,
+) -> tuple[str, tuple[str, str] | None]:
+    """单源语言对 + 可选手动方向校验。
+
+    - (None, None) → (norm_pair, None)（自动判定模式）
+    - 仅传单边或含空白串 → 抛 ValueError
+    - (src, tgt) 必须同属该语言对且互不相同 → (norm_pair, (norm_src, norm_tgt))
+    """
+    norm_pair = validate_lang_pair(lang_pair)
+    if source_lang is None and target_lang is None:
+        return norm_pair, None
+    if source_lang is None or target_lang is None:
+        raise ValueError("手动指定翻译方向时必须同时提供非空的 source_lang 和 target_lang")
+    norm_src = source_lang.strip().lower()
+    norm_tgt = target_lang.strip().lower()
+    if not norm_src or not norm_tgt:
+        raise ValueError("手动指定翻译方向时必须同时提供非空的 source_lang 和 target_lang")
+    allowed = TRANSLATE_LANG_PAIRS[norm_pair]
+    if norm_src == norm_tgt:
+        raise ValueError(f"源语言与目标语言不能相同: {norm_src!r}")
+    if {norm_src, norm_tgt} != set(allowed):
+        raise ValueError(
+            f"方向 {norm_src!r} -> {norm_tgt!r} 不属于语言对 {norm_pair!r}（可选语言: {list(allowed)}）"
+        )
+    return norm_pair, (norm_src, norm_tgt)
+
+
 class TranslateRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     text: str
-    target_lang: str
+    lang_pair: str = DEFAULT_TRANSLATE_LANG_PAIR
+    source_lang: str | None = None
+    target_lang: str | None = None
+
+    @model_validator(mode="after")
+    def _validate_request(self) -> "TranslateRequest":
+        if not self.text.strip():
+            raise ValueError("翻译文本不能为空")
+        norm_pair, override = validate_direction_override(self.lang_pair, self.source_lang, self.target_lang)
+        self.lang_pair = norm_pair
+        if override is not None:
+            self.source_lang, self.target_lang = override
+        return self
 
 
 class TranslateResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
     ok: Literal[True] = True
     text: str
+    lang_pair: str
+    source_lang: str
     target_lang: str
+    direction_mode: TranslateDirectionMode
+    chunks: int = Field(default=1, ge=1)
 
 
 class OcrTranslateResponse(BaseModel):
@@ -530,7 +606,12 @@ class OcrTranslateResponse(BaseModel):
     ok: Literal[True] = True
     text: str
     ocr_text: str
-    target_lang: str
+    mode: OcrTranslateMode
+    lang_pair: str | None = None
+    source_lang: str | None = None
+    target_lang: str | None = None
+    direction_mode: TranslateDirectionMode | None = None
+    chunks: int | None = Field(default=None, ge=1)
 
 
 class OcrTextLine(BaseModel):
@@ -566,7 +647,11 @@ class OcrInplaceResponse(BaseModel):
     ok: Literal[True] = True
     text: str
     ocr_text: str
-    target_lang: str
+    mode: OcrTranslateMode
+    lang_pair: str | None = None
+    source_lang: str | None = None
+    target_lang: str | None = None
+    direction_mode: TranslateDirectionMode | None = None
     image_width: int = Field(ge=1)
     image_height: int = Field(ge=1)
     blocks: list[OcrTextBlock] = Field(default_factory=list)
@@ -614,7 +699,8 @@ class AppConfig(BaseModel):
     whisper_model: str = "small"
     whisper_language: str = "zh"
     custom_keywords: list[str] = Field(default_factory=list)
-    translate_target_lang: str = "zh"
+    translate_lang_pair: str = DEFAULT_TRANSLATE_LANG_PAIR
+    translate_auto_enabled: bool = True
     baidu_appid: str = ""
     baidu_appkey: str = ""
     hotkey_voice: str = "ctrl+alt+z"
@@ -628,6 +714,11 @@ class AppConfig(BaseModel):
     asr_sidecar_url: str | None = None
     ollama_base_url: str | None = None
     polish_enabled: bool | None = None
+
+    @field_validator("translate_lang_pair")
+    @classmethod
+    def _validate_translate_lang_pair(cls, value: str) -> str:
+        return validate_lang_pair(value)
 
 
 
@@ -656,7 +747,8 @@ class AppConfigView(BaseModel):
     model_config = ConfigDict(extra="forbid")
     polish_enabled: bool
     custom_keywords: list[str]
-    translate_target_lang: str
+    translate_lang_pair: str
+    translate_auto_enabled: bool
     hotkey_voice: str
     hotkey_screenshot: str
     hotkey_ocr: str = "ctrl+alt+o"
@@ -672,7 +764,8 @@ class AppConfigUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid")
     polish_enabled: bool | None = None
     custom_keywords: list[str] | None = None
-    translate_target_lang: str | None = Field(default=None, min_length=1)
+    translate_lang_pair: str | None = Field(default=None, min_length=1)
+    translate_auto_enabled: bool | None = None
     hotkey_voice: str | None = Field(default=None, min_length=1)
     hotkey_screenshot: str | None = Field(default=None, min_length=1)
     hotkey_ocr: str | None = Field(default=None, min_length=1)
@@ -1057,7 +1150,13 @@ __all__ = [
     "AppConfig",
     "ChunkAccepted",
     "DEFAULT_OLLAMA_BASE_URL",
+    "DEFAULT_TRANSLATE_LANG_PAIR",
     "OLLAMA_VERSION",
+    "OcrTranslateMode",
+    "TRANSLATE_LANG_PAIRS",
+    "TranslateDirectionMode",
+    "validate_direction_override",
+    "validate_lang_pair",
     "ErrorBody",
     "ErrorCode",
     "HistoryListResponse",
