@@ -1,13 +1,13 @@
-"""原位识别 / 翻译浮窗的框下迷你菜单（UI 验收标准 docs/design/v3.3/overlay-a.html）。
+"""原位识别 / 翻译浮窗的框下迷你菜单与悬浮条避让定位（UI 验收标准 docs/design/v3.3/overlay-a.html）。
 
 单一职责：按模式与状态出按钮（OCR「复制」/ 翻译「复制译文 · 复制原文」/ 失败「重试」/
 加载中转圈提示），按复制回调的返回值如实显示「✓ 已复制」或「复制失败」，
-并给出「框下 → 框上 → 框内底部」的避让位置。纯 UI：QFrame + QPushButton，
-样式来自 `theme.float_bar_stylesheet()`，通过回调派发意图。
+并提供悬浮条共享构造原语与「框下 → 框上 → 框内底部」避让定位算法（含模板 B 二级样式条定位）。
+纯 UI：QFrame + QPushButton，样式来自 `theme.float_bar_stylesheet()`，通过回调派发意图。
 """
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable
 
 from PySide6.QtCore import QPoint, QRect, QRectF, QSize, Qt, QTimer
 from PySide6.QtGui import QHideEvent, QPainter, QPaintEvent, QPen, QShowEvent
@@ -26,10 +26,6 @@ COPIED_TEXT = "✓ 已复制"
 COPY_FAILED_TEXT = "复制失败"
 RETRY_TEXT = "重试"
 ESC_HINT = "Esc"
-UNDO_TEXT = "撤销"
-COPY_TEXT = "复制"
-SAVE_TEXT = "保存"
-CANCEL_TEXT = "取消"
 
 
 class _Spinner(QWidget):
@@ -222,116 +218,49 @@ def has_window_keyboard_focus(window: QWidget) -> bool:
     return focus is not None and (focus is window or window.isAncestorOf(focus))
 
 
-def place_menu(canvas: QRect, size: QSize, avail: QRect) -> tuple[QPoint, str]:
-    """菜单左上角（全局坐标）与位置名：框下 → 放不下翻到框上 → 再放不下放框内底部；水平不出屏。"""
+def place_menu(
+    canvas: QRect,
+    size: QSize,
+    avail: QRect,
+    *,
+    reserve_extra_h: int = 0,
+) -> tuple[QPoint, str]:
+    """菜单左上角（全局坐标）与位置名：框下 → 放不下翻到框上 → 再放不下放框内底部；水平不出屏。
+
+    `reserve_extra_h` 用于双条模式一次性预留二级样式条高度，使主条始终贴紧选区边且展开二级条不翻边抖动。
+    """
+    extra = max(0, int(reserve_extra_h))
+    max_h = size.height() + extra
     right_limit = avail.x() + avail.width() - size.width()
     x = max(avail.x(), min(canvas.x(), right_limit))
     below = canvas.y() + canvas.height() + theme.OVERLAY_MENU_GAP_PX
-    if below + size.height() <= avail.y() + avail.height():
+    if below + max_h <= avail.y() + avail.height():
         return QPoint(x, below), "below"
-    above = canvas.y() - theme.OVERLAY_MENU_GAP_PX - size.height()
-    if above >= avail.y():
-        return QPoint(x, above), "above"
+    above_outer = canvas.y() - theme.OVERLAY_MENU_GAP_PX - max_h
+    if above_outer >= avail.y():
+        return QPoint(x, canvas.y() - theme.OVERLAY_MENU_GAP_PX - size.height()), "above"
     inside = canvas.y() + canvas.height() - size.height() - theme.OVERLAY_MENU_INSIDE_PAD_PX
-    return QPoint(x, max(canvas.y(), inside)), "inside"
+    y = max(canvas.y(), inside)
+    max_y = avail.y() + avail.height() - size.height()
+    y = max(avail.y(), min(y, max_y))
+    return QPoint(x, y), "inside"
 
 
-class AnnotateToolbar(QFrame):
-    """截屏标注迷你工具条（annotate-a.html）：矩形·箭头·文字·马赛克 │ 撤销 │ 复制·保存 │ 取消 Esc [状态]。"""
-
-    def __init__(
-        self,
-        *,
-        tool_items: Sequence[tuple[str, str]],
-        on_pick_tool: Callable[[str], None],
-        on_undo: Callable[[], None],
-        on_copy: Callable[[], None],
-        on_save: Callable[[], None],
-        on_cancel: Callable[[], None],
-        parent: QWidget | None = None,
-    ) -> None:
-        super().__init__(parent)
-        self.setObjectName("oviFloatBar")
-        self.setStyleSheet(theme.float_bar_stylesheet())
-
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(3, 3, 3, 3)
-        layout.setSpacing(4)
-
-        self._tool_buttons: dict[str, QPushButton] = {}
-        self._all_buttons: dict[str, QPushButton] = {}
-        for key, label in tool_items:
-            btn = make_bar_button(self, label)
-            btn.clicked.connect(lambda _checked=False, k=key: on_pick_tool(k))
-            layout.addWidget(btn)
-            self._tool_buttons[key] = btn
-            self._all_buttons[key] = btn
-
-        layout.addWidget(make_bar_divider(self))
-        self._undo_btn = make_bar_button(self, UNDO_TEXT)
-        self._undo_btn.setEnabled(False)
-        self._undo_btn.clicked.connect(on_undo)
-        layout.addWidget(self._undo_btn)
-        self._all_buttons["undo"] = self._undo_btn
-
-        layout.addWidget(make_bar_divider(self))
-        self._copy_btn = make_bar_button(self, COPY_TEXT)
-        self._copy_btn.clicked.connect(on_copy)
-        layout.addWidget(self._copy_btn)
-        self._all_buttons["copy"] = self._copy_btn
-
-        self._save_btn = make_bar_button(self, SAVE_TEXT)
-        self._save_btn.clicked.connect(on_save)
-        layout.addWidget(self._save_btn)
-        self._all_buttons["save"] = self._save_btn
-
-        layout.addWidget(make_bar_divider(self))
-        self._cancel_btn = make_bar_button(self, CANCEL_TEXT)
-        self._cancel_btn.clicked.connect(on_cancel)
-        layout.addWidget(self._cancel_btn)
-        self._all_buttons["cancel"] = self._cancel_btn
-
-        hint = QLabel(ESC_HINT, self)
-        hint.setObjectName("oviFloatHint")
-        hint.setContentsMargins(2, 0, 8, 0)
-        layout.addWidget(hint)
-
-        self._status = QLabel("", self)
-        self._status.setObjectName("oviFloatOk")
-        self._status.setContentsMargins(8, 0, 8, 0)
-        self._status.hide()
-        layout.addWidget(self._status)
-
-    def button(self, key: str) -> QPushButton:
-        """按工具名或动作名（rect/arrow/text/mosaic/undo/copy/save/cancel）取按钮。"""
-        return self._all_buttons[key]
-
-    def visible_labels(self) -> list[str]:
-        """当前可见按钮的从左到右文案列表。"""
-        return [btn.text() for btn in self._all_buttons.values() if not btn.isHidden()]
-
-    def status_text(self) -> str:
-        return "" if self._status.isHidden() else self._status.text()
-
-    def set_active_tool(self, tool: str | None) -> None:
-        for key, btn in self._tool_buttons.items():
-            set_button_property(btn, "active", "true" if key == tool else "")
-
-    def set_undo_enabled(self, enabled: bool) -> None:
-        self._undo_btn.setEnabled(bool(enabled))
-
-    def set_copy_failed(self, failed: bool) -> None:
-        self._copy_btn.setText(COPY_FAILED_TEXT if failed else COPY_TEXT)
-        set_button_property(self._copy_btn, "feedback", "fail" if failed else "")
-        self.adjustSize()
-
-    def set_status(self, text: str, *, ok: bool) -> None:
-        if not text:
-            self._status.clear()
-            self._status.hide()
-        else:
-            self._status.setObjectName("oviFloatOk" if ok else "oviFloatError")
-            self._status.setText(text)
-            self._status.show()
-            self.setStyleSheet(theme.float_bar_stylesheet())
-        self.adjustSize()
+def place_secondary_bar(
+    main_rect: QRect,
+    sub_size: QSize,
+    placement: str,
+    avail: QRect,
+    *,
+    gap: int = theme.ANNOTATE_SUB_BAR_GAP_PX,
+) -> QPoint:
+    """二级样式条左上角（全局坐标）：框下在主条正下方，框上/框内在主条正上方；横纵向均钳制于 avail 内。"""
+    right_limit = avail.x() + avail.width() - sub_size.width()
+    x = max(avail.x(), min(main_rect.x(), right_limit))
+    if placement == "below":
+        y = main_rect.y() + main_rect.height() + gap
+    else:
+        y = main_rect.y() - gap - sub_size.height()
+    max_y = avail.y() + avail.height() - sub_size.height()
+    y = max(avail.y(), min(y, max_y))
+    return QPoint(x, y)

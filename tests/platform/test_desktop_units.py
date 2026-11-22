@@ -106,6 +106,8 @@ class FakeAnnotator:
         rect,
         *,
         virtual_rect,
+        initial_style,
+        on_style_changed,
         on_copy_image,
         on_save_image,
         on_closed,
@@ -114,6 +116,8 @@ class FakeAnnotator:
         self.png = png
         self.rect = rect
         self.virtual_rect = virtual_rect
+        self.initial_style = initial_style
+        self.on_style_changed = on_style_changed
         self.on_copy_image = on_copy_image
         self.on_save_image = on_save_image
         self.on_closed = on_closed
@@ -683,8 +687,10 @@ def test_ui_bridge_configure_qt_platform_env_and_open_live_selector(monkeypatch)
         assert seen_kwargs[-1] == {"png": b"png", "rect": (10, 20, 30, 40), "mode": "ocr",
                                    "virtual_geometry": (0, 0, 1920, 1080), **callbacks}
 
-    # 7. open_annotator：与原位浮窗同一显示方式，按契约 G 透传回调与虚拟桌面几何
+    # 7. open_annotator：与原位浮窗同一显示方式，必传并透传 initial_style / on_style_changed / 回调与虚拟桌面几何
     ann_cbs = {
+        "initial_style": ("#2f81f7", "thick"),
+        "on_style_changed": lambda _s: None,
         "on_copy_image": lambda _b: True,
         "on_save_image": lambda _b: SaveResult(path="/pictures/x.png"),
         "on_closed": lambda: None,
@@ -693,7 +699,16 @@ def test_ui_bridge_configure_qt_platform_env_and_open_live_selector(monkeypatch)
         calls.clear()
         ann = open_annotator(app_, DummyOverlay, b"png", (15, 25, 35, 45), virtual_rect=(0, 0, 1920, 1080), **ann_cbs)
         assert isinstance(ann, DummyOverlay) and calls == [expected, "raise_", "activateWindow"]
-        assert seen_kwargs[-1] == {"png": b"png", "rect": (15, 25, 35, 45), "virtual_geometry": (0, 0, 1920, 1080), **ann_cbs}
+        assert seen_kwargs[-1] == {
+            "png": b"png",
+            "rect": (15, 25, 35, 45),
+            "virtual_geometry": (0, 0, 1920, 1080),
+            **ann_cbs,
+        }
+    for missing_key in ("initial_style", "on_style_changed"):
+        incomplete = {k: v for k, v in ann_cbs.items() if k != missing_key}
+        with pytest.raises(TypeError):
+            open_annotator(single_app, DummyOverlay, b"png", (15, 25, 35, 45), virtual_rect=(0, 0, 1920, 1080), **incomplete)
 
 
 def test_capture_flow_annotate_mode_exclusion_copy_and_save(tmp_path: Path):
@@ -830,6 +845,110 @@ def test_capture_flow_handle_escape_unified_routing_and_close_overlay_separation
     ann2 = annotators[1]
     flow.close_overlay()
     assert ann2.closed_silent is True and ann2.escape_calls == 0 and flow.overlay_active() is False
+
+
+def test_capture_flow_annotate_style_memory_per_session_and_generation_isolation():
+    """单次运行样式记忆：首开 None、实时写回、复制/Esc/取代/强关延续、返回前同步回调与过期代次隔离、非法值抛 ValueError、双实例隔离。"""
+    flow, _status, _posted, selectors, _overlays, _copied = _make_capture_harness(
+        api=object(),
+        copy_image_fn=lambda _png: None,
+    )
+    annotators: list[FakeAnnotator] = flow._test_annotators  # type: ignore[attr-defined]
+
+    # 1. 首开前与首次打开：initial_style 为 None（默认色/档仅存 _ui_desktop/theme.py 单源）
+    assert flow.annotate_style is None
+    flow.trigger_annotate()
+    selectors[-1].on_selected((10, 20, 300, 200))
+    ann1 = annotators[-1]
+    assert ann1.initial_style is None
+
+    # 2. 实时写回 + 复制关闭后再次打开沿用上次样式
+    ann1.on_style_changed(("#2f81f7", "thick"))
+    assert flow.annotate_style == ("#2f81f7", "thick")
+    assert ann1.on_copy_image(b"png") is True
+    ann1.close()
+    assert flow.annotate_style == ("#2f81f7", "thick")
+
+    flow.trigger_annotate()
+    selectors[-1].on_selected((10, 20, 300, 200))
+    ann2 = annotators[-1]
+    assert ann2.initial_style == ("#2f81f7", "thick")
+
+    # 3. Esc 取消后再次打开仍沿用上次所选样式
+    ann2.on_style_changed(("#3fb950", "thin"))
+    assert flow.handle_escape() is True
+    assert ann2.closed is True and flow.annotate_style == ("#3fb950", "thin")
+
+    flow.trigger_annotate()
+    selectors[-1].on_selected((10, 20, 300, 200))
+    ann3 = annotators[-1]
+    assert ann3.initial_style == ("#3fb950", "thin")
+
+    # 4. 被新一次截屏取代（close_silent）以及 close_overlay 强制清理均不清空记忆
+    ann3.on_style_changed(("#f59e0b", "medium"))
+    flow.trigger_annotate()
+    assert ann3.closed_silent is True
+    selectors[-1].on_selected((10, 20, 300, 200))
+    ann4 = annotators[-1]
+    assert ann4.initial_style == ("#f59e0b", "medium")
+
+    flow.close_overlay()
+    assert ann4.closed_silent is True and flow.annotate_style == ("#f59e0b", "medium")
+    flow.trigger_annotate()
+    selectors[-1].on_selected((10, 20, 300, 200))
+    ann5 = annotators[-1]
+    assert ann5.initial_style == ("#f59e0b", "medium")
+
+    # 5. 过期代次回调（已关闭或被取代的旧浮窗）不得污染当前记忆
+    ann1.on_style_changed(("#111827", "thick"))
+    ann3.on_style_changed(("#111827", "thick"))
+    ann4.on_style_changed(("#111827", "thick"))
+    assert flow.annotate_style == ("#f59e0b", "medium")
+
+    # 6. 非法或空白样式立即抛 ValueError，且不篡改既有记忆
+    for bad in (
+        None,
+        "#ff2d2d",
+        ("#ff2d2d",),
+        ("#ff2d2d", "medium", "extra"),
+        ["#ff2d2d", "medium"],
+        ("", "medium"),
+        ("   ", "medium"),
+        ("#ff2d2d", ""),
+        ("#ff2d2d", " \t "),
+        (123, "medium"),
+    ):
+        with pytest.raises(ValueError, match="AnnotateStyle"):
+            ann5.on_style_changed(bad)  # type: ignore[arg-type]
+    assert flow.annotate_style == ("#f59e0b", "medium")
+
+    # 7. open_annotator 返回前同步触发 on_style_changed（handle 尚未就位，None is None 陷阱）必须被拒写
+    premature_flow, _st2, _p2, premature_sels, _o2, _c2 = _make_capture_harness(api=object())
+    premature_anns: list[FakeAnnotator] = []
+
+    def premature_open_annotator(png, rect, **kwargs):
+        kwargs["on_style_changed"](("#111827", "thick"))
+        ann = FakeAnnotator(png, rect, **kwargs)
+        premature_anns.append(ann)
+        return ann
+
+    premature_flow.open_annotator = premature_open_annotator
+    premature_flow.trigger_annotate()
+    premature_sels[-1].on_selected((0, 0, 100, 80))
+    assert premature_anns[0].initial_style is None
+    assert premature_flow.annotate_style is None
+    # 返回并登记句柄后的正常回调可写入
+    premature_anns[0].on_style_changed(("#f8fafc", "thin"))
+    assert premature_flow.annotate_style == ("#f8fafc", "thin")
+
+    # 8. 双独立 CaptureFlow 实例零共享（杜绝模块级可变全局状态）
+    fresh_flow, _st3, _p3, fresh_sels, _o3, _c3 = _make_capture_harness(api=object())
+    fresh_anns: list[FakeAnnotator] = fresh_flow._test_annotators  # type: ignore[attr-defined]
+    assert fresh_flow.annotate_style is None
+    fresh_flow.trigger_annotate()
+    fresh_sels[-1].on_selected((0, 0, 120, 90))
+    assert fresh_anns[0].initial_style is None
+    assert flow.annotate_style == ("#f59e0b", "medium")
 
 
 def test_capture_flow_annotate_real_save_and_linux_xclip_roundtrip(tmp_path: Path):

@@ -1,31 +1,33 @@
-"""截屏标注工具数据模型、重放绘制、马赛克块平均与原分辨率合成导出。
+"""截屏标注工具数据模型、画笔平滑轨迹、重放绘制、马赛克块平均与原分辨率合成导出。
 
 纯 UI 渲染辅助模块：不含业务流程、文件 IO 或剪贴板调用，所有颜色、线宽、字号与
-马赛克块尺寸默认取自 `_ui_desktop.theme`。坐标统一使用选区画布逻辑坐标，并在导出
-与马赛克取样时按 `image_size / canvas_size` 换算到原冻结图像素坐标系，保证 HiDPI
-下导出 PNG 分辨率严格等于原冻结图。
+马赛克块尺寸默认取自 `_ui_desktop.theme` 单源令牌。坐标统一使用选区画布逻辑坐标，
+在导出与马赛克取样时按 `image_size / canvas_size` 换算到原冻结图像素坐标系，保证
+HiDPI 下导出 PNG 分辨率严格等于原冻结图。
 """
 from __future__ import annotations
 
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Literal
 
 from PySide6.QtCore import QBuffer, QByteArray, QIODevice, QPointF, QRect, QRectF, QSize, Qt
-from PySide6.QtGui import QFont, QFontMetricsF, QImage, QPainter, QPen, QPolygonF
+from PySide6.QtGui import QFont, QFontMetricsF, QImage, QPainter, QPainterPath, QPen, QPolygonF
 
 from _ui_desktop import theme
 
-ToolName = Literal["rect", "arrow", "text", "mosaic"]
+ToolName = Literal["rect", "arrow", "brush", "text", "mosaic"]
 
 TOOL_RECT: ToolName = "rect"
 TOOL_ARROW: ToolName = "arrow"
+TOOL_BRUSH: ToolName = "brush"
 TOOL_TEXT: ToolName = "text"
 TOOL_MOSAIC: ToolName = "mosaic"
 
 TOOL_ITEMS: tuple[tuple[ToolName, str], ...] = (
     (TOOL_RECT, "矩形"),
     (TOOL_ARROW, "箭头"),
+    (TOOL_BRUSH, "画笔"),
     (TOOL_TEXT, "文字"),
     (TOOL_MOSAIC, "马赛克"),
 )
@@ -34,8 +36,10 @@ VALID_TOOLS: frozenset[str] = frozenset(name for name, _label in TOOL_ITEMS)
 ARROW_HEAD_BASE_PX = 8.0
 ARROW_HEAD_STROKE_MULT = 4.0
 ARROW_MIN_LENGTH_PX = 2.0
-# tan(25°)，与 docs/design/v3.4/annotate-a.html 箭头半角保持一致
+# tan(25°)，与 docs/design/v3.5/annotate-brush-b.html 箭头半角保持一致
 ARROW_HALF_TAN = 0.4663076581549986
+
+_DEFAULT_COLOR, _DEFAULT_SIZE = theme.resolve_annotate_style()
 
 
 @dataclass(frozen=True)
@@ -45,11 +49,18 @@ class AnnotationOp:
     tool: ToolName
     start: QPointF
     end: QPointF
-    color: str = theme.CROSSHAIR_HEX
-    stroke_px: int = theme.ANNOTATE_STROKE_PX
-    text_px: int = theme.ANNOTATE_TEXT_PX
-    block_px: int = theme.ANNOTATE_MOSAIC_BLOCK_PX
+    points: tuple[QPointF, ...] = ()
+    color: str = _DEFAULT_COLOR
+    stroke_px: int = _DEFAULT_SIZE.stroke_px
+    text_px: int = _DEFAULT_SIZE.text_px
+    block_px: int = _DEFAULT_SIZE.block_px
     text: str = ""
+
+
+def _point_distance(a: QPointF, b: QPointF) -> float:
+    dx = b.x() - a.x()
+    dy = b.y() - a.y()
+    return float((dx * dx + dy * dy) ** 0.5)
 
 
 def make_op(
@@ -57,21 +68,95 @@ def make_op(
     start: QPointF,
     end: QPointF,
     *,
+    color: str = theme.ANNOTATE_DEFAULT_COLOR_HEX,
+    size_level: str = theme.ANNOTATE_DEFAULT_SIZE_LEVEL,
+    points: Sequence[QPointF] = (),
     text: str = "",
 ) -> AnnotationOp:
-    """使用主题默认样式构建一条标注操作。"""
+    """使用主题单源校验后的颜色与粗细档位构建一条标注操作。"""
     if tool not in VALID_TOOLS:
         raise ValueError(f"不支持的标注工具：{tool!r}，允许 {sorted(VALID_TOOLS)}")
+    validated_color, size_spec = theme.resolve_annotate_style(color, size_level)
+    start_pt = QPointF(start)
+    end_pt = QPointF(end)
+    brush_pts: tuple[QPointF, ...] = ()
+    if tool == TOOL_BRUSH:
+        brush_pts = tuple(QPointF(p) for p in points) if points else (start_pt,)
+        start_pt = brush_pts[0]
+        end_pt = brush_pts[-1]
     return AnnotationOp(
         tool=tool,
-        start=QPointF(start),
-        end=QPointF(end),
-        color=theme.CROSSHAIR_HEX,
-        stroke_px=theme.ANNOTATE_STROKE_PX,
-        text_px=theme.ANNOTATE_TEXT_PX,
-        block_px=theme.ANNOTATE_MOSAIC_BLOCK_PX,
+        start=start_pt,
+        end=end_pt,
+        points=brush_pts,
+        color=validated_color,
+        stroke_px=size_spec.stroke_px,
+        text_px=size_spec.text_px,
+        block_px=size_spec.block_px,
         text=text,
     )
+
+
+def append_brush_point(
+    op: AnnotationOp,
+    pt: QPointF,
+    *,
+    min_step_px: float = theme.ANNOTATE_BRUSH_MIN_STEP_PX,
+    force: bool = False,
+) -> AnnotationOp:
+    """向画笔草稿追加采样点：常规拖拽按 min_step_px 去重，松手 force=True 补末点。"""
+    if op.tool != TOOL_BRUSH:
+        raise ValueError(f"append_brush_point 仅支持画笔工具，收到 {op.tool!r}")
+    new_pt = QPointF(pt)
+    if not op.points:
+        return replace(op, start=new_pt, end=new_pt, points=(new_pt,))
+    dist = _point_distance(op.points[-1], new_pt)
+    if force:
+        if dist <= 0.0:
+            return op
+    elif dist < float(min_step_px):
+        return op
+    return replace(op, end=new_pt, points=(*op.points, new_pt))
+
+
+def brush_path_length(points: Sequence[QPointF]) -> float:
+    """计算画笔轨迹总路径长度（逻辑像素）。"""
+    if len(points) < 2:
+        return 0.0
+    total = 0.0
+    for idx in range(1, len(points)):
+        total += _point_distance(points[idx - 1], points[idx])
+    return total
+
+
+def build_brush_path(points: Sequence[QPointF]) -> QPainterPath:
+    """将采样点列构造成中点二次贝塞尔平滑曲线（对齐 annotate-brush-b.html drawBrushPath）。"""
+    path = QPainterPath()
+    if not points:
+        return path
+    path.moveTo(points[0])
+    if len(points) == 1:
+        return path
+    if len(points) == 2:
+        path.lineTo(points[1])
+        return path
+    for idx in range(1, len(points) - 1):
+        curr = points[idx]
+        nxt = points[idx + 1]
+        mid = QPointF((curr.x() + nxt.x()) / 2.0, (curr.y() + nxt.y()) / 2.0)
+        path.quadTo(curr, mid)
+    path.lineTo(points[-1])
+    return path
+
+
+def is_valid_op(op: AnnotationOp) -> bool:
+    """判定标注操作是否有效：画笔按总路径长判有效以保留起终点重合的闭合圆。"""
+    if op.tool == TOOL_TEXT:
+        return bool(op.text.strip())
+    if op.tool == TOOL_BRUSH:
+        return len(op.points) >= 2 and brush_path_length(op.points) >= theme.ANNOTATE_BRUSH_MIN_PATH_PX
+    rect = normalized_rect(op.start, op.end)
+    return rect.width() + rect.height() > theme.ANNOTATE_MIN_DRAG_PX
 
 
 def normalized_rect(start: QPointF, end: QPointF) -> QRectF:
@@ -128,7 +213,7 @@ def mosaic_patch(source: QImage, rect_px: QRect, block_w: int, block_h: int) -> 
 
 
 def draw_vector_op(painter: QPainter, op: AnnotationOp) -> None:
-    """在当前画布坐标系中绘制单条矢量标注（矩形 / 箭头 / 文字）。"""
+    """在当前画布坐标系中绘制单条矢量标注（矩形 / 箭头 / 画笔 / 文字）。"""
     color = theme.qcolor(op.color, opaque=True)
     if op.tool == TOOL_RECT:
         pen = QPen(
@@ -146,7 +231,7 @@ def draw_vector_op(painter: QPainter, op: AnnotationOp) -> None:
     if op.tool == TOOL_ARROW:
         dx = op.end.x() - op.start.x()
         dy = op.end.y() - op.start.y()
-        length = (dx * dx + dy * dy) ** 0.5
+        length = float((dx * dx + dy * dy) ** 0.5)
         if length < ARROW_MIN_LENGTH_PX:
             return
         ux, uy = dx / length, dy / length
@@ -175,6 +260,27 @@ def draw_vector_op(painter: QPainter, op: AnnotationOp) -> None:
             ]
         )
         painter.drawPolygon(head_poly)
+        return
+
+    if op.tool == TOOL_BRUSH:
+        if not op.points:
+            return
+        if len(op.points) == 1:
+            radius = max(1.5, op.stroke_px / 2.0)
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(color)
+            painter.drawEllipse(op.points[0], radius, radius)
+            return
+        pen = QPen(
+            color,
+            float(op.stroke_px),
+            Qt.PenStyle.SolidLine,
+            Qt.PenCapStyle.RoundCap,
+            Qt.PenJoinStyle.RoundJoin,
+        )
+        painter.setPen(pen)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawPath(build_brush_path(op.points))
         return
 
     if op.tool == TOOL_TEXT:

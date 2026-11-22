@@ -1,9 +1,10 @@
-"""截屏标注浮窗（UI 验收标准 docs/design/v3.4/annotate-a.html「一条迷你工具条」）。
+"""截屏标注浮窗（UI 验收标准 docs/design/v3.5/annotate-brush-b.html 模板 B）。
 
 单一职责：全屏透明窗口，在选区原位显示冻结截图与标注合成画布，选区外覆暗色遮罩，
-工具条复用 `mini_menu.AnnotateToolbar` 与 `place_menu` 避让定位；点框外不关闭；
-复制成功立即关闭、失败提示 1.5s 不关；保存成功显示路径 `theme.ANNOTATE_SAVED_FEEDBACK_MS`
-后关闭、失败显示原因不关；Esc 按焦点状态裁决（文字输入中仅结束输入，非输入态关闭）。
+采用精简主条 `AnnotateToolbar` + 按需二级样式条 `AnnotateStyleBar`（6 色 + 3 档，
+马赛克藏色，联合高度锁锚保证主条 0px 抖动），支持自由手绘画笔与无修饰 Enter 自动复制；
+点框外不关闭；复制成功立即关闭、失败提示 1.5s 不关；保存成功显示路径
+`theme.ANNOTATE_SAVED_FEEDBACK_MS` 后关闭、失败显示原因不关；Esc 按焦点状态裁决。
 纯 UI，不含文件 IO、网络或剪贴板调用。
 """
 from __future__ import annotations
@@ -13,35 +14,28 @@ from dataclasses import replace
 from typing import Protocol, cast
 
 from PySide6.QtCore import QPoint, QPointF, QRect, QRectF, Qt, QTimer
-from PySide6.QtGui import (
-    QCloseEvent,
-    QFont,
-    QFontMetrics,
-    QImage,
-    QKeyEvent,
-    QMouseEvent,
-    QPainter,
-    QPaintEvent,
-    QPen,
-)
-from PySide6.QtWidgets import QLineEdit, QWidget
+from PySide6.QtGui import QCloseEvent, QImage, QKeyEvent, QMouseEvent, QPainter, QPaintEvent, QPen
+from PySide6.QtWidgets import QWidget
 
 from _ui_desktop import theme
 from _ui_desktop.annotate_tools import (
+    TOOL_BRUSH,
     TOOL_ITEMS,
     TOOL_TEXT,
     VALID_TOOLS,
     AnnotationOp,
     ToolName,
+    append_brush_point,
     apply_op_to_image,
     clamp_point,
     encode_png,
+    is_valid_op,
     make_op,
-    normalized_rect,
     paint_draft_op,
     render_composite,
 )
-from _ui_desktop.mini_menu import AnnotateToolbar, has_window_keyboard_focus, place_menu
+from _ui_desktop.annotate_widgets import AnnotateStyleBar, AnnotateToolbar, InlineTextEdit, is_plain_enter_event
+from _ui_desktop.mini_menu import has_window_keyboard_focus, place_menu, place_secondary_bar
 
 SAVED_PREFIX = "✓ 已保存 "
 SAVE_FAILED_PREFIX = "保存失败："
@@ -57,38 +51,8 @@ class SaveResultLike(Protocol):
     def error(self) -> str | None: ...
 
 
-class _InlineTextEdit(QLineEdit):
-    """画布内联文字输入框：开启输入法支持中文，Enter 提交、Esc 仅取消本次输入。"""
-
-    def __init__(
-        self,
-        *,
-        on_commit: Callable[[], None],
-        on_cancel: Callable[[], None],
-        parent: QWidget,
-    ) -> None:
-        super().__init__(parent)
-        self._on_commit = on_commit
-        self._on_cancel = on_cancel
-        self.setObjectName("oviAnnotateEdit")
-        self.setStyleSheet(theme.annotate_edit_stylesheet(color=theme.CROSSHAIR_HEX))
-        self.setAttribute(Qt.WidgetAttribute.WA_InputMethodEnabled, True)
-
-    def keyPressEvent(self, event: QKeyEvent) -> None:
-        key = event.key()
-        if key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
-            event.accept()
-            self._on_commit()
-            return
-        if key == Qt.Key.Key_Escape:
-            event.accept()
-            self._on_cancel()
-            return
-        super().keyPressEvent(event)
-
-
 class AnnotateOverlay(QWidget):
-    """全屏透明截屏标注浮窗：冻结图 + 标注画布 + 框下/框上/框内迷你工具条。"""
+    """全屏透明截屏标注浮窗：冻结图 + 标注画布 + 模板 B 双条零抖动工具条。"""
 
     def __init__(
         self,
@@ -99,6 +63,8 @@ class AnnotateOverlay(QWidget):
         on_copy_image: Callable[[bytes], bool] | None = None,
         on_save_image: Callable[[bytes], SaveResultLike] | None = None,
         on_closed: Callable[[], None] | None = None,
+        initial_style: tuple[str, str] | None = None,
+        on_style_changed: Callable[[tuple[str, str]], None] | None = None,
         available_screen_rect: tuple[int, int, int, int] | None = None,
         copy_feedback_ms: int = theme.ANNOTATE_COPY_FEEDBACK_MS,
         saved_feedback_ms: int = theme.ANNOTATE_SAVED_FEEDBACK_MS,
@@ -115,6 +81,13 @@ class AnnotateOverlay(QWidget):
             raise ValueError(f"screen_rect 宽高必须大于 0，收到 {screen_rect!r}")
         vx, vy, vw, vh = theme.resolve_virtual_geometry(virtual_geometry)
 
+        if initial_style is None:
+            color_hex, size_spec = theme.resolve_annotate_style()
+        else:
+            if not isinstance(initial_style, tuple) or len(initial_style) != 2:
+                raise ValueError(f"initial_style 必须是二元组 (color_hex, size_level)，收到 {initial_style!r}")
+            color_hex, size_spec = theme.resolve_annotate_style(initial_style[0], initial_style[1])
+
         self._base = base.convertToFormat(QImage.Format.Format_ARGB32)
         self._screen_rect = QRect(sx, sy, sw, sh)
         self._origin = QPoint(vx, vy)
@@ -124,21 +97,19 @@ class AnnotateOverlay(QWidget):
         self._on_copy_image = on_copy_image
         self._on_save_image = on_save_image
         self._on_closed = on_closed
+        self._on_style_changed = on_style_changed
         self._copy_feedback_ms = max(1, int(copy_feedback_ms))
         self._saved_feedback_ms = max(1, int(saved_feedback_ms))
         self._closed_notified = False
 
+        self._color: str = color_hex
+        self._size_spec: theme.AnnotateSizeSpec = size_spec
         self._tool: ToolName | None = None
         self._ops: list[AnnotationOp] = []
         self._composite: QImage = self._base.copy()
         self._draft: AnnotationOp | None = None
-        self._text_edit: _InlineTextEdit | None = None
+        self._text_edit: InlineTextEdit | None = None
         self._text_anchor: QPointF | None = None
-        self._text_font: QFont = theme.make_font(
-            pixel_size=theme.ANNOTATE_TEXT_PX,
-            mono=False,
-            weight=QFont.Weight.DemiBold,
-        )
         self._menu_placement = "below"
 
         self.setWindowFlags(
@@ -162,11 +133,16 @@ class AnnotateOverlay(QWidget):
 
         self.toolbar = AnnotateToolbar(
             tool_items=TOOL_ITEMS,
-            on_pick_tool=self.pick_tool,
+            on_pick_tool=lambda key: self.pick_tool(key, toggle=True),
             on_undo=self.undo,
             on_copy=self._copy_image,
             on_save=self._save_image,
             on_cancel=self._cancel_and_close,
+            parent=self,
+        )
+        self.style_bar = AnnotateStyleBar(
+            on_pick_color=self.pick_color,
+            on_pick_size=self.pick_size,
             parent=self,
         )
         self._place_toolbar()
@@ -176,12 +152,24 @@ class AnnotateOverlay(QWidget):
     # ------------------------------------------------------------------
     @property
     def menu_placement(self) -> str:
-        """迷你工具条当前位置：below / above / inside。"""
+        """主工具条当前位置：below / above / inside。"""
         return self._menu_placement
 
     @property
     def current_tool(self) -> ToolName | None:
         return self._tool
+
+    @property
+    def current_color(self) -> str:
+        return self._color
+
+    @property
+    def current_size_level(self) -> str:
+        return self._size_spec.key
+
+    @property
+    def current_style(self) -> tuple[str, str]:
+        return (self._color, self._size_spec.key)
 
     @property
     def is_editing_text(self) -> bool:
@@ -203,14 +191,38 @@ class AnnotateOverlay(QWidget):
         """将当前冻结图 + 全部已提交标注编码为原分辨率 PNG 字节流。"""
         return encode_png(self._composite)
 
-    def pick_tool(self, tool: str) -> None:
+    def pick_tool(self, tool: str, *, toggle: bool = False) -> None:
         if tool not in VALID_TOOLS:
             raise ValueError(f"不支持的标注工具：{tool!r}，允许 {sorted(VALID_TOOLS)}")
+        self._draft = None
         if self._text_edit is not None:
             self._commit_text()
         typed_tool = cast(ToolName, tool)
-        self._tool = typed_tool
-        self.toolbar.set_active_tool(typed_tool)
+        self._tool = None if (toggle and self._tool == typed_tool) else typed_tool
+        self.toolbar.set_active_tool(self._tool)
+        self._sync_style_bar()
+        self.update()
+
+    def pick_color(self, color: str) -> None:
+        validated = theme.validate_annotate_color(color)
+        changed = validated != self._color
+        self._color = validated
+        if self._text_edit is not None:
+            self._text_edit.apply_style(color=self._color, text_px=self._size_spec.text_px)
+        self._sync_style_bar()
+        if changed and self._on_style_changed is not None:
+            self._on_style_changed(self.current_style)
+
+    def pick_size(self, size_level: str) -> None:
+        spec = theme.validate_annotate_size(size_level)
+        changed = spec.key != self._size_spec.key
+        self._size_spec = spec
+        if self._text_edit is not None and self._text_anchor is not None:
+            self._text_edit.apply_style(color=self._color, text_px=self._size_spec.text_px)
+            self._text_anchor = self._text_edit.fit_in_canvas(self._canvas, self._text_anchor)
+        self._sync_style_bar()
+        if changed and self._on_style_changed is not None:
+            self._on_style_changed(self.current_style)
 
     def undo(self) -> None:
         if not self._ops:
@@ -230,11 +242,12 @@ class AnnotateOverlay(QWidget):
         """关闭但不回调 on_closed（被新一次截屏取代或应用退出时）。"""
         self._closed_notified = True
         self._stop_timers()
+        self._draft = None
         self._cancel_text()
         self.close()
 
     # ------------------------------------------------------------------
-    # 工具条动作：复制 / 保存 / 取消 / Esc
+    # 工具条动作与零抖动定位：复制 / 保存 / 取消 / Esc / Enter
     # ------------------------------------------------------------------
     def _handle_escape_action(self) -> None:
         if self._text_edit is not None:
@@ -243,12 +256,18 @@ class AnnotateOverlay(QWidget):
         self.close()
 
     def _cancel_and_close(self) -> None:
+        self._draft = None
         self._cancel_text()
         self.close()
 
     def _copy_image(self) -> None:
+        self._save_close_timer.stop()
+        if self.toolbar.status_text():
+            self.toolbar.set_status("", ok=True)
+            self._place_toolbar()
         if self._text_edit is not None:
             self._commit_text()
+        self._finalize_draft()
         ok = bool(self._on_copy_image(self.export_png())) if self._on_copy_image is not None else False
         if ok:
             self._copy_reset_timer.stop()
@@ -265,6 +284,7 @@ class AnnotateOverlay(QWidget):
     def _save_image(self) -> None:
         if self._text_edit is not None:
             self._commit_text()
+        self._finalize_draft()
         if self._on_save_image is None:
             self._save_close_timer.stop()
             self.toolbar.set_status(f"{SAVE_FAILED_PREFIX}未配置保存回调", ok=False)
@@ -284,9 +304,23 @@ class AnnotateOverlay(QWidget):
 
     def _place_toolbar(self) -> None:
         self.toolbar.adjustSize()
-        top_left, placement = place_menu(self._screen_rect, self.toolbar.size(), self._avail)
+        reserve_h = self.style_bar.reserved_height() + theme.ANNOTATE_SUB_BAR_GAP_PX
+        top_left, placement = place_menu(self._screen_rect, self.toolbar.size(), self._avail, reserve_extra_h=reserve_h)
         self.toolbar.move(top_left - self._origin)
         self._menu_placement = placement
+        if self.style_bar.isVisible():
+            self._place_style_bar()
+
+    def _place_style_bar(self) -> None:
+        self.style_bar.adjustSize()
+        main_global = QRect(self.toolbar.pos() + self._origin, self.toolbar.size())
+        sub_top_left = place_secondary_bar(main_global, self.style_bar.size(), self._menu_placement, self._avail)
+        self.style_bar.move(sub_top_left - self._origin)
+
+    def _sync_style_bar(self) -> None:
+        self.style_bar.set_state(tool=self._tool, color=self._color, size_level=self._size_spec.key)
+        if self.style_bar.isVisible():
+            self._place_style_bar()
 
     def _stop_timers(self) -> None:
         self._copy_reset_timer.stop()
@@ -297,18 +331,16 @@ class AnnotateOverlay(QWidget):
     # ------------------------------------------------------------------
     def _open_text(self, canvas_pt: QPointF) -> None:
         self._cancel_text()
-        edit = _InlineTextEdit(on_commit=self._commit_text, on_cancel=self._cancel_text, parent=self)
-        edit.setFont(self._text_font)
-        h = theme.ANNOTATE_TEXT_PX + theme.ANNOTATE_EDIT_EXTRA_HEIGHT_PX
-        min_w = min(theme.ANNOTATE_EDIT_MIN_WIDTH_PX, max(1, self._canvas.width()))
-        max_x = max(self._canvas.x(), self._canvas.x() + self._canvas.width() - min_w)
-        max_y = max(self._canvas.y(), self._canvas.y() + self._canvas.height() - h)
-        x = max(self._canvas.x(), min(self._canvas.x() + round(canvas_pt.x()), max_x))
-        y = max(self._canvas.y(), min(self._canvas.y() + round(canvas_pt.y()) - 2, max_y))
+        edit = InlineTextEdit(
+            color=self._color,
+            text_px=self._size_spec.text_px,
+            on_commit=self._commit_text,
+            on_cancel=self._cancel_text,
+            parent=self,
+        )
         self._text_edit = edit
-        self._text_anchor = QPointF(x - self._canvas.x(), y + 2 - self._canvas.y())
+        self._text_anchor = edit.fit_in_canvas(self._canvas, canvas_pt)
         edit.textChanged.connect(lambda _text: self._fit_text_edit())
-        self._fit_text_edit()
         edit.show()
         edit.setFocus(Qt.FocusReason.MouseFocusReason)
 
@@ -317,16 +349,7 @@ class AnnotateOverlay(QWidget):
         anchor = self._text_anchor
         if edit is None or anchor is None:
             return
-        x = self._canvas.x() + round(anchor.x())
-        y = self._canvas.y() + round(anchor.y()) - 2
-        h = theme.ANNOTATE_TEXT_PX + theme.ANNOTATE_EDIT_EXTRA_HEIGHT_PX
-        fm = QFontMetrics(self._text_font)
-        max_w = max(theme.ANNOTATE_EDIT_MIN_WIDTH_PX, self._canvas.x() + self._canvas.width() - x)
-        w = min(
-            max_w,
-            max(theme.ANNOTATE_EDIT_MIN_WIDTH_PX, fm.horizontalAdvance(edit.text()) + theme.ANNOTATE_EDIT_PADDING_X_PX),
-        )
-        edit.setGeometry(x, y, w, h)
+        self._text_anchor = edit.fit_in_canvas(self._canvas, anchor)
 
     def _detach_text_edit(self) -> tuple[str, QPointF | None]:
         edit = self._text_edit
@@ -345,10 +368,22 @@ class AnnotateOverlay(QWidget):
     def _commit_text(self) -> None:
         text, anchor = self._detach_text_edit()
         if text and anchor is not None:
-            self._commit_op(make_op(TOOL_TEXT, anchor, anchor, text=text))
+            self._commit_op(
+                make_op(TOOL_TEXT, anchor, anchor, color=self._color, size_level=self._size_spec.key, text=text)
+            )
 
     def _cancel_text(self) -> None:
         self._detach_text_edit()
+
+    def _finalize_draft(self) -> None:
+        draft = self._draft
+        if draft is None:
+            return
+        self._draft = None
+        if is_valid_op(draft):
+            self._commit_op(draft)
+        else:
+            self.update()
 
     def _commit_op(self, op: AnnotationOp) -> None:
         self._ops.append(op)
@@ -394,8 +429,13 @@ class AnnotateOverlay(QWidget):
         painter.drawRect(QRectF(self._canvas).adjusted(-half, -half, half, half))
 
     # ------------------------------------------------------------------
-    # 鼠标与键盘事件（点框外不关闭）
+    # 鼠标与键盘事件（点框外不关闭；inside 模式下主条/可见二级条防穿透）
     # ------------------------------------------------------------------
+    def _point_on_bars(self, pos: QPoint) -> bool:
+        if self.toolbar.geometry().contains(pos):
+            return True
+        return self.style_bar.isVisible() and self.style_bar.geometry().contains(pos)
+
     def _to_canvas(self, pos: QPointF) -> QPointF:
         return clamp_point(
             QPointF(pos.x() - self._canvas.x(), pos.y() - self._canvas.y()),
@@ -404,7 +444,7 @@ class AnnotateOverlay(QWidget):
         )
 
     def _update_cursor(self, pos: QPoint) -> None:
-        if not self._canvas.contains(pos) or self._tool is None:
+        if self._point_on_bars(pos) or not self._canvas.contains(pos) or self._tool is None:
             self.setCursor(Qt.CursorShape.ArrowCursor)
         elif self._tool == TOOL_TEXT:
             self.setCursor(Qt.CursorShape.IBeamCursor)
@@ -414,6 +454,8 @@ class AnnotateOverlay(QWidget):
     def mousePressEvent(self, event: QMouseEvent) -> None:
         event.accept()
         pos = event.position().toPoint()
+        if self._point_on_bars(pos):
+            return
         if not self._canvas.contains(pos):
             if self._text_edit is not None:
                 self._commit_text()
@@ -429,27 +471,33 @@ class AnnotateOverlay(QWidget):
         if self._tool == TOOL_TEXT:
             self._open_text(pt)
             return
-        self._draft = make_op(self._tool, pt, pt)
+        self._draft = make_op(self._tool, pt, pt, color=self._color, size_level=self._size_spec.key)
         self.update()
 
     def mouseMoveEvent(self, event: QMouseEvent) -> None:
         self._update_cursor(event.position().toPoint())
         if self._draft is not None:
-            self._draft = replace(self._draft, end=self._to_canvas(event.position()))
-            self.update()
+            pt = self._to_canvas(event.position())
+            if self._draft.tool == TOOL_BRUSH:
+                updated = append_brush_point(self._draft, pt)
+                if updated is not self._draft:
+                    self._draft = updated
+                    self.update()
+            else:
+                self._draft = replace(self._draft, end=pt)
+                self.update()
         event.accept()
 
     def mouseReleaseEvent(self, event: QMouseEvent) -> None:
         if event.button() != Qt.MouseButton.LeftButton or self._draft is None:
             event.accept()
             return
-        draft = replace(self._draft, end=self._to_canvas(event.position()))
-        self._draft = None
-        rect = normalized_rect(draft.start, draft.end)
-        if rect.width() + rect.height() > theme.ANNOTATE_MIN_DRAG_PX:
-            self._commit_op(draft)
+        pt = self._to_canvas(event.position())
+        if self._draft.tool == TOOL_BRUSH:
+            self._draft = append_brush_point(self._draft, pt, force=True)
         else:
-            self.update()
+            self._draft = replace(self._draft, end=pt)
+        self._finalize_draft()
         event.accept()
 
     def keyPressEvent(self, event: QKeyEvent) -> None:
@@ -457,10 +505,18 @@ class AnnotateOverlay(QWidget):
             event.accept()
             self._handle_escape_action()
             return
+        if is_plain_enter_event(event):
+            event.accept()
+            if self._text_edit is not None:
+                self._commit_text()
+            else:
+                self._copy_image()
+            return
         event.ignore()
 
     def closeEvent(self, event: QCloseEvent) -> None:
         self._stop_timers()
+        self._draft = None
         self._cancel_text()
         if not self._closed_notified:
             self._closed_notified = True

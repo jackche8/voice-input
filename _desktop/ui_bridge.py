@@ -8,6 +8,7 @@ from collections.abc import Callable
 from PySide6.QtCore import QObject, Qt, Signal, Slot
 
 RectTuple = tuple[int, int, int, int]
+AnnotateStyle = tuple[str, str]
 
 
 def configure_qt_platform_env() -> None:
@@ -62,12 +63,26 @@ def open_translate_overlay(app, overlay_cls, png, rect, *, mode, virtual_rect, o
     return _show_over_desktop(app, ov)
 
 
-def open_annotator(app, annotator_cls, png, rect, *, virtual_rect, on_copy_image, on_save_image, on_closed):
+def open_annotator(
+    app,
+    annotator_cls,
+    png,
+    rect,
+    *,
+    virtual_rect,
+    initial_style,
+    on_style_changed,
+    on_copy_image,
+    on_save_image,
+    on_closed,
+):
     """打开截屏标注浮窗（全屏透明窗，与框选器/原位浮窗同一显示方式）。"""
     ann = annotator_cls(
         png,
         rect,
         virtual_geometry=virtual_rect,
+        initial_style=initial_style,
+        on_style_changed=on_style_changed,
         on_copy_image=on_copy_image,
         on_save_image=on_save_image,
         on_closed=on_closed,

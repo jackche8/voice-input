@@ -5,6 +5,8 @@
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 from PySide6.QtCore import QPoint, QRect
 from PySide6.QtGui import QColor, QFont, QGuiApplication
 
@@ -34,11 +36,15 @@ SURFACE_2_HEX = "#1f2630"
 BORDER_HEX = "#30363d"
 
 TEXT_PRIMARY_HEX = "#e6edf3"
+TEXT_SECONDARY_HEX = "#c9d1d9"
 TEXT_MUTED_HEX = "#8b949e"
 
 ACCENT_HEX = "#58a6ff"
 ACCENT_HOVER_HEX = "#79c0ff"
 ACCENT_SOFT_RGBA = (56, 139, 253, 41)
+ACCENT_ACTIVE_BORDER_RGBA = (88, 166, 255, 115)
+ACCENT_SWATCH_HOVER_BORDER_RGBA = (88, 166, 255, 166)
+ACCENT_SWATCH_HOVER_BG_RGBA = (88, 166, 255, 20)
 
 OK_HEX = "#3fb950"
 OK_SOFT_RGBA = (63, 185, 80, 41)
@@ -46,6 +52,8 @@ WARN_HEX = "#d29922"
 WARN_SOFT_RGBA = (210, 153, 34, 46)
 ERROR_HEX = "#f85149"
 ERROR_SOFT_RGBA = (248, 81, 73, 46)
+ERROR_BORDER_RGBA = (248, 81, 73, 115)
+ERROR_BG_RGBA = (248, 81, 73, 31)
 
 # 原位识别 / 翻译浮窗（UI 验收标准 docs/design/v3.3/overlay-a.html）
 DEFAULT_BLOCK_BG_HEX = "#ffffff"  # 截图含透明像素时垫底的不透明底色
@@ -64,18 +72,6 @@ OVERLAY_MENU_INSIDE_PAD_PX = 6
 OVERLAY_FRAME_MS = 16
 OVERLAY_SPINNER_PX = 11
 OVERLAY_SPIN_PERIOD_MS = 900
-
-# 截屏标注浮窗（UI 验收标准 docs/design/v3.4/annotate-a.html）
-ANNOTATE_STROKE_PX = 3
-ANNOTATE_TEXT_PX = 20
-ANNOTATE_MOSAIC_BLOCK_PX = 10
-ANNOTATE_MIN_DRAG_PX = 6
-ANNOTATE_DRAFT_DASH_PX = (4.0, 3.0)
-ANNOTATE_COPY_FEEDBACK_MS = 1500
-ANNOTATE_SAVED_FEEDBACK_MS = 2500
-ANNOTATE_EDIT_MIN_WIDTH_PX = 48
-ANNOTATE_EDIT_EXTRA_HEIGHT_PX = 8
-ANNOTATE_EDIT_PADDING_X_PX = 18
 
 # ---------------------------------------------------------------------------
 # 3. 语音一体底栏（胶囊 / 字幕条 / 确认卡片三种形态）颜色令牌
@@ -99,6 +95,78 @@ TAIL_TEXT_HEX = "#94a3b8"
 # 语义别名，便于不同模块直观引用
 CAPTION_STABLE_TEXT_HEX = STABLE_TEXT_HEX
 CAPTION_TAIL_TEXT_HEX = TAIL_TEXT_HEX
+
+# 截屏标注浮窗（UI 验收标准 docs/design/v3.5/annotate-brush-b.html）
+ANNOTATE_COLOR_AMBER_HEX = "#f59e0b"
+ANNOTATE_COLOR_BLUE_HEX = "#2f81f7"
+ANNOTATE_COLOR_BLACK_HEX = "#111827"
+
+ANNOTATE_RING_LIGHT_RGBA = (230, 237, 243, 71)
+ANNOTATE_RING_BLUE_RGBA = (230, 237, 243, 82)
+ANNOTATE_RING_DARK_RGBA = (13, 17, 23, 140)
+ANNOTATE_RING_BLACK_RGBA = (230, 237, 243, 158)
+
+
+@dataclass(frozen=True)
+class AnnotateColorSpec:
+    """截屏标注单源色板规格（含深色工具条辨识描边与选中态反色中心点）。"""
+
+    key: str
+    label: str
+    hex: str
+    ring_rgba: tuple[int, int, int, int]
+    dot_hex: str
+
+
+@dataclass(frozen=True)
+class AnnotateSizeSpec:
+    """截屏标注单源 3 档粗细规格（线宽 / 文字字号 / 马赛克块 / 预览点直径）。"""
+
+    key: str
+    label: str
+    stroke_px: int
+    text_px: int
+    block_px: int
+    dot_px: int
+
+
+ANNOTATE_COLORS: tuple[AnnotateColorSpec, ...] = (
+    AnnotateColorSpec("red", "红", CROSSHAIR_HEX, ANNOTATE_RING_LIGHT_RGBA, STABLE_TEXT_HEX),
+    AnnotateColorSpec("amber", "橙黄", ANNOTATE_COLOR_AMBER_HEX, ANNOTATE_RING_LIGHT_RGBA, ANNOTATE_COLOR_BLACK_HEX),
+    AnnotateColorSpec("green", "绿", OK_HEX, ANNOTATE_RING_LIGHT_RGBA, ANNOTATE_COLOR_BLACK_HEX),
+    AnnotateColorSpec("blue", "蓝", ANNOTATE_COLOR_BLUE_HEX, ANNOTATE_RING_BLUE_RGBA, STABLE_TEXT_HEX),
+    AnnotateColorSpec("white", "白", STABLE_TEXT_HEX, ANNOTATE_RING_DARK_RGBA, ANNOTATE_COLOR_BLACK_HEX),
+    AnnotateColorSpec("black", "黑", ANNOTATE_COLOR_BLACK_HEX, ANNOTATE_RING_BLACK_RGBA, STABLE_TEXT_HEX),
+)
+
+ANNOTATE_SIZES: tuple[AnnotateSizeSpec, ...] = (
+    AnnotateSizeSpec("thin", "细", stroke_px=2, text_px=16, block_px=6, dot_px=4),
+    AnnotateSizeSpec("medium", "中", stroke_px=3, text_px=20, block_px=10, dot_px=7),
+    AnnotateSizeSpec("thick", "粗", stroke_px=6, text_px=28, block_px=16, dot_px=10),
+)
+
+ANNOTATE_DEFAULT_COLOR_HEX = ANNOTATE_COLORS[0].hex
+ANNOTATE_DEFAULT_SIZE_LEVEL = ANNOTATE_SIZES[1].key
+_ANNOTATE_COLOR_BY_HEX: dict[str, AnnotateColorSpec] = {c.hex.lower(): c for c in ANNOTATE_COLORS}
+_ANNOTATE_SIZE_BY_KEY: dict[str, AnnotateSizeSpec] = {s.key: s for s in ANNOTATE_SIZES}
+
+ANNOTATE_MIN_DRAG_PX = 6
+ANNOTATE_BRUSH_MIN_STEP_PX = 2.0
+ANNOTATE_BRUSH_MIN_PATH_PX = 2.0
+ANNOTATE_DRAFT_DASH_PX = (4.0, 3.0)
+ANNOTATE_COPY_FEEDBACK_MS = 1500
+ANNOTATE_SAVED_FEEDBACK_MS = 2500
+ANNOTATE_EDIT_MIN_WIDTH_PX = 48
+ANNOTATE_EDIT_EXTRA_HEIGHT_PX = 8
+ANNOTATE_EDIT_PADDING_X_PX = 18
+ANNOTATE_SUB_BAR_GAP_PX = 4
+ANNOTATE_SUB_BAR_RESERVE_H_PX = 34
+ANNOTATE_SWATCH_BTN_PX = 24
+ANNOTATE_SWATCH_CIRCLE_PX = 12
+ANNOTATE_SWATCH_DOT_PX = 4
+ANNOTATE_SIZE_BTN_W_PX = 46
+ANNOTATE_SIZE_BTN_H_PX = 24
+ANNOTATE_PX_TAG_MIN_W_PX = 34
 
 # 一体底栏动效（UI 验收标准 docs/design/v3.3/voice-a.html「动效参数」表）
 VOICE_FRAME_MS = 16
@@ -173,6 +241,36 @@ RADIUS_PILL = 999
 ColorSpec = str | tuple[int, int, int] | tuple[int, int, int, int]
 
 
+def validate_annotate_color(color: str) -> str:
+    """校验标注预设色值并返回规范小写十六进制串，非法值立即报错。"""
+    if not isinstance(color, str):
+        raise ValueError(f"标注颜色必须是字符串，收到 {color!r}")
+    spec = _ANNOTATE_COLOR_BY_HEX.get(color.strip().lower())
+    if spec is None:
+        allowed = [c.hex for c in ANNOTATE_COLORS]
+        raise ValueError(f"不支持的标注颜色：{color!r}，允许 {allowed}")
+    return spec.hex
+
+
+def validate_annotate_size(size_level: str) -> AnnotateSizeSpec:
+    """校验标注粗细档位并返回单源规格对象，非法值立即报错。"""
+    if not isinstance(size_level, str):
+        raise ValueError(f"标注粗细档位必须是字符串，收到 {size_level!r}")
+    spec = _ANNOTATE_SIZE_BY_KEY.get(size_level)
+    if spec is None:
+        allowed = [s.key for s in ANNOTATE_SIZES]
+        raise ValueError(f"不支持的标注粗细档位：{size_level!r}，允许 {allowed}")
+    return spec
+
+
+def resolve_annotate_style(
+    color: str = ANNOTATE_DEFAULT_COLOR_HEX,
+    size_level: str = ANNOTATE_DEFAULT_SIZE_LEVEL,
+) -> tuple[str, AnnotateSizeSpec]:
+    """统一校验并解析标注颜色与粗细档位。"""
+    return validate_annotate_color(color), validate_annotate_size(size_level)
+
+
 def qcolor(spec: ColorSpec, *, opaque: bool = False, fallback: str = "#000000") -> QColor:
     """将十六进制色值或 RGB/RGBA 元组安全转为 QColor；opaque=True 时强制 alpha=255。"""
     if isinstance(spec, tuple):
@@ -241,15 +339,24 @@ def resolve_available_screen_rect(
     return QRect(0, 0, 1920, 1080)
 
 
+def _rgba_css(rgba: tuple[int, int, int, int]) -> str:
+    return f"rgba({rgba[0]}, {rgba[1]}, {rgba[2]}, {rgba[3]})"
+
+
 def float_bar_stylesheet() -> str:
-    """悬浮工具条 QSS（overlay-a.html 与 annotate-a.html 共用；全部引用本模块令牌）。"""
-    accent_soft = (
-        f"rgba({ACCENT_SOFT_RGBA[0]}, {ACCENT_SOFT_RGBA[1]}, "
-        f"{ACCENT_SOFT_RGBA[2]}, {ACCENT_SOFT_RGBA[3]})"
-    )
+    """悬浮工具条与二级样式条 QSS（overlay-a 与 annotate-brush-b 共用；全部引用本模块令牌）。"""
+    accent_soft = _rgba_css(ACCENT_SOFT_RGBA)
+    accent_border = _rgba_css(ACCENT_ACTIVE_BORDER_RGBA)
+    err_border = _rgba_css(ERROR_BORDER_RGBA)
+    err_bg = _rgba_css(ERROR_BG_RGBA)
     return (
         f"QFrame#oviFloatBar {{"
         f"  background-color: {SURFACE_HEX};"
+        f"  border: 1px solid {BORDER_HEX};"
+        f"  border-radius: {RADIUS_MD}px;"
+        f"}}"
+        f"QFrame#oviStyleBar {{"
+        f"  background-color: {SURFACE_2_HEX};"
         f"  border: 1px solid {BORDER_HEX};"
         f"  border-radius: {RADIUS_MD}px;"
         f"}}"
@@ -266,7 +373,7 @@ def float_bar_stylesheet() -> str:
         f"QLabel#oviFloatError {{"
         f"  color: {ERROR_HEX};"
         f"}}"
-        f"QLabel#oviFloatHint {{"
+        f"QLabel#oviFloatHint, QLabel#oviStyleHint, QLabel#oviStylePx {{"
         f"  color: {TEXT_MUTED_HEX};"
         f"  font-size: {FS_MONO_TAG}px;"
         f"  background: transparent;"
@@ -281,8 +388,9 @@ def float_bar_stylesheet() -> str:
         f"  color: {TEXT_PRIMARY_HEX};"
         f"  border: 1px solid transparent;"
         f"  border-radius: {RADIUS_SM}px;"
-        f"  padding: 3px 10px;"
+        f"  padding: 3px 9px;"
         f"  font-size: {FS_XS}px;"
+        f"  font-weight: 500;"
         f"}}"
         f"QPushButton:hover:enabled {{"
         f"  border-color: {ACCENT_HEX};"
@@ -294,6 +402,7 @@ def float_bar_stylesheet() -> str:
         f"}}"
         f'QPushButton[active="true"] {{'
         f"  background-color: {accent_soft};"
+        f"  border-color: {accent_border};"
         f"  color: {ACCENT_HEX};"
         f"}}"
         f'QPushButton[feedback="ok"] {{'
@@ -301,12 +410,19 @@ def float_bar_stylesheet() -> str:
         f"}}"
         f'QPushButton[feedback="fail"] {{'
         f"  color: {ERROR_HEX};"
+        f"  border-color: {err_border};"
+        f"  background-color: {err_bg};"
+        f"}}"
+        f"QPushButton#oviSwatchBtn, QPushButton#oviSizeBtn {{"
+        f"  padding: 0;"
+        f"  border: none;"
+        f"  background: transparent;"
         f"}}"
     )
 
 
-def annotate_edit_stylesheet(*, color: str = CROSSHAIR_HEX) -> str:
-    """标注文字内联输入框 QSS（annotate-a.html `.edit`；全部引用本模块令牌）。"""
+def annotate_edit_stylesheet(*, color: str = ANNOTATE_DEFAULT_COLOR_HEX) -> str:
+    """标注文字内联输入框 QSS（annotate-brush-b `.edit`；全部引用本模块令牌）。"""
     return (
         f"QLineEdit#oviAnnotateEdit {{"
         f"  background: transparent;"

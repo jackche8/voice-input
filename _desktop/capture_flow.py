@@ -22,6 +22,7 @@ from _desktop.api import api_error_code, api_error_reason
 from _desktop.status import PlatformStatus
 
 RectTuple = tuple[int, int, int, int]
+AnnotateStyle = tuple[str, str]
 CaptureMode = Literal["translate", "ocr", "annotate"]
 DEFAULT_CAPTURE_DELAY_S = 0.08
 
@@ -93,6 +94,8 @@ class OpenAnnotator(Protocol):
         screen_rect: RectTuple,
         *,
         virtual_rect: RectTuple | None,
+        initial_style: AnnotateStyle | None,
+        on_style_changed: Callable[[AnnotateStyle], None],
         on_copy_image: Callable[[bytes], bool],
         on_save_image: Callable[[bytes], SaveResult],
         on_closed: Callable[[], None],
@@ -170,6 +173,13 @@ class CaptureFlow:
         self._selector_opening = False
         self._overlay_opening = False
         self._capturing = False
+        self._annotate_style: AnnotateStyle | None = None
+
+    @property
+    def annotate_style(self) -> AnnotateStyle | None:
+        """单次运行内记住的截屏标注样式 `(color_hex, size_level)`；首次修改前为 `None`。"""
+        with self._lock:
+            return self._annotate_style
 
     def trigger_translate(self) -> None:
         """Ctrl+Alt+X：框选后在原位浮窗显示译文。"""
@@ -359,8 +369,10 @@ class CaptureFlow:
     def _open_annotator(
         self, gen: int, cropped_png: bytes, rect: RectTuple, virtual_rect: RectTuple | None
     ) -> None:
-        if not self._is_current(gen):
-            return
+        with self._lock:
+            if self._generation != gen:
+                return
+            remembered = self._annotate_style
         if self.open_annotator is None:
             with self._lock:
                 if self._generation == gen:
@@ -369,6 +381,20 @@ class CaptureFlow:
                 self.status.error(ErrorCode.dependency_failed, "标注浮窗无法打开：未配置标注视图")
             return
         handle_box: dict[str, AnnotatorHandle | None] = {"handle": None}
+
+        def _on_style_changed(style: AnnotateStyle) -> None:
+            if not (
+                isinstance(style, tuple)
+                and len(style) == 2
+                and all(isinstance(v, str) and v.strip() for v in style)
+            ):
+                raise ValueError(
+                    f"AnnotateStyle 必须为非空字符串二元组 (color_hex, size_level)，收到 {style!r}"
+                )
+            with self._lock:
+                handle = handle_box["handle"]
+                if handle is not None and self._generation == gen and self._overlay is handle:
+                    self._annotate_style = style
 
         def _on_closed() -> None:
             with self._lock:
@@ -381,6 +407,8 @@ class CaptureFlow:
                 cropped_png,
                 rect,
                 virtual_rect=virtual_rect,
+                initial_style=remembered,
+                on_style_changed=_on_style_changed,
                 on_copy_image=self._handle_copy_image,
                 on_save_image=self._handle_save_image,
                 on_closed=_on_closed,
