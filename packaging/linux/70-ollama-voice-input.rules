@@ -1,0 +1,5 @@
+# Grant the active local desktop session user read access to keyboards (evdev global hotkeys)
+# and write access to /dev/uinput (local keystroke injection) via systemd-logind uaccess.
+# Numbered < 73 so 73-seat-late.rules applies ACLs immediately without adding users to the input group.
+SUBSYSTEM=="input", ENV{ID_INPUT_KEYBOARD}=="1", TAG+="uaccess"
+KERNEL=="uinput", SUBSYSTEM=="misc", TAG+="uaccess", OPTIONS+="static_node=uinput"

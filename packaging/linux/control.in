@@ -1,0 +1,16 @@
+Package: ollama-voice-input
+Version: @VERSION@
+Section: utils
+Priority: optional
+Architecture: @ARCH@
+Maintainer: Ollama Voice Input Maintainers <jackche8@users.noreply.github.com>
+Homepage: https://github.com/jackche8/voice-input
+Installed-Size: @INSTALLED_SIZE@
+Depends: python3 (>= @PYTHON_MIN@), python3 (<< @PYTHON_MAX@), python3-venv, python3-gi, python3-dbus, gir1.2-webkit2-4.1, gir1.2-gtk-3.0, libxcb-cursor0, libxkbcommon-x11-0, tesseract-ocr, tesseract-ocr-chi-sim, tesseract-ocr-chi-tra, tesseract-ocr-eng, xclip, xdotool, libportaudio2, zstd
+Recommends: wl-clipboard, wtype
+Description: Offline local voice input, OCR, screenshot translation and annotation
+ Ollama Voice Input is a local desktop application providing push-to-talk
+ streaming voice input (Qwen3-ASR + Ollama polishing), in-place screenshot
+ translation, pure OCR, and screenshot annotation with zero cloud dependency.
+ .
+ Dual-licensed under GNU AGPL-3.0-only and a separate Commercial License.

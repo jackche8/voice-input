@@ -1,6 +1,7 @@
 """U1 路径唯一表：三平台根目录与派生路径、非 live 拒绝真实根、应用启动命令（只注入 environ / os_name，不碰真实目录）。"""
 from __future__ import annotations
 
+from dataclasses import replace
 import subprocess
 import sys
 from pathlib import Path
@@ -8,7 +9,22 @@ from pathlib import Path
 import pytest
 
 from _contracts import OLLAMA_VERSION
-from _paths import APP_DISPLAY_NAME, APP_ID, PROGRAM_ROOT, AppPaths, app_command, default_app_paths, pictures_dir
+from _paths import (
+    APP_DISPLAY_NAME,
+    APP_ID,
+    ASR_RUNTIME_DIRNAME,
+    DEB_LAUNCHER,
+    DEB_PROGRAM_ROOT,
+    INTERNAL_SERVER_FLAG,
+    PROGRAM_ROOT,
+    AppPaths,
+    app_command,
+    asr_runtime_root,
+    default_app_paths,
+    internal_subcommand,
+    pictures_dir,
+    resolve_program_root,
+)
 
 LINUX_ENV = {
     "HOME": "/home/u",
@@ -78,8 +94,41 @@ def test_non_live_paths_refuse_anything_under_the_real_roots(tmp_path):
 def test_app_command_runs_program_root_entry_with_current_interpreter():
     p = default_app_paths(LINUX_ENV, os_name="linux")
     entry = str(PROGRAM_ROOT / "daemon.py")
-    assert app_command(p, background=False) == [sys.executable, entry]
-    assert app_command(p, background=True) == [sys.executable, entry, "--background"]
+    assert app_command(p, background=False, frozen=False) == [sys.executable, entry]
+    assert app_command(p, background=True, frozen=False) == [sys.executable, entry, "--background"]
+
+    deb_paths = replace(p, program_root=DEB_PROGRAM_ROOT)
+    assert app_command(deb_paths, background=False, frozen=False) == [DEB_LAUNCHER]
+    assert app_command(deb_paths, background=True, frozen=False) == [DEB_LAUNCHER, "--background"]
+
+    win_paths = replace(default_app_paths({"APPDATA": "/w/R", "LOCALAPPDATA": "/w/L"}, os_name="windows"),
+                        program_root=DEB_PROGRAM_ROOT)
+    assert app_command(win_paths, background=False, frozen=False, executable="/py") == [
+        "/py", str(DEB_PROGRAM_ROOT / "daemon.py"),
+    ]
+
+    assert app_command(p, background=False, frozen=True, executable="/app/ollama-voice-input") == ["/app/ollama-voice-input"]
+    assert app_command(p, background=True, frozen=True, executable="/app/ollama-voice-input") == [
+        "/app/ollama-voice-input", "--background",
+    ]
+
+
+def test_resolve_program_root_asr_runtime_root_and_internal_subcommand(tmp_path):
+    fake_file = tmp_path / "repo" / "_paths.py"
+    bundle = tmp_path / "dist" / "_internal"
+    assert resolve_program_root(frozen=False, meipass=bundle, file_path=fake_file) == (tmp_path / "repo").resolve()
+    assert resolve_program_root(frozen=True, meipass=bundle, file_path=fake_file) == bundle.resolve()
+    assert resolve_program_root(frozen=True, meipass="", file_path=fake_file) == (tmp_path / "repo").resolve()
+
+    assert asr_runtime_root(bundle, frozen=False) == bundle
+    assert asr_runtime_root(bundle, frozen=True) == bundle / ASR_RUNTIME_DIRNAME
+
+    assert internal_subcommand(INTERNAL_SERVER_FLAG, ("-m", "uvicorn"), frozen=False, executable="/py") == [
+        "/py", "-m", "uvicorn",
+    ]
+    assert internal_subcommand(INTERNAL_SERVER_FLAG, ("-m", "uvicorn"), frozen=True, executable="/app/ovi") == [
+        "/app/ovi", INTERNAL_SERVER_FLAG,
+    ]
 
 
 def test_pictures_dir_across_linux_windows_and_macos():

@@ -5,13 +5,12 @@
 """
 from __future__ import annotations
 
-import sys
 import threading
 import time
 from collections.abc import Callable, Mapping
 from pathlib import Path
 
-from _paths import APP_DISPLAY_NAME, AppPaths
+from _paths import APP_DISPLAY_NAME, INTERNAL_WINDOW_FLAG, AppPaths, internal_subcommand
 from _platform.child_process import ChildHandle, spawn_child
 from _window.commands import Quit, Show, encode
 
@@ -19,8 +18,16 @@ CLOSE_WAIT_S = 3.0
 WATCH_S = 0.2
 
 
-def window_command(paths: AppPaths, origin: str, route: str) -> list[str]:
-    return [sys.executable, "-m", "_window", "--url", f"{origin}{route}", "--cert", str(paths.cert), "--title", APP_DISPLAY_NAME]
+def window_command(
+    paths: AppPaths,
+    origin: str,
+    route: str,
+    *,
+    frozen: bool | None = None,
+    executable: str | None = None,
+) -> list[str]:
+    prefix = internal_subcommand(INTERNAL_WINDOW_FLAG, ("-m", "_window"), frozen=frozen, executable=executable)
+    return [*prefix, "--url", f"{origin}{route}", "--cert", str(paths.cert), "--title", APP_DISPLAY_NAME]
 
 
 def _last_line(log_path: Path) -> str:

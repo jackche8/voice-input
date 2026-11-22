@@ -9,7 +9,6 @@ import os
 import platform
 import shutil
 import subprocess
-import sys
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -45,7 +44,7 @@ from _linux.evdev_keyboards import readable_keyboard_paths
 from _ocr import image_to_text
 from _ocr_layout import extract_ocr_layout
 from _ollama import OllamaClient
-from _paths import PROGRAM_ROOT, STATIC_V3, AppPaths, default_app_paths
+from _paths import INTERNAL_SETUP_WORKER_FLAG, PROGRAM_ROOT, STATIC_V3, AppPaths, default_app_paths, internal_subcommand
 from _polish import polish_text
 from _ports import DEFAULT_SERVER_PORT, local_ports
 from _session_finals import SessionFinalIndex
@@ -244,7 +243,7 @@ def _setup_service(
         kinds=setup_task_kinds(paths, adapters),
         tasks_dir=paths.setup_tasks,
         log_dir=paths.logs,
-        worker_argv=[sys.executable, "-m", "_v3.setup_worker"],
+        worker_argv=internal_subcommand(INTERNAL_SETUP_WORKER_FLAG, ("-m", "_v3.setup_worker")),
         owner_pid=os.getppid(),  # 看护层拉起的服务端的父进程即应用主进程（macOS 为随其退出的包装进程）
         environ=adapters.environ,
         popen=adapters.popen,

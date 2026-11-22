@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 
+from _paths import INTERNAL_CHILD_GUARD_FLAG
 from _platform import _child_posix, _child_windows
 from _platform.child_process import (
     LOG_ROTATE_BYTES,
@@ -85,6 +86,16 @@ def test_guard_does_not_start_component_when_parent_already_gone(tmp_path, mode)
     proc = subprocess.run(argv, capture_output=True, text=True, timeout=10)
     assert proc.returncode == 1 and "已退出" in proc.stderr
     assert not marker.exists()
+
+
+def test_guarded_argv_uses_internal_flag_when_frozen():
+    src = _child_posix.guarded_argv(["ollama", "serve"], linux=True, parent_pid=42, frozen=False, executable="/py")
+    assert src == ["/py", "-I", str(_child_posix.GUARD_SCRIPT), "--mode", "pdeathsig", "--parent", "42", "--",
+                   "ollama", "serve"]
+    frz = _child_posix.guarded_argv(["ollama", "serve"], linux=False, parent_pid=42, frozen=True,
+                                    executable="/app/ollama-voice-input")
+    assert frz == ["/app/ollama-voice-input", INTERNAL_CHILD_GUARD_FLAG, "--mode", "watch", "--parent", "42", "--",
+                   "ollama", "serve"]
 
 
 def test_terminate_session_clears_leftovers_after_component_exit_and_rotates_log(tmp_path):

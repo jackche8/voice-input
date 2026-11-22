@@ -18,7 +18,7 @@ from fastapi.testclient import TestClient
 
 from _asr_provider import SidecarStreamProvider
 from _contracts import OcrTextBlock, OcrTextLine, SetupTaskKind
-from _paths import PROGRAM_ROOT, STATIC_V3, AppPaths
+from _paths import INTERNAL_SETUP_WORKER_FLAG, PROGRAM_ROOT, STATIC_V3, AppPaths
 from _v3.production import (
     ProductionEndpoints,
     SystemAdapters,
@@ -273,3 +273,16 @@ def test_real_translate_and_translate_blocks_adapters_wire_new_contract(world):
     batch_payload = world["services"].chat_payloads[-1]
     assert "源语言: 中文" in batch_payload["messages"][-1]["content"]
     assert "目标语言: 英文" in batch_payload["messages"][-1]["content"]
+
+
+def test_production_setup_worker_uses_internal_flag_when_frozen(world, monkeypatch):
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(sys, "executable", "/app/ollama-voice-input")
+    runtime = compose_production_runtime(
+        paths=world["paths"], token=FAKE_TOKEN, adapters=world["adapters"], endpoints=ENDPOINTS,
+    )
+    started = runtime.setup.tasks.start(SetupTaskKind.ollama_pull)
+    assert started.state == "running"
+    argv, _kwargs = world["workers"].calls[-1]
+    assert argv[:2] == ["/app/ollama-voice-input", INTERNAL_SETUP_WORKER_FLAG]
+    assert "--task-file" in argv and "--kind" in argv and "ollama_pull" in argv

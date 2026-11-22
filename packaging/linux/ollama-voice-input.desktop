@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Ollama Voice Input
+Comment=Offline local voice input, screenshot translation, OCR and annotation
+Exec=/usr/bin/ollama-voice-input
+Icon=ollama-voice-input
+Terminal=false
+Categories=Utility;AudioVideo;
+Keywords=voice;speech;ocr;translate;screenshot;ollama;
+StartupNotify=true

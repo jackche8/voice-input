@@ -4,11 +4,11 @@ from __future__ import annotations
 import os
 import signal
 import subprocess
-import sys
 import time
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 
+from _paths import INTERNAL_CHILD_GUARD_FLAG, internal_subcommand
 from _procfs import is_alive, proc_starttime, session_members
 
 GUARD_SCRIPT = Path(__file__).resolve().with_name("child_guard.py")
@@ -16,10 +16,23 @@ KILL_WAIT_S = 5.0  # GPU 进程被 KILL 后驱动回收可能要几秒
 POLL_S = 0.05
 
 
-def guarded_argv(argv: Sequence[str], *, linux: bool, parent_pid: int) -> list[str]:
-    # 按文件路径 + -I 运行：不依赖组件的 cwd/PYTHONPATH，也不导入 _platform 包（pydantic 等）
+def guarded_argv(
+    argv: Sequence[str],
+    *,
+    linux: bool,
+    parent_pid: int,
+    frozen: bool | None = None,
+    executable: str | None = None,
+) -> list[str]:
+    # 源码态按文件路径 + -I 运行（不依赖组件 cwd/PYTHONPATH，也不导入 _platform 包）；冻结态走单可执行 --internal-child-guard
     mode = "pdeathsig" if linux else "watch"
-    return [sys.executable, "-I", str(GUARD_SCRIPT), "--mode", mode, "--parent", str(parent_pid), "--", *argv]
+    prefix = internal_subcommand(
+        INTERNAL_CHILD_GUARD_FLAG,
+        ("-I", str(GUARD_SCRIPT)),
+        frozen=frozen,
+        executable=executable,
+    )
+    return [*prefix, "--mode", mode, "--parent", str(parent_pid), "--", *argv]
 
 
 def identity(pid: int, *, linux: bool) -> str | None:

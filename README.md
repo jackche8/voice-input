@@ -11,7 +11,7 @@
 [![Ollama](https://img.shields.io/badge/Ollama-0.40.16-000000?logo=ollama)](https://ollama.com)
 [![Qwen3-ASR](https://img.shields.io/badge/Qwen3--ASR-1.7B-green)](https://github.com/QwenLM/Qwen3-ASR)
 [![Platform](https://img.shields.io/badge/Platform-Linux%20%7C%20Windows%20%7C%20macOS-FCC624)](https://kernel.org)
-[![License](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![License](https://img.shields.io/badge/License-AGPL--3.0%20%2B%20Commercial-blue.svg)](LICENSE)
 
 </div>
 
@@ -172,4 +172,4 @@ ollama-voice-input/
 
 ## 📄 License
 
-[MIT](LICENSE) — 自由使用、修改和分发。
+[AGPL-3.0-only](LICENSE) + [商业授权](COMMERCIAL.md) — 个人、研究、企业内部使用及遵循 AGPL-3.0 的开源分发免费；闭源二次封装或商用需商业授权。第三方依赖声明见 [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md)。

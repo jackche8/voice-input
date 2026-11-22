@@ -14,7 +14,7 @@ from pathlib import Path
 import pytest
 
 from _desktop.main_window import MainWindow, window_command
-from _paths import AppPaths
+from _paths import APP_DISPLAY_NAME, INTERNAL_WINDOW_FLAG, AppPaths
 from _window import tls_policy
 from _window.__main__ import EXIT_BACKEND_MISSING, choose_backend, main
 from _window.commands import Quit, Show, encode, parse_command, pump_commands
@@ -126,3 +126,16 @@ def test_launcher_reuses_running_window_respawns_dead_one_and_reports_failure(tm
     second = spawned[1][1]
     assert second.stdin.getvalue() == encode(Quit()) and second.terminated
     assert len(failures) == 1  # 关闭引起的退出不报失败
+
+
+def test_window_command_uses_internal_window_flag_when_frozen(tmp_path):
+    paths = AppPaths.for_roots(config_root=tmp_path / "c", data_root=tmp_path / "d", runtime_dir=tmp_path / "r")
+    assert window_command(paths, "https://127.0.0.1:17945", "/setup", frozen=False, executable="/py") == [
+        "/py", "-m", "_window", "--url", "https://127.0.0.1:17945/setup", "--cert", str(paths.cert),
+        "--title", APP_DISPLAY_NAME,
+    ]
+    assert window_command(paths, "https://127.0.0.1:17945", "/setup", frozen=True,
+                          executable="/app/ollama-voice-input") == [
+        "/app/ollama-voice-input", INTERNAL_WINDOW_FLAG, "--url", "https://127.0.0.1:17945/setup",
+        "--cert", str(paths.cert), "--title", APP_DISPLAY_NAME,
+    ]

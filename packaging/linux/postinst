@@ -1,0 +1,25 @@
+#!/bin/sh
+set -e
+
+APP_DIR="${OVI_APP_DIR:-/usr/lib/ollama-voice-input}"
+VENV="$APP_DIR/venv"
+WHEELHOUSE="$APP_DIR/wheelhouse"
+
+case "$1" in
+  configure)
+    rm -rf "$VENV"
+    if ! (
+      python3 -m venv --system-site-packages "$VENV" \
+      && "$VENV/bin/pip" install --no-index --find-links "$WHEELHOUSE" --only-binary=:all: --no-cache-dir --disable-pip-version-check -r "$APP_DIR/requirements.txt" \
+      && "$VENV/bin/python3" -m compileall -q -x '/(venv|wheelhouse)/' "$APP_DIR"
+    ); then
+      rm -rf "$VENV"
+      exit 1
+    fi
+    modprobe uinput >/dev/null 2>&1 || true
+    if command -v udevadm >/dev/null 2>&1; then
+      udevadm control --reload >/dev/null 2>&1 || true
+      udevadm trigger --subsystem-match=input --subsystem-match=misc >/dev/null 2>&1 || true
+    fi
+    ;;
+esac

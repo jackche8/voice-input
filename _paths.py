@@ -9,7 +9,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -19,8 +19,41 @@ from _platform.protocol import OsName
 
 APP_ID = "ollama-voice-input"  # 目录名、锁名、套接字名
 APP_DISPLAY_NAME = "Ollama Voice Input"
-PROGRAM_ROOT = Path(__file__).resolve().parent
+DEB_PROGRAM_ROOT = Path("/usr/lib/ollama-voice-input")
+DEB_LAUNCHER = "/usr/bin/ollama-voice-input"
+ASR_RUNTIME_DIRNAME = "_asr_runtime"
+INTERNAL_CHILD_GUARD_FLAG = "--internal-child-guard"
+INTERNAL_SERVER_FLAG = "--internal-server"
+INTERNAL_SETUP_WORKER_FLAG = "--internal-setup-worker"
+INTERNAL_WINDOW_FLAG = "--internal-window"
+
+
+def resolve_program_root(
+    *,
+    frozen: bool | None = None,
+    meipass: str | Path | None = None,
+    file_path: Path | None = None,
+) -> Path:
+    """程序根：PyInstaller 冻结态取 `sys._MEIPASS`，源码 / `.deb` 取本文件所在目录。"""
+    is_frozen = bool(getattr(sys, "frozen", False)) if frozen is None else frozen
+    bundle_dir = getattr(sys, "_MEIPASS", None) if meipass is None else meipass
+    if is_frozen and bundle_dir:
+        return Path(bundle_dir).resolve()
+    return (Path(__file__) if file_path is None else Path(file_path)).resolve().parent
+
+
+PROGRAM_ROOT = resolve_program_root()
 STATIC_V3 = PROGRAM_ROOT / "static" / "v3"
+
+
+def asr_runtime_root(program_root: Path = PROGRAM_ROOT, *, frozen: bool | None = None) -> Path:
+    """外部 ASR 解释器（`paths.asr_python`）的运行目录与 PYTHONPATH 根。
+
+    冻结态隔离在 `<_MEIPASS>/_asr_runtime`，避免 `_MEIPASS` 根的 `_internal/` 遮蔽 ASR 独立 venv 的二进制依赖。
+    """
+    is_frozen = bool(getattr(sys, "frozen", False)) if frozen is None else frozen
+    base = Path(program_root)
+    return base / ASR_RUNTIME_DIRNAME if is_frozen else base
 
 
 @dataclass(frozen=True)
@@ -245,19 +278,57 @@ def pictures_dir(
     return _home_dir(environ) / "Pictures"
 
 
-def app_command(paths: AppPaths, *, background: bool) -> list[str]:
-    """启动应用主进程的命令（开机自启、单例唤起说明共用）。源码运行与安装版都由当前解释器执行程序根下的入口。"""
-    command = [sys.executable, str(paths.program_root / "daemon.py")]
+def app_command(
+    paths: AppPaths,
+    *,
+    background: bool,
+    frozen: bool | None = None,
+    executable: str | None = None,
+) -> list[str]:
+    """启动应用主进程的命令（开机自启、门户条目共用）：统一处理冻结态、Linux `.deb` 安装版与源码运行。"""
+    is_frozen = bool(getattr(sys, "frozen", False)) if frozen is None else frozen
+    exe = sys.executable if executable is None else executable
+    if is_frozen:
+        command = [exe]
+    elif paths.os_name == "linux" and paths.program_root.resolve() == DEB_PROGRAM_ROOT:
+        command = [DEB_LAUNCHER]
+    else:
+        command = [exe, str(paths.program_root / "daemon.py")]
     return [*command, "--background"] if background else command
+
+
+def internal_subcommand(
+    flag: str,
+    source_args: Sequence[str],
+    *,
+    frozen: bool | None = None,
+    executable: str | None = None,
+) -> list[str]:
+    """单源构造冻结态内部派发 / 源码子模块命令前缀（child_guard / server / setup_worker / window 共用）。"""
+    is_frozen = bool(getattr(sys, "frozen", False)) if frozen is None else frozen
+    exe = sys.executable if executable is None else executable
+    if is_frozen:
+        return [exe, flag]
+    return [exe, *source_args]
 
 
 __all__ = [
     "APP_DISPLAY_NAME",
     "APP_ID",
+    "ASR_RUNTIME_DIRNAME",
+    "DEB_LAUNCHER",
+    "DEB_PROGRAM_ROOT",
+    "INTERNAL_CHILD_GUARD_FLAG",
+    "INTERNAL_SERVER_FLAG",
+    "INTERNAL_SETUP_WORKER_FLAG",
+    "INTERNAL_WINDOW_FLAG",
     "PROGRAM_ROOT",
     "STATIC_V3",
     "AppPaths",
     "app_command",
+    "asr_runtime_root",
     "default_app_paths",
+    "internal_subcommand",
     "pictures_dir",
+    "resolve_program_root",
 ]

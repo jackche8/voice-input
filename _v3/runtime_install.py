@@ -18,7 +18,7 @@ import httpx
 
 from _atomic_file import atomic_write_bytes
 from _contracts import ErrorCode, LogicError, SetupProgress
-from _paths import PROGRAM_ROOT, AppPaths
+from _paths import PROGRAM_ROOT, AppPaths, asr_runtime_root
 from _platform.protocol import OsName
 from _supervision.gpu_preflight import query_gpus
 from _v3.release_download import download_verified, extract_archive
@@ -27,7 +27,7 @@ from _v3.setup_tasks import GIB, ProgressFn, SetupAction
 UV_VERSION = "0.11.3"
 PYTHON_VERSION = "3.12.13"
 UV_RELEASE_BASE = "https://github.com/astral-sh/uv/releases/download"
-LOCK_DIR = PROGRAM_ROOT / "runtimes" / "asr"
+LOCK_DIR = asr_runtime_root(PROGRAM_ROOT) / "runtimes" / "asr"
 # 安装峰值 = venv + uv 下载缓存（装完即清缓存）。cpu 实测 venv 1.6 GB + 缓存 1.7 GB + Python 0.1 GB（八.18）；
 # cuda 按现有 venv-asr 7.2 GB 同比估算；mps 按 cpu 计。
 VARIANT_DISK_BYTES: Mapping[str, int] = {"cuda": 16 * GIB, "cpu": 4 * GIB, "mps": 4 * GIB}
@@ -68,8 +68,11 @@ def uv_asset(os_name: OsName, machine: str) -> str:
     return f"uv-{target}.zip" if os_name == "windows" else f"uv-{target}.tar.gz"
 
 
-def lock_file(variant: str) -> Path:
-    return LOCK_DIR / f"requirements-{variant}.lock"
+def lock_file(variant: str, *, program_root: Path | None = None, frozen: bool | None = None) -> Path:
+    if program_root is None and frozen is None:
+        return LOCK_DIR / f"requirements-{variant}.lock"
+    base = PROGRAM_ROOT if program_root is None else program_root
+    return asr_runtime_root(base, frozen=frozen) / "runtimes" / "asr" / f"requirements-{variant}.lock"
 
 
 def asr_runtime_cleanup(paths: AppPaths) -> None:
@@ -134,7 +137,7 @@ def asr_runtime_install_action(
             raise LogicError(ErrorCode.conflict, f"识别运行环境已安装（{paths.asr_manifest}），未重复安装")
         chosen, why = variant()
         report(SetupProgress(stage=f"识别运行环境变体 {chosen}：{why}"))
-        lock = lock_file(chosen)
+        lock = lock_file(chosen, program_root=paths.program_root)
         with client_factory() as client:
             uv = _install_uv(paths, os_name, machine, client, report, run)
         # 只用托管 Python、不读用户的 uv/pip 配置（锁文件已写明索引地址）

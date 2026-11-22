@@ -22,3 +22,5 @@ certs/
 .pp/tmp/
 .pp/gate/
 .pp/backup/
+dist/
+build/

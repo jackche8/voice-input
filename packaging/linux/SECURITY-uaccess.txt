@@ -1,0 +1,38 @@
+Ollama Voice Input — udev uaccess Device Permission Notice
+==========================================================
+
+Installed System Rules
+----------------------
+1. /usr/lib/udev/rules.d/70-ollama-voice-input.rules
+   - SUBSYSTEM=="input", ENV{ID_INPUT_KEYBOARD}=="1", TAG+="uaccess"
+   - KERNEL=="uinput", SUBSYSTEM=="misc", TAG+="uaccess", OPTIONS+="static_node=uinput"
+2. /usr/lib/modules-load.d/ollama-voice-input.conf
+   - Loads the `uinput` kernel module on boot.
+
+Why These Rules Are Needed
+--------------------------
+- Global push-to-talk and screenshot hotkeys on X11 / Wayland require reading
+  keyboard press/release events (evdev) when desktop portals are unavailable or
+  limited.
+- Injecting recognized text or paste shortcuts reliably across native, terminal,
+  and Electron/Wayland applications requires creating a virtual input device via
+  `/dev/uinput`.
+
+Security Surface / 安全面说明
+-----------------------------
+- Using `TAG+="uaccess"` (evaluated before `73-seat-late.rules`) delegates ACL
+  management to `systemd-logind`: ONLY the active local seated desktop user
+  receives read access to keyboard evdev devices and read/write access to
+  `/dev/uinput`.
+- The security surface is equivalent to adding the desktop user to the `input`
+  group for the active local session (any process running as that active user
+  can read keyboard events and inject virtual keystrokes), while avoiding
+  permanent group membership and taking effect immediately without re-login.
+- Remote SSH sessions or inactive seats do not receive `uaccess` ACLs.
+
+Verification & Removal / 验证与移除
+-----------------------------------
+- Inspect active ACL:
+    getfacl /dev/uinput
+- Remove rules by uninstalling the package:
+    sudo apt remove ollama-voice-input

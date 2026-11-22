@@ -1,0 +1,15 @@
+#!/bin/sh
+set -e
+
+APP_DIR="${OVI_APP_DIR:-/usr/lib/ollama-voice-input}"
+
+case "$1" in
+  remove|purge)
+    rm -rf "$APP_DIR/venv"
+    if [ -d "$APP_DIR" ]; then
+      find "$APP_DIR" -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
+      find "$APP_DIR" -type f -name '*.pyc' -delete 2>/dev/null || true
+      rmdir "$APP_DIR" 2>/dev/null || true
+    fi
+    ;;
+esac

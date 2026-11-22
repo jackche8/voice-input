@@ -9,7 +9,6 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess
-import sys
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -18,7 +17,7 @@ import httpx
 
 from _contracts import ComponentName
 from _jobs_client import build_tls_context
-from _paths import AppPaths
+from _paths import INTERNAL_SERVER_FLAG, AppPaths, asr_runtime_root, internal_subcommand
 from _ports import LocalPorts, local_ports
 from _supervision.gpu_preflight import asr_gpu_preflight
 from _v3.setup_probe import probe_asr_sidecar, probe_asr_weights, probe_ollama
@@ -99,17 +98,25 @@ def _ollama(paths: AppPaths, environ: Mapping[str, str], ports: LocalPorts) -> C
     )
 
 
-def _asr(paths: AppPaths, environ: Mapping[str, str], ports: LocalPorts, *, which: Callable[[str], str | None],
-         run: Runner) -> ComponentSpec:
+def _asr(
+    paths: AppPaths,
+    environ: Mapping[str, str],
+    ports: LocalPorts,
+    *,
+    which: Callable[[str], str | None],
+    run: Runner,
+    frozen: bool | None = None,
+) -> ComponentSpec:
     try:
         variant, variant_error = asr_variant(paths), None
     except ValueError as exc:
         variant, variant_error = None, str(exc)
+    asr_root = asr_runtime_root(paths.program_root, frozen=frozen)
     argv = (
         str(paths.asr_python), "-m", "runtimes.asr", "serve", "--host", "127.0.0.1", "--port", str(ports.asr),
         "--model", str(paths.asr_model_dir), "--load", "--warmup", *_VARIANT_ARGS.get(variant or "", ()),
     )
-    env = {**environ, "PYTHONPATH": str(paths.program_root), "HF_HOME": str(paths.hf_home), "HF_HUB_OFFLINE": "1",
+    env = {**environ, "PYTHONPATH": str(asr_root), "HF_HOME": str(paths.hf_home), "HF_HUB_OFFLINE": "1",
            "PYTHONUNBUFFERED": "1"}
 
     def ready() -> ReadyResult:
@@ -132,13 +139,20 @@ def _asr(paths: AppPaths, environ: Mapping[str, str], ports: LocalPorts, *, whic
         return None if result.ok else result.reason
 
     return ComponentSpec(
-        name=ComponentName.asr, argv=argv, env=env, cwd=paths.program_root, log_path=paths.logs / "asr.log",
+        name=ComponentName.asr, argv=argv, env=env, cwd=asr_root, log_path=paths.logs / "asr.log",
         port=ports.asr, ready=ready, installed=installed, start_timeout_s=300.0, stop_timeout_s=30.0,
         preflight=preflight if variant == "cuda" else _no_preflight,
     )
 
 
-def _server(paths: AppPaths, environ: Mapping[str, str], ports: LocalPorts) -> ComponentSpec:
+def _server(
+    paths: AppPaths,
+    environ: Mapping[str, str],
+    ports: LocalPorts,
+    *,
+    frozen: bool | None = None,
+    executable: str | None = None,
+) -> ComponentSpec:
     def ready() -> ReadyResult:
         def check(client: httpx.Client) -> ReadyResult:
             resp = client.get("/api/v1/status")
@@ -148,7 +162,8 @@ def _server(paths: AppPaths, environ: Mapping[str, str], ports: LocalPorts) -> C
         return _http_ready(ports.server_origin, check, verify=lambda: build_tls_context(paths.cert))
 
     argv = (
-        sys.executable, "-m", "uvicorn", "--factory", "app:create_production_app", "--host", "0.0.0.0",
+        *internal_subcommand(INTERNAL_SERVER_FLAG, ("-m", "uvicorn"), frozen=frozen, executable=executable),
+        "--factory", "app:create_production_app", "--host", "0.0.0.0",
         "--port", str(ports.server), "--ssl-keyfile", str(paths.key), "--ssl-certfile", str(paths.cert),
     )
     return ComponentSpec(
@@ -164,9 +179,15 @@ def build_specs(
     *,
     which: Callable[[str], str | None] = shutil.which,
     run: Runner = subprocess.run,
+    frozen: bool | None = None,
+    executable: str | None = None,
 ) -> tuple[ComponentSpec, ...]:
     ports = local_ports(environ)
-    return (_ollama(paths, environ, ports), _asr(paths, environ, ports, which=which, run=run), _server(paths, environ, ports))
+    return (
+        _ollama(paths, environ, ports),
+        _asr(paths, environ, ports, which=which, run=run, frozen=frozen),
+        _server(paths, environ, ports, frozen=frozen, executable=executable),
+    )
 
 
 __all__ = ["ASR_VARIANTS", "ComponentSpec", "READY_TIMEOUT_S", "ReadyResult", "asr_variant", "build_specs"]

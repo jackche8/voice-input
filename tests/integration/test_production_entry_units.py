@@ -6,11 +6,21 @@ from __future__ import annotations
 
 import ast
 import importlib
+import importlib.util
+import os
+import subprocess
+import sys
 from pathlib import Path
 
 from fastapi.testclient import TestClient
 
-from _paths import PROGRAM_ROOT
+from _paths import (
+    INTERNAL_CHILD_GUARD_FLAG,
+    INTERNAL_SERVER_FLAG,
+    INTERNAL_SETUP_WORKER_FLAG,
+    INTERNAL_WINDOW_FLAG,
+    PROGRAM_ROOT,
+)
 from _v3.production import build_production_app
 
 ROOT = PROGRAM_ROOT
@@ -122,3 +132,116 @@ def test_build_production_app_binds_environ_roots_and_serves_pages(tmp_path):
     for old in ("/api/transcribe", "/api/web_input/poll", "/voice_setup", "/api_docs"):
         assert client.get(old).status_code in (403, 404, 405), old
     client.close()
+
+
+def _load_entry_daemon():
+    """按文件路径加载冻结入口（避免与 site-packages 的 PyPI `packaging` 库同名冲突）。"""
+    path = ROOT / "packaging" / "pyinstaller" / "entry_daemon.py"
+    spec = importlib.util.spec_from_file_location("ovi_entry_daemon", path)
+    assert spec is not None and spec.loader is not None
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_entry_daemon_dispatches_five_modes_and_handles_none_stdio(monkeypatch):
+    entry = _load_entry_daemon()
+    seen: list[tuple[str, list[str]]] = []
+
+    def make(name: str, code: int):
+        def _handler(rest: list[str]) -> int:
+            seen.append((name, list(rest)))
+            return code
+
+        return _handler
+
+    def _daemon() -> int:
+        seen.append(("daemon", []))
+        return 0
+
+    kw = {
+        "run_child_guard": make("child_guard", 11),
+        "run_server": make("server", 12),
+        "run_setup_worker": make("setup_worker", 13),
+        "run_window": make("window", 14),
+        "run_daemon": _daemon,
+    }
+    assert entry.dispatch(["app", INTERNAL_CHILD_GUARD_FLAG, "--mode", "watch"], **kw) == 11
+    assert entry.dispatch(["app", INTERNAL_SERVER_FLAG, "--factory", "app:create_production_app"], **kw) == 12
+    assert entry.dispatch(["app", INTERNAL_SETUP_WORKER_FLAG, "--kind", "ollama_pull"], **kw) == 13
+    assert entry.dispatch(["app", INTERNAL_WINDOW_FLAG, "--url", "https://127.0.0.1:17945/"], **kw) == 14
+    assert entry.dispatch(["app"], **kw) == 0
+    assert entry.dispatch(["app", "--background"], **kw) == 0
+    assert entry.dispatch(["app", "-psn_0_12345"], **kw) == 0
+    assert seen == [
+        ("child_guard", ["--mode", "watch"]),
+        ("server", ["--factory", "app:create_production_app"]),
+        ("setup_worker", ["--kind", "ollama_pull"]),
+        ("window", ["--url", "https://127.0.0.1:17945/"]),
+        ("daemon", []),
+        ("daemon", []),
+        ("daemon", []),
+    ]
+
+    # _run_server 将 uvicorn Click 的 SystemExit 转为整型退出码
+    import uvicorn
+
+    def fake_uvicorn_main(*, args, prog_name):
+        assert args == ["--port", "17945"] and prog_name == "uvicorn"
+        raise SystemExit(3)
+
+    monkeypatch.setattr(uvicorn.main, "main", fake_uvicorn_main)
+    assert entry._run_server(["--port", "17945"]) == 3
+
+    # Windows console=False 冻结态下 stdout/stderr 为 None 时 flush_stdio 不报错
+    monkeypatch.setattr(sys, "stdout", None)
+    monkeypatch.setattr(sys, "stderr", None)
+    entry.flush_stdio()
+
+
+def test_entry_daemon_does_not_preimport_pyside6_on_import_or_internal_dispatch():
+    entry_path = ROOT / "packaging" / "pyinstaller" / "entry_daemon.py"
+    env = {**os.environ, "PYTHONPATH": str(ROOT), "PYTHONDONTWRITEBYTECODE": "1"}
+    probe = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import importlib.util, sys; "
+                "s = importlib.util.spec_from_file_location('ovi_entry_daemon', sys.argv[1]); "
+                "m = importlib.util.module_from_spec(s); s.loader.exec_module(m); "
+                "bad = [k for k in ('PySide6', 'daemon', 'uvicorn', 'webview') if k in sys.modules]; "
+                "assert not bad, f'preimported: {bad}'"
+            ),
+            str(entry_path),
+        ],
+        cwd=ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert probe.returncode == 0, probe.stderr
+
+    # 真实 CLI 子进程验证 --internal-child-guard 派发（--parent 1 立即返回 1 且绝不 exec）
+    if sys.platform.startswith("linux"):
+        guard = subprocess.run(
+            [
+                sys.executable,
+                str(entry_path),
+                INTERNAL_CHILD_GUARD_FLAG,
+                "--mode",
+                "pdeathsig",
+                "--parent",
+                "1",
+                "--",
+                "echo",
+                "never",
+            ],
+            cwd=ROOT,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert guard.returncode == 1 and "已退出" in guard.stderr

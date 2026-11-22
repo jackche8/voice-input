@@ -1,0 +1,13 @@
+#!/bin/sh
+set -e
+
+case "$1" in
+  remove|upgrade|deconfigure)
+    if [ -f /usr/lib/ollama-voice-input/quit_running.py ]; then
+      python3 /usr/lib/ollama-voice-input/quit_running.py
+    fi
+    ;;
+  failed-upgrade)
+    exit 1
+    ;;
+esac

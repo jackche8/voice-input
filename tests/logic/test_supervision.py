@@ -13,7 +13,7 @@ from pathlib import Path
 import pytest
 
 from _contracts import ComponentName, ComponentState
-from _paths import AppPaths
+from _paths import ASR_RUNTIME_DIRNAME, INTERNAL_SERVER_FLAG, AppPaths
 from _platform.child_process import SessionRecord
 from _ports import DEFAULT_ASR_PORT as ASR_PORT, DEFAULT_OLLAMA_PORT, DEFAULT_SERVER_PORT as SERVER_PORT
 from _supervision import machine as sm
@@ -53,6 +53,14 @@ def test_specs_commands_env_ports_and_timeouts(paths):
     assert [(s.start_timeout_s, s.stop_timeout_s) for s in specs.values()] == [(60, 10), (300, 30), (60, 10)]
     assert {s.log_path for s in specs.values()} == {paths.logs / f"{n}.log" for n in ("ollama", "asr", "server")}
     assert server.installed() is None
+
+
+def test_frozen_specs_isolate_asr_runtime_root_and_dispatch_server_internally(paths):
+    specs = {s.name: s for s in build_specs(paths, {"PATH": "/usr/bin"}, frozen=True, executable="/app/ollama-voice-input")}
+    asr, server = specs[ComponentName.asr], specs[ComponentName.server]
+    isolated = paths.program_root / ASR_RUNTIME_DIRNAME
+    assert asr.env["PYTHONPATH"] == str(isolated) and asr.cwd == isolated
+    assert server.argv[:4] == ("/app/ollama-voice-input", INTERNAL_SERVER_FLAG, "--factory", "app:create_production_app")
 
 
 def test_ports_can_be_moved_by_environment_for_all_three_components(paths):

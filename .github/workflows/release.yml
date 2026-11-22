@@ -1,0 +1,180 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify-version:
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.check.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: check
+        name: Validate _version.APP_VERSION and tag consistency
+        env:
+          REF_NAME: ${{ github.ref_name }}
+          REF_TYPE: ${{ github.ref_type }}
+        run: |
+          /usr/bin/python3 - <<'PY'
+          import os, re
+          from _version import APP_VERSION
+
+          if not re.fullmatch(r"\d+\.\d+\.\d+(?:[.-][0-9A-Za-z]+)?", APP_VERSION):
+              raise SystemExit(f"Invalid APP_VERSION in _version.py: {APP_VERSION!r}")
+
+          ref_type = os.environ.get("REF_TYPE", "")
+          ref_name = os.environ.get("REF_NAME", "")
+          if ref_type == "tag":
+              expected = f"v{APP_VERSION}"
+              if ref_name != expected:
+                  raise SystemExit(
+                      f"Tag mismatch: received {ref_name!r}, expected {expected!r} (from _version.py)"
+                  )
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as fh:
+              fh.write(f"version={APP_VERSION}\n")
+          print(f"Verified APP_VERSION={APP_VERSION} (ref_type={ref_type})")
+          PY
+
+  build-linux:
+    needs: verify-version
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Debian packaging toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y dpkg-dev lintian python3-venv python3-pip python3-dev build-essential
+      - name: Lint maintainer scripts with dash
+        run: dash -n packaging/linux/postinst packaging/linux/prerm packaging/linux/postrm packaging/linux/launcher.sh
+      - name: Build Linux .deb with system Python 3.12
+        env:
+          APP_VERSION: ${{ needs.verify-version.outputs.version }}
+        run: |
+          /usr/bin/python3 --version
+          /usr/bin/python3 packaging/linux/build_deb.py --output-dir dist
+          DEB="dist/ollama-voice-input_${APP_VERSION}_amd64.deb"
+          test -f "$DEB"
+          dpkg-deb --info "$DEB"
+          dpkg-deb --contents "$DEB" | head -n 60
+          lintian --fail-on error "$DEB"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-deb
+          path: dist/ollama-voice-input_*_amd64.deb
+          if-no-files-found: error
+
+  build-windows:
+    needs: verify-version
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install dependencies and PyInstaller
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt pyinstaller
+      - name: Build Windows x64 Inno Setup installer
+        shell: pwsh
+        env:
+          APP_VERSION: ${{ needs.verify-version.outputs.version }}
+        run: |
+          pwsh -File packaging\windows\build.ps1
+          $out = "dist\Ollama-Voice-Input-$env:APP_VERSION-windows-x64-setup.exe"
+          if (-not (Test-Path $out)) { throw "Missing $out" }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-setup
+          path: dist/Ollama-Voice-Input-*-windows-x64-setup.exe
+          if-no-files-found: error
+
+  build-macos:
+    needs: verify-version
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install dependencies and PyInstaller
+        run: |
+          python3 -m pip install --upgrade pip
+          python3 -m pip install -r requirements.txt pyinstaller
+      - name: Build macOS arm64 .dmg
+        env:
+          APP_VERSION: ${{ needs.verify-version.outputs.version }}
+        run: |
+          bash packaging/macos/build.sh
+          test -f "dist/Ollama-Voice-Input-${APP_VERSION}-macos-arm64.dmg"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-dmg
+          path: dist/Ollama-Voice-Input-*-macos-arm64.dmg
+          if-no-files-found: error
+
+  publish-release:
+    needs:
+      - verify-version
+      - build-linux
+      - build-windows
+      - build-macos
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+      - name: Generate basename SHA256SUMS.txt and release notes
+        env:
+          APP_VERSION: ${{ needs.verify-version.outputs.version }}
+        run: |
+          cd release-assets
+          sha256sum \
+            "ollama-voice-input_${APP_VERSION}_amd64.deb" \
+            "Ollama-Voice-Input-${APP_VERSION}-windows-x64-setup.exe" \
+            "Ollama-Voice-Input-${APP_VERSION}-macos-arm64.dmg" \
+            > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+          cd ..
+          cat > release-notes.md <<EOF
+          ## Ollama Voice Input v${APP_VERSION}
+
+          ### Downloads / 下载说明
+          - **Linux (Ubuntu 24.04 amd64, Python 3.12)**: \`ollama-voice-input_${APP_VERSION}_amd64.deb\`
+            \`\`\`bash
+            sudo apt install ./ollama-voice-input_${APP_VERSION}_amd64.deb
+            \`\`\`
+          - **Windows (x64)**: \`Ollama-Voice-Input-${APP_VERSION}-windows-x64-setup.exe\` *(unsigned / 未签名，未经 Windows 真机验收)*
+          - **macOS (arm64 / Apple Silicon)**: \`Ollama-Voice-Input-${APP_VERSION}-macos-arm64.dmg\` *(unnotarized / 未公证，未经 macOS 真机验收)*
+          - **Checksums / 校验清单**: \`SHA256SUMS.txt\` (\`sha256sum -c SHA256SUMS.txt\`)
+
+          ### Unsigned Installer First-Open Guidance / 未签名安装包首次打开指引
+          - **Windows SmartScreen**：如提示「Windows 已保护你的电脑」，点 **更多信息 → 仍要运行**（*More info → Run anyway*）。
+          - **macOS Gatekeeper**：将应用拖入 \`Applications\` 后执行 \`xattr -cr "/Applications/Ollama Voice Input.app"\`（或右键「打开」/ 系统设置 → 隐私与安全性 → 仍要打开），并授予麦克风、辅助功能与屏幕录制权限。
+
+          ### License / 许可协议
+          Dual-licensed under **AGPL-3.0-only** (\`LICENSE\`) and a **Commercial License** (\`COMMERCIAL.md\`). Third-party notices in \`THIRD-PARTY-NOTICES.md\`.
+          EOF
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-bundle
+          path: release-assets/*
+          if-no-files-found: error
+      - name: Create or update GitHub Release (tag only)
+        if: github.ref_type == 'tag'
+        uses: softprops/action-gh-release@v2
+        with:
+          name: Ollama Voice Input v${{ needs.verify-version.outputs.version }}
+          body_path: release-notes.md
+          files: release-assets/*

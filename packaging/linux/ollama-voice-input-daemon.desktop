@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Ollama Voice Input
+Comment=Background portal identity for Ollama Voice Input
+Exec=/usr/bin/ollama-voice-input --background
+Icon=ollama-voice-input
+Terminal=false
+NoDisplay=true
+Categories=Utility;

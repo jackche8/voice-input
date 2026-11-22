@@ -133,3 +133,10 @@ def test_each_variant_has_a_hash_locked_requirements_file(variant):
     assert "--hash=sha256:" in text and "qwen-asr==0.0.6" in text and "--index-url https://pypi.org/simple" in text
     assert ("vllm==0.14.0" in text) is (variant == "cuda")
     assert ("torch-2.9.1%2Bcpu-cp312-cp312-manylinux_2_28_x86_64.whl" in text) is (variant == "cpu")
+
+
+def test_lock_file_uses_isolated_asr_runtime_root_when_frozen(tmp_path):
+    assert lock_file("cpu", program_root=tmp_path, frozen=False) == tmp_path / "runtimes" / "asr" / "requirements-cpu.lock"
+    assert lock_file("cpu", program_root=tmp_path, frozen=True) == (
+        tmp_path / "_asr_runtime" / "runtimes" / "asr" / "requirements-cpu.lock"
+    )
