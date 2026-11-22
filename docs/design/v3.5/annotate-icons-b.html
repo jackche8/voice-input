@@ -1,0 +1,1695 @@
+<!doctype html>
+<!--
+  v3.5 截屏标注纯图标工具条 · 模板 B「效率语义图标条 · 复制主动作强调」（推荐）
+  定位：遵循 ui-craft「一屏一个主按钮强调」原则——在保持紧凑（~309px）的同时建立清晰语义层次：
+  - 主条（固定单行 9 钮，保持现行功能分组）：[矩形 箭头 画笔 文字 马赛克] │ [撤销] │ [复制(主) 保存] │ [取消] [右侧按需状态文本]
+    · 「复制 (Enter)」为唯一强调主图标钮（32×28px，复用 theme.py OK_SOFT_RGBA 柔绿微底 + OK_HEX 剪贴板对勾矢量图标），
+      眯眼扫视即可区分左侧「当前工具（蓝）」与右侧「主完成动作（绿）」；
+    · 「取消 ×」悬停呈现微红警示底框（ERROR_BG_RGBA / ERROR_HEX），降低误点关闭风险；
+    · 全部 9 钮均为纯矢量图标（无按钮文字），去掉末尾常驻 Enter/Esc 文本，悬停/聚焦弹出中文提示气泡；
+    · 复制失败时复制钮切换红框失败态（宽度锁定 32px 不跳宽），右侧状态栏显示「复制失败」1.5s。
+  - 二级样式条（按需在主条外侧展开，锁定 34px 等高防抖动）：
+    · 非马赛克态：[6 色色点] │ [3 档大小圆点 4/7/10px] [等宽 px 数值]（去掉「细/中/粗」文字）
+    · 马赛克态：[3 档大小圆点 4/7/10px] [等宽 px 数值]（隐藏色板，去掉「马赛克块：」文字）
+    · 3 档圆点悬停动态显示对应档位与像素值（如「细 (2px)」「中 · 字号 (20px)」「粗 · 块尺寸 (16px)」）。
+  - 全部矢量图标均采用 16×16 逻辑网格简洁几何路径，与 PySide6 QPainter 原语 1:1 对应。
+
+  显示的数据：
+  - 冻结截图 cropped_png（框选后原位绘制于 screen_rect，选区外覆暗色遮罩）
+  - 选区 screen_rect、虚拟桌面 virtual_geometry、可用屏 available_screen_rect（按联合高度锁锚避让）
+  - 单次运行内记忆样式 (color_hex, size_level)（6 色 × 3 档，纯内存变量不落盘）
+  - 动作反馈状态：复制失败 1.5s 状态、保存回调 SaveResult(path | error) 状态
+
+  触发的动作：
+  - 5 工具图标（矩形/箭头/画笔/文字/马赛克）→ 切换/收起当前工具并展开或隐藏二级样式条（主条坐标 0px 位移）
+  - 撤销图标 → 弹出最后一条已提交标注（空栈时禁用置灰）
+  - 复制主图标（柔绿剪贴板对勾）或非输入态 Enter/Return → on_copy_image(png: bytes) -> bool（True 立即关窗并回调 on_closed()；False 右侧状态栏提示「复制失败」1.5s）
+  - 保存图标 → on_save_image(png: bytes) -> SaveResult（成功显示「✓ 已保存 路径」2.5s 后关闭；失败显示原因不关）
+  - 取消图标 或 非输入态 Esc → close() → on_closed()（文字输入态 Enter 提交文字不关窗、Esc 仅取消本次输入）
+  - 二级样式条 6 色点 / 3 档圆点 → 更新当前样式并同步单次运行内记忆 on_style_changed((color_hex, size_level))
+
+  基于的现有组件与文件：
+  - _ui_desktop/annotate_widgets.py（AnnotateToolbar 主条 9 枚矢量图标钮 + 复制主动作语义样式 + 取消悬停警示；AnnotateStyleBar 去文字改纯圆点）
+  - _ui_desktop/annotate_overlay.py（全屏透明窗、冻结画布、Enter/Esc 焦点裁决、画笔采样、双条零抖动定位与复制失败状态路由）
+  - _ui_desktop/theme.py（复用 SURFACE_HEX / SURFACE_2_HEX / ACCENT_HEX / OK_HEX / OK_SOFT_RGBA / ERROR_HEX / ERROR_BG_RGBA / ANNOTATE_COLORS / ANNOTATE_SIZES）
+  - _ui_desktop/mini_menu.py & _ui_desktop/annotate_tools.py（复用双条避让算法与 5 工具渲染导出）
+-->
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>v3.5 截屏标注图标条 · 模板 B「效率语义图标条 · 复制主动作强调」（推荐）</title>
+<style>
+:root {
+  /* 全部映射自 _ui_desktop/theme.py */
+  --font-sans: "Noto Sans CJK SC", "PingFang SC", "Microsoft YaHei", "Segoe UI", sans-serif;
+  --font-mono: "JetBrains Mono", "Noto Sans Mono CJK SC", "Consolas", monospace;
+  --bg-page: #090c10;
+  --bg-dark: #0d1117;
+  --surface: #161b22;
+  --surface-2: #1f2630;
+  --border: #30363d;
+  --text: #e6edf3;
+  --text-sec: #c9d1d9;
+  --muted: #8b949e;
+  --accent: #58a6ff;
+  --accent-soft: rgba(56, 139, 253, 0.16);
+  --accent-hover-bg: rgba(88, 166, 255, 0.08);
+  --accent-border: rgba(88, 166, 255, 0.45);
+  --ok: #3fb950;
+  --ok-bright: #56d364;
+  --ok-soft: rgba(63, 185, 80, 0.16);
+  --ok-hover-bg: rgba(63, 185, 80, 0.26);
+  --ok-border: rgba(63, 185, 80, 0.48);
+  --err: #f85149;
+  --err-bg: rgba(248, 81, 73, 0.12);
+  --err-border: rgba(248, 81, 73, 0.48);
+  --cross: #ff2d2d;
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --t-fast: 120ms ease-out;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  background: var(--bg-page);
+  color: var(--text);
+  font-family: var(--font-sans);
+  font-size: 14px;
+  line-height: 1.55;
+}
+header.top {
+  position: sticky;
+  top: 0;
+  z-index: 50;
+  background: var(--bg-page);
+  border-bottom: 1px solid var(--border);
+  padding: 12px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.title {
+  display: flex;
+  gap: 10px;
+  align-items: baseline;
+  flex-wrap: wrap;
+}
+.title strong { color: var(--accent); font-size: 15px; font-weight: 600; }
+.title .badge {
+  font-size: 11px;
+  color: var(--accent);
+  background: var(--accent-soft);
+  border: 1px solid var(--accent-border);
+  border-radius: 999px;
+  padding: 1px 8px;
+}
+.title span.desc { color: var(--muted); font-size: 12px; }
+.ctrl { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.ctrl button {
+  font: inherit;
+  font-size: 12px;
+  font-weight: 500;
+  padding: 4px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text-sec);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  transition: border-color var(--t-fast), color var(--t-fast), background-color var(--t-fast);
+}
+.ctrl button:hover { border-color: var(--accent); color: var(--accent); }
+.ctrl button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.ctrl button.on { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }
+.ctrl .sep { width: 1px; height: 16px; background: var(--border); margin: 0 4px; }
+.ctrl .lbl { font-size: 12px; color: var(--muted); }
+
+main {
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  max-width: 1480px;
+  margin: 0 auto;
+}
+.vp {
+  position: relative;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-dark);
+  height: 740px;
+}
+.vp .tag {
+  position: absolute;
+  right: 12px;
+  top: 10px;
+  z-index: 40;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-sec);
+  background: rgba(13, 17, 23, 0.88);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 3px 8px;
+  pointer-events: none;
+}
+.screen {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 3440px;
+  height: 1440px;
+  transform-origin: 0 0;
+}
+.screen canvas { position: absolute; left: 0; top: 0; }
+
+/* ---- 模板 B：效率语义图标主条（~309px）+ 等高锁死二级样式条（34px） ---- */
+.bar {
+  position: absolute;
+  z-index: 25;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 4px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  font-size: 12px;
+  white-space: nowrap;
+}
+.bar.sub-bar {
+  background: var(--surface-2);
+  height: 34px;
+  padding: 0 6px;
+  gap: 4px;
+}
+.bar[hidden] { display: none; }
+
+.bar button {
+  font: inherit;
+  padding: 0;
+  border-radius: var(--radius-sm);
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  transition: border-color var(--t-fast), color var(--t-fast), background-color var(--t-fast);
+}
+.bar button.ib {
+  width: 28px;
+  height: 28px;
+}
+.bar button.ib svg {
+  width: 16px;
+  height: 16px;
+  display: block;
+}
+.bar button:hover:not(:disabled),
+.bar button.hover-preview:not(:disabled) {
+  border-color: var(--accent);
+  background: var(--accent-hover-bg);
+  color: var(--accent);
+}
+.bar button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+.bar button.active {
+  background: var(--accent-soft);
+  border-color: var(--accent-border);
+  color: var(--accent);
+}
+.bar button.press {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.bar button:disabled {
+  color: var(--muted);
+  opacity: 0.38;
+  cursor: not-allowed;
+  border-color: transparent;
+  background: transparent;
+}
+
+/* 模板 B 核心语义 1：复制 (Enter) 作为全条唯一强调主动作钮（32×28px 柔绿微底 + 剪贴板对勾） */
+.bar button.ib-primary {
+  width: 32px;
+  background: var(--ok-soft);
+  border-color: var(--ok-border);
+  color: var(--ok);
+}
+.bar button.ib-primary:hover:not(:disabled),
+.bar button.ib-primary.hover-preview:not(:disabled) {
+  background: var(--ok-hover-bg);
+  border-color: var(--ok);
+  color: var(--ok-bright);
+}
+.bar button.ib-primary:focus-visible {
+  outline: 2px solid var(--ok);
+  outline-offset: 1px;
+}
+
+/* 模板 B 核心语义 2：取消 × 静息略柔和，悬停微红防误触 */
+.bar button.ib-danger {
+  color: var(--text-sec);
+}
+.bar button.ib-danger:hover:not(:disabled),
+.bar button.ib-danger.hover-preview:not(:disabled) {
+  color: var(--err);
+  border-color: var(--err-border);
+  background: var(--err-bg);
+}
+
+/* 复制失败状态（覆盖主动作态，宽度锁定 32px 绝不跳动） */
+.bar button.fail,
+.bar button.ib-primary.fail {
+  color: var(--err);
+  border-color: var(--err-border);
+  background: var(--err-bg);
+}
+
+.bar .div {
+  width: 1px;
+  height: 16px;
+  background: var(--border);
+  margin: 0 3px;
+  flex-shrink: 0;
+}
+.bar .st {
+  padding: 0 6px 0 4px;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1;
+}
+.bar .st.ok { color: var(--ok); }
+.bar .st.fail { color: var(--err); }
+
+/* 二级样式条：6 色色点 │ 3 档纯圆点（4/7/10px）+ 等宽 px 数值 */
+.swatch-group { display: inline-flex; align-items: center; gap: 3px; }
+.swatch-group[hidden] { display: none; }
+.bar button.sw {
+  position: relative;
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  border: 2px solid transparent;
+}
+.bar button.sw::after {
+  content: "";
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--c);
+  box-shadow: inset 0 0 0 1px var(--ring);
+}
+.bar button.sw:hover:not(:disabled) {
+  border-color: rgba(88, 166, 255, 0.65);
+  background: var(--accent-hover-bg);
+}
+.bar button.sw.sel {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+.bar button.sw.sel::before {
+  content: "";
+  position: absolute;
+  z-index: 2;
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: var(--dot);
+}
+
+.size-group { display: inline-flex; align-items: center; gap: 2px; }
+.bar button.sz {
+  width: 24px;
+  height: 24px;
+}
+.bar button.sz i {
+  display: block;
+  border-radius: 50%;
+  background: var(--text-sec);
+  flex-shrink: 0;
+  transition: background-color var(--t-fast);
+}
+.bar button.sz:hover:not(:disabled) i,
+.bar button.sz.active i {
+  background: var(--accent);
+}
+.bar .px-tag {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--muted);
+  min-width: 32px;
+  text-align: right;
+  padding: 0 2px;
+  user-select: none;
+}
+
+/* 悬浮中文提示气泡 */
+.tip-pop {
+  position: absolute;
+  z-index: 45;
+  pointer-events: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 8px;
+  border-radius: var(--radius-sm);
+  background: rgba(13, 17, 23, 0.94);
+  border: 1px solid var(--border);
+  color: var(--text);
+  font-size: 11px;
+  line-height: 1.4;
+  white-space: nowrap;
+}
+.tip-pop[hidden] { display: none; }
+.tip-pop kbd {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--muted);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0 4px;
+  line-height: 1.4;
+}
+
+.edit {
+  position: absolute;
+  z-index: 30;
+  background: transparent;
+  border: 1px dashed var(--accent);
+  outline: none;
+  padding: 0 2px;
+  font-family: var(--font-sans);
+  font-weight: 600;
+  caret-color: var(--accent);
+}
+.edit:focus { border-style: solid; }
+.closed-tip {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 46%;
+  text-align: center;
+  color: var(--text-sec);
+  font-size: 13px;
+  z-index: 35;
+  pointer-events: none;
+}
+.closed-tip span {
+  display: inline-block;
+  background: rgba(22, 27, 34, 0.94);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: 8px 16px;
+}
+
+.log-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: 12px 16px;
+}
+.log-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  margin-bottom: 8px;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.log-head h3 { margin: 0; font-size: 14px; font-weight: 600; }
+.log-head span { font-size: 12px; color: var(--muted); font-family: var(--font-mono); }
+.log {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-sec);
+  background: var(--bg-dark);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 8px 12px;
+  height: 108px;
+  overflow: auto;
+  white-space: pre;
+  line-height: 1.5;
+}
+.log b { color: var(--accent); font-weight: 600; }
+.log em { color: var(--ok); font-style: normal; }
+.log i { color: var(--err); font-style: normal; }
+
+.spec-strip {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: 14px 16px;
+}
+.spec-strip h3 { margin: 0 0 10px; font-size: 14px; font-weight: 600; }
+.glyph-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(128px, 1fr));
+  gap: 8px;
+}
+.glyph-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-dark);
+  border: 1px solid var(--border);
+}
+.glyph-box {
+  width: 28px;
+  height: 28px;
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  color: var(--text);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+.glyph-box.primary {
+  width: 32px;
+  background: var(--ok-soft);
+  border-color: var(--ok-border);
+  color: var(--ok);
+}
+.glyph-box.danger {
+  color: var(--err);
+  border-color: var(--err-border);
+  background: var(--err-bg);
+}
+.glyph-meta { min-width: 0; }
+.glyph-meta b { display: block; font-size: 12px; font-weight: 600; color: var(--text); }
+.glyph-meta span { display: block; font-size: 11px; color: var(--muted); font-family: var(--font-mono); }
+
+.notes {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  gap: 12px;
+}
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: 14px 16px;
+  font-size: 13px;
+}
+.card h3 { margin: 0 0 8px; font-size: 14px; font-weight: 600; color: var(--text); }
+.card ul { margin: 0; padding-left: 18px; color: var(--text-sec); }
+.card li { margin: 4px 0; }
+.card code { font-family: var(--font-mono); font-size: 12px; color: #79c0ff; }
+</style>
+</head>
+<body>
+<header class="top">
+  <div class="title">
+    <strong>模板 B「效率语义图标条 · 复制主动作强调」</strong>
+    <span class="badge">推荐 · 一屏一主钮 · ~309px</span>
+    <span class="desc">复制（Enter 主完成动作）以柔绿剪贴板对勾作唯一强调主钮，取消 × 悬停微红防误触；二级条纯圆点 + px 数值，紧凑高辨识</span>
+  </div>
+  <div class="ctrl">
+    <button id="btn-auto"><svg width="11" height="11" viewBox="0 0 12 12" fill="currentColor" aria-hidden="true"><polygon points="3,2 10,6 3,10"/></svg><span>自动演示</span></button>
+    <span class="sep"></span><span class="lbl">状态</span>
+    <span id="steps" style="display:contents"></span>
+    <span class="sep"></span><span class="lbl">选区</span>
+    <button data-box="mid" class="on">中部（框下）</button>
+    <button data-box="bottom">贴底（框上）</button>
+    <button data-box="tall">全高（框内）</button>
+    <button data-box="narrow">窄选区（钳制）</button>
+    <span class="sep"></span>
+    <button id="btn-view">1:1 局部</button>
+  </div>
+</header>
+
+<main>
+  <div class="vp" id="vp">
+    <div class="tag" id="vp-tag"></div>
+    <div class="screen" id="screen">
+      <canvas id="desk" width="3440" height="1440"></canvas>
+      <canvas id="ov" width="3440" height="1440"></canvas>
+      <div class="bar" id="bar-main" hidden></div>
+      <div class="bar sub-bar" id="bar-sub" hidden></div>
+      <div class="tip-pop" id="tip-pop" hidden></div>
+    </div>
+    <div class="closed-tip" id="closed-tip" hidden><span id="closed-msg">浮窗已关闭 · 点「仅主条」或「自动演示」继续体验</span></div>
+  </div>
+
+  <div class="log-card">
+    <div class="log-head">
+      <h3>交互回调与 0px 抖动观测（悬停复制/取消/圆点看中文气泡；切换工具与复制失败核对 0px 位移）</h3>
+      <span id="mem-indicator"></span>
+    </div>
+    <div class="log" id="log"></div>
+  </div>
+
+  <div class="spec-strip">
+    <h3>9 枚矢量图标语义与 QPainter 规格（16×16 网格 · 1.6px 线宽 · 蓝激活工具 / 绿主复制 / 悬停红取消）</h3>
+    <div class="glyph-grid" id="glyph-grid"></div>
+  </div>
+
+  <div class="notes">
+    <div class="card">
+      <h3>显示的数据</h3>
+      <ul>
+        <li>冻结截图 <code>cropped_png</code>：框选后原位绘制于 <code>screen_rect</code>，选区外覆暗色遮罩</li>
+        <li>选区 <code>screen_rect</code>、虚拟桌面 <code>virtual_geometry</code>、可用屏 <code>available_screen_rect</code>（联合高度锁锚避让）</li>
+        <li>运行内样式记忆 <code>(color_hex, size_level)</code>：6 色 × 3 档纯内存记忆，不落盘</li>
+        <li>右侧状态文本：复制失败 1.5s 与 <code>SaveResult(path | error)</code>（不撑宽任何图标按钮）</li>
+      </ul>
+    </div>
+    <div class="card">
+      <h3>触发的动作</h3>
+      <ul>
+        <li>点 <b>5 工具图标</b>：展开/切换二级样式条（再次点当前工具收起）；马赛克隐藏色板仅显 3 档圆点 + <code>px</code></li>
+        <li>点 <b>撤销图标</b>：回退上一条已提交标注；空栈禁用置灰</li>
+        <li>点 <b>复制主钮（柔绿剪贴板对勾）</b> 或非输入态按 <b>Enter</b> → <code>on_copy_image(png) -> bool</code>（成功关窗；失败主钮切红框 + 右侧状态栏提示「复制失败」1.5s）</li>
+        <li>点 <b>保存图标</b> → <code>on_save_image(png) -> SaveResult</code>（成功显示路径 2.5s 自动关闭；失败留窗报因）</li>
+        <li>点 <b>取消图标 ×</b> 或非输入态按 <b>Esc</b> → <code>close()</code> → <code>on_closed()</code>（输入中 Enter 提交、Esc 仅取消输入）</li>
+      </ul>
+    </div>
+    <div class="card">
+      <h3>基于的现有组件与文件</h3>
+      <ul>
+        <li><code>_ui_desktop/annotate_widgets.py</code>：<code>AnnotateToolbar</code> 改 9 枚自绘矢量图标钮（复制钮设 <code>role="primary"</code>、取消钮设 <code>role="danger"</code>，去 <code>ANNOTATE_KEY_HINT</code>）；<code>AnnotateStyleBar</code> 去文字改纯圆点</li>
+        <li><code>_ui_desktop/annotate_overlay.py</code>：沿用冻结画布、Enter/Esc 焦点裁决与联合锁锚定位；复制失败改走右侧 <code>set_status("复制失败", ok=False)</code></li>
+        <li><code>_ui_desktop/theme.py</code>：全部色彩直接复用既有 <code>ACCENT_* / OK_HEX / OK_SOFT_RGBA / ERROR_HEX / ERROR_BG_RGBA</code> 令牌，零新增异色</li>
+        <li><code>_ui_desktop/mini_menu.py</code> &amp; <code>annotate_tools.py</code>：完全复用避让定位算法与 5 工具渲染管线</li>
+      </ul>
+    </div>
+    <div class="card">
+      <h3>模板 B 推荐理由与顺序对比</h3>
+      <ul>
+        <li><b>一屏一主钮</b>：柔绿 <code>32×28px</code> 剪贴板对勾把最高频动作「复制并关闭 (Enter)」与左侧蓝色激活工具自然分流，首次上手零学习成本</li>
+        <li><b>防误触设计</b>：<code>取消 ×</code> 静息不喧宾夺主，悬停即转柔红警示，避免与邻近保存/复制误点</li>
+        <li><b>动作顺序对比</b>：保持现行 <code>复制 保存 │ 取消</code> 延续 v3.4/v3.5 肌肉记忆；备选顺序 <code>保存 复制 │ 取消</code> 可把绿色主钮挪到次靠右，若用户偏好可在定稿时 1 行调整</li>
+      </ul>
+    </div>
+  </div>
+</main>
+
+<script>
+'use strict';
+/* ================= 1. 单源设计令牌（对齐 _ui_desktop/theme.py） ================= */
+const T = {
+  accent: '#58a6ff',
+  ok: '#3fb950',
+  err: '#f85149',
+  cross: '#ff2d2d',
+  border: '#30363d',
+  text: '#e6edf3',
+  muted: '#8b949e',
+  dim: 'rgba(0,0,0,0.424)',
+  tagBg: 'rgba(13,17,23,0.92)',
+  tagText: '#ff6b6b',
+  hintBg: 'rgba(13,17,23,0.90)',
+  hintText: '#f0f6fc',
+};
+const SANS = '"Noto Sans CJK SC","PingFang SC","Microsoft YaHei","Segoe UI",sans-serif';
+const MONO = '"JetBrains Mono","Noto Sans Mono CJK SC","Consolas",monospace';
+const SCREEN = { w: 3440, h: 1440 };
+const AVAIL = { x: 0, y: 32, w: 3440, h: 1408 };
+const MENU_GAP = 8;
+const SUB_GAP = 4;
+const MENU_INSIDE_PAD = 6;
+const SUB_RESERVE_H = 34;
+
+const COLORS = [
+  { key: 'red',   name: '红',   hex: '#ff2d2d', ring: 'rgba(230,237,243,0.28)', dot: '#f8fafc' },
+  { key: 'amber', name: '橙黄', hex: '#f59e0b', ring: 'rgba(230,237,243,0.28)', dot: '#111827' },
+  { key: 'green', name: '绿',   hex: '#3fb950', ring: 'rgba(230,237,243,0.28)', dot: '#111827' },
+  { key: 'blue',  name: '蓝',   hex: '#2f81f7', ring: 'rgba(230,237,243,0.32)', dot: '#f8fafc' },
+  { key: 'white', name: '白',   hex: '#f8fafc', ring: 'rgba(13,17,23,0.55)',    dot: '#111827' },
+  { key: 'black', name: '黑',   hex: '#111827', ring: 'rgba(230,237,243,0.62)', dot: '#f8fafc' },
+];
+
+const SIZES = [
+  { key: 'thin',   name: '细', stroke: 2, textPx: 16, block: 6,  dotPx: 4 },
+  { key: 'medium', name: '中', stroke: 3, textPx: 20, block: 10, dotPx: 7 },
+  { key: 'thick',  name: '粗', stroke: 6, textPx: 28, block: 16, dotPx: 10 },
+];
+
+const TOOLS = [
+  ['rect',   '矩形'],
+  ['arrow',  '箭头'],
+  ['brush',  '画笔'],
+  ['text',   '文字'],
+  ['mosaic', '马赛克'],
+];
+const TOOL_NAME = Object.fromEntries(TOOLS);
+
+/* 16×16 矢量图标（1.6px 描边；复制采用剪贴板+对勾融合语义，与 QPainter 原语 1:1 对应） */
+const ICONS = {
+  rect:   '<rect x="2.5" y="3.5" width="11" height="9" rx="1.4"/>',
+  arrow:  '<line x1="3" y1="13" x2="12.5" y2="3.5"/><polyline points="7.5,3.5 12.5,3.5 12.5,8.5"/>',
+  brush:  '<path d="M10.9 2.3L13.7 5.1L5.9 12.9L2.5 13.5L3.1 10.1Z"/><line x1="8.6" y1="4.6" x2="11.4" y2="7.4"/>',
+  text:   '<polyline points="3,4.8 3,3 13,3 13,4.8"/><line x1="8" y1="3" x2="8" y2="13"/><line x1="5.8" y1="13" x2="10.2" y2="13"/>',
+  mosaic: '<g stroke="none" fill="currentColor">'
+        + '<rect x="2.6" y="2.6" width="3.6" height="3.6" rx="0.4"/>'
+        + '<rect x="9.8" y="2.6" width="3.6" height="3.6" rx="0.4"/>'
+        + '<rect x="6.2" y="6.2" width="3.6" height="3.6" rx="0.4"/>'
+        + '<rect x="2.6" y="9.8" width="3.6" height="3.6" rx="0.4"/>'
+        + '<rect x="9.8" y="9.8" width="3.6" height="3.6" rx="0.4"/>'
+        + '<rect x="6.2" y="2.6" width="3.6" height="3.6" rx="0.4" opacity="0.28"/>'
+        + '<rect x="2.6" y="6.2" width="3.6" height="3.6" rx="0.4" opacity="0.28"/>'
+        + '<rect x="9.8" y="6.2" width="3.6" height="3.6" rx="0.4" opacity="0.28"/>'
+        + '<rect x="6.2" y="9.8" width="3.6" height="3.6" rx="0.4" opacity="0.28"/>'
+        + '</g>',
+  undo:   '<polyline points="5.8,3.5 2.8,6.5 5.8,9.5"/><path d="M3.5 6.5H9.5A3.25 3.25 0 0 1 9.5 13H6.5"/>',
+  copy:   '<rect x="5.6" y="2.0" width="4.8" height="2.2" rx="0.7"/><path d="M5.6 3.1H4.2A1.2 1.2 0 0 0 3 4.3V12.4A1.2 1.2 0 0 0 4.2 13.6H11.8A1.2 1.2 0 0 0 13 12.4V4.3A1.2 1.2 0 0 0 11.8 3.1H10.4"/><polyline points="5.6,8.8 7.3,10.5 10.5,7.1"/>',
+  save:   '<line x1="8" y1="2.5" x2="8" y2="10.2"/><polyline points="4.8,7.1 8,10.3 11.2,7.1"/><path d="M2.8 10.8V12.5A1.1 1.1 0 0 0 3.9 13.6H12.1A1.1 1.1 0 0 0 13.2 12.5V10.8"/>',
+  cancel: '<line x1="4" y1="4" x2="12" y2="12"/><line x1="12" y1="4" x2="4" y2="12"/>',
+};
+const svgIcon = k => `<svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICONS[k]}</svg>`;
+
+const GLYPH_SPECS = [
+  ['rect',   '矩形',     'RoundedRect',  ''],
+  ['arrow',  '箭头',     'Line + Head',  ''],
+  ['brush',  '画笔',     'PainterPath',  ''],
+  ['text',   '文字',     'Serif T',      ''],
+  ['mosaic', '马赛克',   '3×3 Grid',     ''],
+  ['undo',   '撤销',     'Arc Arrow',    ''],
+  ['copy',   '复制(主)', 'Enter 绿主钮', 'primary'],
+  ['save',   '保存',     'Tray Arrow',   ''],
+  ['cancel', '取消',     'Esc 悬停红',   'danger'],
+];
+
+const BOXES = {
+  mid:    { x: 1200, y: 260, w: 1040, h: 640 },
+  bottom: { x: 1200, y: 560, w: 1040, h: 860 },
+  tall:   { x: 1200, y: 40,  w: 1040, h: 1392 },
+  narrow: { x: 2980, y: 310, w: 340,  h: 520 },
+};
+
+const MEMORY = { colorIdx: 0, sizeIdx: 1 };
+const currentStyle = () => ({
+  color: COLORS[MEMORY.colorIdx].hex,
+  colorName: COLORS[MEMORY.colorIdx].name,
+  ...SIZES[MEMORY.sizeIdx],
+});
+
+/* ================= 2. 模拟桌面 ================= */
+const desk = document.getElementById('desk');
+const dctx = desk.getContext('2d');
+function txt(ctx, s, x, y, font, color) {
+  ctx.font = font; ctx.fillStyle = color; ctx.textBaseline = 'alphabetic'; ctx.fillText(s, x, y);
+}
+function drawDesk() {
+  dctx.fillStyle = '#18202c'; dctx.fillRect(0, 0, 3440, 1440);
+  dctx.fillStyle = '#0d1117'; dctx.fillRect(0, 0, 3440, 32);
+  txt(dctx, '活动', 16, 21, `13px ${SANS}`, '#c9d1d9');
+  txt(dctx, '11月22日 14:20', 1660, 21, `13px ${SANS}`, '#c9d1d9');
+
+  dctx.fillStyle = '#1b1f26'; dctx.fillRect(60, 88, 640, 1200);
+  dctx.fillStyle = '#242a33'; dctx.fillRect(60, 88, 640, 42);
+  txt(dctx, '文件管理', 80, 114, `600 14px ${SANS}`, '#c9d1d9');
+  ['文档目录', '截图目录', '下载目录', '季度报价单.pdf', '会议纪要.md'].forEach((s, i) => {
+    dctx.fillStyle = i < 3 ? '#58a6ff' : '#8b949e';
+    dctx.fillRect(84, 158 + i * 40, 12, 10);
+    txt(dctx, s, 108, 168 + i * 40, `15px ${SANS}`, '#c9d1d9');
+  });
+
+  dctx.fillStyle = '#ffffff'; dctx.fillRect(760, 70, 1920, 1280);
+  dctx.fillStyle = '#dee1e6'; dctx.fillRect(760, 70, 1920, 40);
+  dctx.fillStyle = '#ffffff'; dctx.fillRect(780, 76, 220, 34);
+  txt(dctx, '账户与账单 – 控制台', 796, 98, `13px ${SANS}`, '#1f2328');
+  dctx.fillStyle = '#f1f3f4'; dctx.fillRect(760, 110, 1920, 44);
+  dctx.fillStyle = '#ffffff'; dctx.fillRect(860, 117, 1200, 30);
+  txt(dctx, 'console.example.test/account/billing', 876, 137, `13px ${SANS}`, '#5f6368');
+  dctx.fillStyle = '#f6f8fa'; dctx.fillRect(760, 154, 300, 1196);
+  ['概览', '账户与账单', '用量统计', '访问令牌', '团队成员', '设置'].forEach((s, i) => {
+    if (i === 1) { dctx.fillStyle = '#ddf4ff'; dctx.fillRect(772, 182 + i * 44, 276, 34); }
+    txt(dctx, s, 796, 205 + i * 44, `15px ${SANS}`, i === 1 ? '#0969da' : '#57606a');
+  });
+  txt(dctx, '账户与账单', 1120, 222, `700 28px ${SANS}`, '#1f2328');
+  const card = (x, y, w, h, title) => {
+    dctx.fillStyle = '#ffffff'; dctx.fillRect(x, y, w, h);
+    dctx.strokeStyle = '#d0d7de'; dctx.lineWidth = 1; dctx.strokeRect(x + 0.5, y + 0.5, w - 1, h - 1);
+    txt(dctx, title, x + 24, y + 36, `700 19px ${SANS}`, '#1f2328');
+  };
+  card(1240, 290, 560, 260, '基础信息');
+  [['联系人', '示范用户'], ['通知邮箱', 'demo-user@example.test'], ['预留号码', '138-0000-0000']].forEach(([k, v], i) => {
+    txt(dctx, k, 1264, 378 + i * 40, `15px ${SANS}`, '#57606a');
+    txt(dctx, v, 1376, 378 + i * 40, `16px ${SANS}`, '#1f2328');
+  });
+  txt(dctx, '访问凭证', 1264, 498, `15px ${SANS}`, '#57606a');
+  txt(dctx, 'DEMO-TOKEN-4F9A-8B3D', 1376, 498, `15px ${MONO}`, '#1f2328');
+
+  card(1830, 290, 400, 260, '近 7 天调用量');
+  [60, 90, 75, 120, 150, 110, 170].forEach((h, i) => {
+    dctx.fillStyle = i >= 4 ? '#0969da' : '#54aeff';
+    dctx.fillRect(1862 + i * 48, 520 - h, 30, h);
+    txt(dctx, '一二三四五六日'[i], 1870 + i * 48, 542, `13px ${SANS}`, '#57606a');
+  });
+
+  card(1240, 580, 990, 300, '最近账单');
+  ['日期', '项目', '金额', '状态'].forEach((s, i) =>
+    txt(dctx, s, [1264, 1450, 1820, 2060][i], 658, `600 14px ${SANS}`, '#57606a')
+  );
+  [
+    ['2026-11-18', '语音识别 · 月度套餐', '¥128.00', '已支付'],
+    ['2026-11-12', '翻译引擎 · 扩展包',   '¥49.00',  '待支付'],
+    ['2026-11-02', '对象存储扩容',       '¥19.00',  '已支付'],
+    ['2026-10-18', '语音识别 · 月度套餐', '¥128.00', '已支付'],
+  ].forEach((row, r) => row.forEach((s, i) =>
+    txt(dctx, s, [1264, 1450, 1820, 2060][i], 704 + r * 44, `15px ${SANS}`, i === 3 && s === '待支付' ? '#cf222e' : '#1f2328')
+  ));
+
+  dctx.fillStyle = '#161b22'; dctx.fillRect(2740, 90, 640, 1200);
+  dctx.fillStyle = '#1f2630'; dctx.fillRect(2740, 90, 640, 44);
+  txt(dctx, '团队沟通 · 暗色面板', 2762, 118, `600 14px ${SANS}`, '#e6edf3');
+  [
+    ['产品', '账单图发我核对一下', false],
+    ['研发', '凭证字段先打马赛克', false],
+    ['我',   '点绿色对勾或回车即可复制', true],
+  ].forEach(([, s, self], i) => {
+    dctx.fillStyle = self ? '#1f6feb' : '#262f3c';
+    dctx.fillRect(self ? 3020 : 2770, 350 + i * 74, 270, 46);
+    txt(dctx, s, self ? 3036 : 2786, 379 + i * 74, `15px ${SANS}`, '#e6edf3');
+  });
+  dctx.fillStyle = '#0d1117'; dctx.fillRect(2996, 610, 308, 170);
+  dctx.strokeStyle = '#30363d'; dctx.strokeRect(2996.5, 610.5, 307, 169);
+  txt(dctx, 'status: 200 OK', 3014, 650, `14px ${MONO}`, '#3fb950');
+  txt(dctx, 'latency: 142ms', 3014, 682, `14px ${MONO}`, '#c9d1d9');
+  txt(dctx, 'retry:   0',     3014, 714, `14px ${MONO}`, '#8b949e');
+  txt(dctx, 'region:  local', 3014, 746, `14px ${MONO}`, '#79c0ff');
+}
+
+/* ================= 3. 状态与标注渲染 ================= */
+const S = {
+  phase: 'closed',
+  box: { ...BOXES.mid },
+  boxKey: 'mid',
+  tool: null,
+  ops: [],
+  draft: null,
+  selDraft: null,
+  cursor: null,
+  editing: null,
+  editAt: null,
+  copyFb: null,
+  saveFb: null,
+  placement: '框下',
+  mainPos: { x: 0, y: 0 },
+};
+const work = document.createElement('canvas');
+const wctx = work.getContext('2d', { willReadFrequently: true });
+
+function norm(a, b) { return { x: Math.min(a.x, b.x), y: Math.min(a.y, b.y), w: Math.abs(b.x - a.x), h: Math.abs(b.y - a.y) }; }
+function clampToBox(p) {
+  const b = S.box;
+  return { x: Math.max(b.x, Math.min(b.x + b.w, p.x)), y: Math.max(b.y, Math.min(b.y + b.h, p.y)) };
+}
+function pathLength(pts) {
+  let total = 0;
+  for (let i = 1; i < pts.length; i++) total += Math.hypot(pts[i].x - pts[i - 1].x, pts[i].y - pts[i - 1].y);
+  return total;
+}
+
+function renderWork() {
+  const b = S.box;
+  work.width = b.w; work.height = b.h;
+  wctx.drawImage(desk, b.x, b.y, b.w, b.h, 0, 0, b.w, b.h);
+  for (const op of S.ops) drawOp(wctx, op, b.x, b.y, wctx);
+}
+
+function drawBrushPath(ctx, pts, strokePx) {
+  if (!pts || !pts.length) return;
+  if (pts.length === 1) {
+    ctx.beginPath(); ctx.arc(pts[0].x, pts[0].y, Math.max(1.5, strokePx / 2), 0, Math.PI * 2); ctx.fill(); return;
+  }
+  ctx.beginPath(); ctx.moveTo(pts[0].x, pts[0].y);
+  if (pts.length === 2) ctx.lineTo(pts[1].x, pts[1].y);
+  else {
+    for (let i = 1; i < pts.length - 1; i++) {
+      const mx = (pts[i].x + pts[i + 1].x) / 2, my = (pts[i].y + pts[i + 1].y) / 2;
+      ctx.quadraticCurveTo(pts[i].x, pts[i].y, mx, my);
+    }
+    ctx.lineTo(pts[pts.length - 1].x, pts[pts.length - 1].y);
+  }
+  ctx.stroke();
+}
+
+function drawArrow(ctx, a, b, w) {
+  const dx = b.x - a.x, dy = b.y - a.y, len = Math.hypot(dx, dy);
+  if (len < 2) return;
+  const ux = dx / len, uy = dy / len;
+  const head = Math.min(len, 4 * w + 8), half = Math.tan(25 * Math.PI / 180) * head;
+  const bx = b.x - ux * head, by = b.y - uy * head;
+  if (len > head) { ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(bx, by); ctx.stroke(); }
+  ctx.beginPath();
+  ctx.moveTo(b.x, b.y);
+  ctx.lineTo(bx - uy * half, by + ux * half);
+  ctx.lineTo(bx + uy * half, by - ux * half);
+  ctx.closePath(); ctx.fill();
+}
+
+function pixelate(ctx, srcCtx, r, block, ox, oy) {
+  const b = S.box;
+  const left = Math.max(r.x, b.x), top = Math.max(r.y, b.y);
+  const x0 = Math.round(left - b.x), y0 = Math.round(top - b.y);
+  const w = Math.round(Math.min(r.x + r.w, b.x + b.w) - left);
+  const h = Math.round(Math.min(r.y + r.h, b.y + b.h) - top);
+  if (w < 2 || h < 2) return;
+  const data = srcCtx.getImageData(x0, y0, w, h).data;
+  for (let by = 0; by < h; by += block) {
+    for (let bx = 0; bx < w; bx += block) {
+      let rs = 0, gs = 0, bs = 0, n = 0;
+      for (let y = by; y < Math.min(h, by + block); y++) {
+        for (let x = bx; x < Math.min(w, bx + block); x++) {
+          const i = (y * w + x) * 4;
+          rs += data[i]; gs += data[i + 1]; bs += data[i + 2]; n++;
+        }
+      }
+      ctx.fillStyle = `rgb(${rs / n | 0},${gs / n | 0},${bs / n | 0})`;
+      ctx.fillRect(b.x + x0 + bx - ox, b.y + y0 + by - oy, Math.min(block, w - bx), Math.min(block, h - by));
+    }
+  }
+}
+
+function drawOp(ctx, op, ox, oy, src) {
+  ctx.save(); ctx.translate(-ox, -oy);
+  ctx.strokeStyle = ctx.fillStyle = op.color;
+  ctx.lineWidth = op.stroke; ctx.lineJoin = 'round'; ctx.lineCap = 'round';
+  if (op.type === 'rect') { const r = norm(op.a, op.b); ctx.strokeRect(r.x, r.y, r.w, r.h); }
+  else if (op.type === 'arrow') drawArrow(ctx, op.a, op.b, op.stroke);
+  else if (op.type === 'brush') drawBrushPath(ctx, op.points, op.stroke);
+  else if (op.type === 'text') { ctx.font = `600 ${op.textPx}px ${SANS}`; ctx.textBaseline = 'top'; ctx.fillText(op.text, op.a.x, op.a.y); }
+  ctx.restore();
+  if (op.type === 'mosaic') pixelate(ctx, src, norm(op.a, op.b), op.block, ox, oy);
+}
+
+function opFor(type, a, b, extra = {}) {
+  const st = currentStyle();
+  return {
+    type, a, b,
+    points: extra.points || null,
+    text: extra.text || '',
+    color: extra.color || st.color,
+    stroke: extra.stroke || st.stroke,
+    textPx: extra.textPx || st.textPx,
+    block: extra.block || st.block,
+  };
+}
+
+function commit(op) {
+  S.ops.push(op);
+  renderWork();
+  syncBar();
+  const detail = op.type === 'mosaic' ? `块 ${op.block}px` : op.type === 'text' ? `${op.textPx}px` : `${op.stroke}px`;
+  log(`标注 +${TOOL_NAME[op.type]}（${op.type === 'mosaic' ? detail : op.color + ' · ' + detail}，共 ${S.ops.length} 项）`);
+}
+function undo() {
+  if (!S.ops.length) return;
+  S.ops.pop();
+  renderWork();
+  syncBar();
+  log(`撤销（剩余 ${S.ops.length} 项）`);
+}
+
+/* ================= 4. 浮窗画布绘制 ================= */
+const ov = document.getElementById('ov');
+const octx = ov.getContext('2d', { willReadFrequently: true });
+
+function drawOverlay() {
+  octx.clearRect(0, 0, SCREEN.w, SCREEN.h);
+  if (S.phase === 'select') return drawSelector();
+  if (S.phase !== 'annotate') return;
+  const b = S.box;
+  octx.fillStyle = T.dim;
+  octx.fillRect(0, 0, SCREEN.w, b.y);
+  octx.fillRect(0, b.y + b.h, SCREEN.w, SCREEN.h - b.y - b.h);
+  octx.fillRect(0, b.y, b.x, b.h);
+  octx.fillRect(b.x + b.w, b.y, SCREEN.w - b.x - b.w, b.h);
+  octx.drawImage(work, b.x, b.y);
+  if (S.draft) {
+    octx.save(); octx.beginPath(); octx.rect(b.x, b.y, b.w, b.h); octx.clip();
+    if (S.draft.type === 'mosaic') {
+      drawOp(octx, S.draft, 0, 0, wctx);
+      octx.setLineDash([4, 3]); octx.strokeStyle = T.accent; octx.lineWidth = 1;
+      const r = norm(S.draft.a, S.draft.b); octx.strokeRect(r.x + 0.5, r.y + 0.5, r.w, r.h);
+    } else {
+      drawOp(octx, S.draft, 0, 0, wctx);
+    }
+    octx.restore();
+  }
+  octx.setLineDash([]);
+  octx.strokeStyle = T.accent; octx.lineWidth = 1.5;
+  octx.strokeRect(b.x - 0.75, b.y - 0.75, b.w + 1.5, b.h + 1.5);
+  if (S.cursor) drawCursor(S.cursor);
+}
+
+function drawSelector() {
+  const c = S.cursor || { x: S.box.x, y: S.box.y };
+  octx.fillStyle = T.dim;
+  if (!S.selDraft) octx.fillRect(0, 0, SCREEN.w, SCREEN.h);
+  else {
+    const r = S.selDraft;
+    octx.fillRect(0, 0, SCREEN.w, r.y); octx.fillRect(0, r.y + r.h, SCREEN.w, SCREEN.h - r.y - r.h);
+    octx.fillRect(0, r.y, r.x, r.h); octx.fillRect(r.x + r.w, r.y, SCREEN.w - r.x - r.w, r.h);
+    octx.strokeStyle = T.cross; octx.lineWidth = 1; octx.strokeRect(r.x + 0.5, r.y + 0.5, r.w - 1, r.h - 1);
+  }
+  const hint = '截屏标注 · 移动鼠标红十字定位 · 拖拽框选 · 右键 / Esc 取消';
+  if (!S.selDraft) {
+    octx.font = `600 12px ${SANS}`;
+    const w = octx.measureText(hint).width + 32;
+    octx.fillStyle = T.hintBg;
+    octx.beginPath(); octx.roundRect(FOCUS.x - w / 2, 46, w, 28, 14); octx.fill();
+    octx.fillStyle = T.hintText; octx.textAlign = 'center'; octx.textBaseline = 'middle';
+    octx.fillText(hint, FOCUS.x, 60); octx.textAlign = 'left';
+  }
+  octx.strokeStyle = T.cross; octx.lineWidth = 1;
+  octx.beginPath();
+  octx.moveTo(0, c.y + 0.5); octx.lineTo(SCREEN.w, c.y + 0.5);
+  octx.moveTo(c.x + 0.5, 0); octx.lineTo(c.x + 0.5, SCREEN.h);
+  octx.stroke();
+  octx.beginPath(); octx.arc(c.x + 0.5, c.y + 0.5, 5, 0, Math.PI * 2); octx.stroke();
+  const tag = S.selDraft ? `${S.selDraft.w} × ${S.selDraft.h} px (${S.selDraft.x}, ${S.selDraft.y})` : `X: ${c.x}, Y: ${c.y}`;
+  octx.font = `11px ${MONO}`;
+  const tw = octx.measureText(tag).width + 16;
+  const tx = Math.min(SCREEN.w - tw - 12, c.x + 14);
+  octx.fillStyle = T.tagBg;
+  octx.beginPath(); octx.roundRect(tx, c.y + 14, tw, 21, 4); octx.fill();
+  octx.strokeStyle = T.cross; octx.stroke();
+  octx.fillStyle = T.tagText; octx.textBaseline = 'middle';
+  octx.fillText(tag, tx + 8, c.y + 25);
+}
+
+function drawCursor(c) {
+  octx.save(); octx.strokeStyle = '#000'; octx.lineWidth = 3;
+  const cross = () => {
+    octx.beginPath();
+    octx.moveTo(c.x - 8, c.y); octx.lineTo(c.x + 8, c.y);
+    octx.moveTo(c.x, c.y - 8); octx.lineTo(c.x, c.y + 8);
+    octx.stroke();
+  };
+  cross(); octx.strokeStyle = '#fff'; octx.lineWidth = 1.2; cross(); octx.restore();
+}
+
+/* ================= 5. 模板 B：效率语义图标主条 + 二级样式条 + 悬浮中文气泡 ================= */
+const mainBar = document.getElementById('bar-main');
+const subBar = document.getElementById('bar-sub');
+const tipPop = document.getElementById('tip-pop');
+let hoveredBtn = null;
+
+function setTip(el, text, kbd = '') {
+  el.dataset.tip = text;
+  if (kbd) el.dataset.kbd = kbd; else delete el.dataset.kbd;
+  el.setAttribute('aria-label', kbd ? `${text} (${kbd})` : text);
+}
+
+function showTip(btn) {
+  if (!btn || !btn.dataset.tip || btn.hidden || S.phase !== 'annotate') { hideTip(); return; }
+  hoveredBtn = btn;
+  const text = btn.dataset.tip;
+  const kbd = btn.dataset.kbd || '';
+  tipPop.innerHTML = kbd ? `<span>${text}</span><kbd>${kbd}</kbd>` : `<span>${text}</span>`;
+  tipPop.hidden = false;
+
+  const isMain = mainBar.contains(btn);
+  const host = isMain ? mainBar : subBar;
+  const hostLeft = parseFloat(host.style.left) || 0;
+  const hostTop = parseFloat(host.style.top) || 0;
+  const bx = hostLeft + btn.offsetLeft + btn.offsetWidth / 2;
+  const tw = tipPop.offsetWidth;
+  const th = tipPop.offsetHeight;
+  const tx = Math.max(AVAIL.x + 6, Math.min(AVAIL.x + AVAIL.w - tw - 6, Math.round(bx - tw / 2)));
+
+  const openAbove = isMain ? (S.placement === '框下') : (S.placement !== '框下');
+  let ty = openAbove ? (hostTop - th - 6) : (hostTop + host.offsetHeight + 6);
+  if (ty < AVAIL.y + 4) ty = hostTop + host.offsetHeight + 6;
+  if (ty + th > AVAIL.y + AVAIL.h - 4) ty = hostTop - th - 6;
+
+  tipPop.style.left = tx + 'px';
+  tipPop.style.top = Math.round(ty) + 'px';
+}
+
+function hideTip() {
+  hoveredBtn = null;
+  tipPop.hidden = true;
+}
+
+function bindTip(btn) {
+  btn.addEventListener('mouseenter', () => showTip(btn));
+  btn.addEventListener('mouseleave', () => { if (hoveredBtn === btn) hideTip(); });
+  btn.addEventListener('focus', () => showTip(btn));
+  btn.addEventListener('blur', () => { if (hoveredBtn === btn) hideTip(); });
+}
+
+function mkIconBtn(iconKey, tipText, fn, id, kbd = '', extraCls = '') {
+  const b = document.createElement('button');
+  b.type = 'button';
+  b.className = extraCls ? `ib ${extraCls}` : 'ib';
+  b.id = id;
+  b.innerHTML = svgIcon(iconKey);
+  setTip(b, tipText, kbd);
+  bindTip(b);
+  b.onmousedown = e => e.preventDefault();
+  b.onclick = e => { e.stopPropagation(); fn(); };
+  return b;
+}
+
+function mkPlainBtn(fn, id, cls) {
+  const b = document.createElement('button');
+  b.type = 'button';
+  b.id = id;
+  b.className = cls;
+  bindTip(b);
+  b.onmousedown = e => e.preventDefault();
+  b.onclick = e => { e.stopPropagation(); fn(); };
+  return b;
+}
+
+function mkDiv(id) {
+  const d = document.createElement('span');
+  d.className = 'div';
+  if (id) d.id = id;
+  return d;
+}
+
+function sizeTipFor(sz, tool) {
+  if (tool === 'mosaic') return `${sz.name} · 块尺寸 (${sz.block}px)`;
+  if (tool === 'text')   return `${sz.name} · 字号 (${sz.textPx}px)`;
+  return `${sz.name} (${sz.stroke}px)`;
+}
+
+function buildBars() {
+  mainBar.innerHTML = '';
+  TOOLS.forEach(([k, label]) => {
+    mainBar.appendChild(mkIconBtn(k, label, () => { stopAuto(); pickTool(k, true); }, `tool-${k}`));
+  });
+  mainBar.appendChild(mkDiv());
+  mainBar.appendChild(mkIconBtn('undo', '撤销', () => { stopAuto(); undo(); }, 'undo'));
+  mainBar.appendChild(mkDiv());
+  mainBar.appendChild(mkIconBtn('copy', '复制', () => { stopAuto(); copyImage('点了「复制」'); }, 'copy', 'Enter', 'ib-primary'));
+  mainBar.appendChild(mkIconBtn('save', '保存 PNG 到图片目录', () => { stopAuto(); saveImage(); }, 'save'));
+  mainBar.appendChild(mkDiv());
+  mainBar.appendChild(mkIconBtn('cancel', '取消', () => { stopAuto(); closeOverlay('点了「取消」'); }, 'cancel', 'Esc', 'ib-danger'));
+  const st = document.createElement('span');
+  st.className = 'st'; st.id = 'status'; st.hidden = true;
+  mainBar.appendChild(st);
+
+  /* 二级样式条：6 色色点 │ 3 档纯圆点 + px 数值（34px 等高锁死） */
+  subBar.innerHTML = '';
+  const swWrap = document.createElement('span');
+  swWrap.className = 'swatch-group';
+  swWrap.id = 'sub-swatches';
+  COLORS.forEach((c, i) => {
+    const b = mkPlainBtn(() => { stopAuto(); pickColor(i); }, `sw-${i}`, 'sw');
+    b.style.setProperty('--c', c.hex);
+    b.style.setProperty('--ring', c.ring);
+    b.style.setProperty('--dot', c.dot);
+    setTip(b, `${c.name} (${c.hex})`);
+    swWrap.appendChild(b);
+  });
+  subBar.appendChild(swWrap);
+  subBar.appendChild(mkDiv('sub-div'));
+
+  const szWrap = document.createElement('span');
+  szWrap.className = 'size-group';
+  SIZES.forEach((sz, i) => {
+    const b = mkPlainBtn(() => { stopAuto(); pickSize(i); }, `sz-${i}`, 'sz');
+    b.innerHTML = `<i style="width:${sz.dotPx}px;height:${sz.dotPx}px"></i>`;
+    setTip(b, sizeTipFor(sz, 'brush'));
+    szWrap.appendChild(b);
+  });
+  subBar.appendChild(szWrap);
+
+  const pxTag = document.createElement('span');
+  pxTag.className = 'px-tag';
+  pxTag.id = 'sub-px';
+  subBar.appendChild(pxTag);
+}
+
+function buildGlyphStrip() {
+  const host = document.getElementById('glyph-grid');
+  host.innerHTML = '';
+  GLYPH_SPECS.forEach(([k, name, prim, cls]) => {
+    const card = document.createElement('div');
+    card.className = 'glyph-item';
+    card.innerHTML = `<span class="glyph-box ${cls}">${svgIcon(k)}</span><div class="glyph-meta"><b>${name}</b><span>${prim}</span></div>`;
+    host.appendChild(card);
+  });
+}
+
+function updateMemoryIndicator() {
+  const st = currentStyle();
+  const mw = mainBar.offsetWidth || 0;
+  const mh = mainBar.offsetHeight || 0;
+  const sw = subBar.hidden ? 0 : (subBar.offsetWidth || 0);
+  const sh = subBar.hidden ? 0 : (subBar.offsetHeight || 0);
+  document.getElementById('mem-indicator').textContent =
+    `主条 (${S.mainPos.x}, ${S.mainPos.y}) ${mw}×${mh}px · 二级条 ${sw ? `${sw}×${sh}px` : '收起'} · 记忆：${st.colorName} / ${st.name}`;
+}
+
+function syncBar() {
+  const active = S.phase === 'annotate';
+  mainBar.hidden = !active;
+  if (!active) {
+    subBar.hidden = true;
+    hideTip();
+    updateMemoryIndicator();
+    return;
+  }
+
+  TOOLS.forEach(([k]) => {
+    const el = mainBar.querySelector(`#tool-${k}`);
+    const on = S.tool === k;
+    el.classList.toggle('active', on);
+    el.setAttribute('aria-pressed', String(on));
+  });
+  mainBar.querySelector('#undo').disabled = !S.ops.length;
+
+  const now = performance.now();
+  const cfb = S.copyFb && now < S.copyFb.until ? S.copyFb : null;
+  const sfb = S.saveFb && now < S.saveFb.until ? S.saveFb : null;
+
+  const copyBtn = mainBar.querySelector('#copy');
+  copyBtn.classList.toggle('fail', !!cfb);
+
+  const stEl = mainBar.querySelector('#status');
+  if (sfb) {
+    stEl.textContent = sfb.text;
+    stEl.className = 'st ' + (sfb.ok ? 'ok' : 'fail');
+    stEl.hidden = false;
+  } else if (cfb) {
+    stEl.textContent = '复制失败';
+    stEl.className = 'st fail';
+    stEl.hidden = false;
+  } else {
+    stEl.textContent = '';
+    stEl.className = 'st';
+    stEl.hidden = true;
+  }
+
+  const showSub = S.tool !== null;
+  subBar.hidden = !showSub;
+  if (showSub) {
+    const isMosaic = S.tool === 'mosaic';
+    subBar.querySelector('#sub-swatches').hidden = isMosaic;
+    subBar.querySelector('#sub-div').hidden = isMosaic;
+    COLORS.forEach((c, i) => {
+      const el = subBar.querySelector(`#sw-${i}`);
+      const sel = MEMORY.colorIdx === i;
+      el.classList.toggle('sel', sel);
+      el.setAttribute('aria-pressed', String(sel));
+    });
+    SIZES.forEach((sz, i) => {
+      const el = subBar.querySelector(`#sz-${i}`);
+      const sel = MEMORY.sizeIdx === i;
+      el.classList.toggle('active', sel);
+      el.setAttribute('aria-pressed', String(sel));
+      setTip(el, sizeTipFor(sz, S.tool));
+    });
+    const st = currentStyle();
+    subBar.querySelector('#sub-px').textContent =
+      isMosaic ? `${st.block}px` : S.tool === 'text' ? `${st.textPx}px` : `${st.stroke}px`;
+  }
+
+  placeBars();
+  if (hoveredBtn && !tipPop.hidden) showTip(hoveredBtn);
+  updateMemoryIndicator();
+}
+
+function placeBars() {
+  const b = S.box;
+  const mw = mainBar.offsetWidth;
+  const mh = mainBar.offsetHeight;
+  const maxH = mh + SUB_GAP + SUB_RESERVE_H;
+
+  const mx = Math.max(AVAIL.x, Math.min(b.x, AVAIL.x + AVAIL.w - mw));
+  let my, where;
+  if (b.y + b.h + MENU_GAP + maxH <= AVAIL.y + AVAIL.h) {
+    where = '框下';
+    my = b.y + b.h + MENU_GAP;
+  } else if (b.y - MENU_GAP - maxH >= AVAIL.y) {
+    where = '框上';
+    my = b.y - MENU_GAP - mh;
+  } else {
+    where = '框内';
+    my = Math.max(b.y, b.y + b.h - mh - MENU_INSIDE_PAD);
+  }
+  mainBar.style.left = mx + 'px';
+  mainBar.style.top = my + 'px';
+  S.mainPos = { x: mx, y: my };
+  S.placement = where;
+
+  if (!subBar.hidden) {
+    const sw = subBar.offsetWidth;
+    const sh = subBar.offsetHeight;
+    const sx = Math.max(AVAIL.x, Math.min(mx, AVAIL.x + AVAIL.w - sw));
+    const sy = where === '框下' ? (my + mh + SUB_GAP) : (my - SUB_GAP - sh);
+    subBar.style.left = sx + 'px';
+    subBar.style.top = sy + 'px';
+  }
+  updateVpTag();
+}
+
+/* ================= 6. 动作与键盘裁决 ================= */
+const logEl = document.getElementById('log');
+const logLines = [];
+function log(s) {
+  logLines.unshift(s);
+  logLines.length = Math.min(logLines.length, 8);
+  logEl.innerHTML = logLines.join('\n');
+}
+
+function pickTool(k, toggle = false) {
+  if (S.editing) commitText();
+  if (toggle && S.tool === k) {
+    S.tool = null;
+    syncBar();
+    log(`收起工具（主条保持 (${S.mainPos.x}, ${S.mainPos.y}) 0px 位移）`);
+    return;
+  }
+  S.tool = k;
+  syncBar();
+  log(`切工具 → ${k ? TOOL_NAME[k] : '无'}（主条 (${S.mainPos.x}, ${S.mainPos.y}) 0px 抖动）`);
+}
+function pickColor(idx) {
+  if (S.tool === 'mosaic') return;
+  MEMORY.colorIdx = idx;
+  if (S.editing) S.editing.style.color = currentStyle().color;
+  syncBar();
+  log(`切色 → ${COLORS[idx].name} (${COLORS[idx].hex})（运行内记忆已更新）`);
+}
+function pickSize(idx) {
+  MEMORY.sizeIdx = idx;
+  if (S.editing) {
+    const st = currentStyle();
+    S.editing.style.font = `600 ${st.textPx}px ${SANS}`;
+    S.editing.style.height = st.textPx + 8 + 'px';
+    S.editing._fit();
+  }
+  syncBar();
+  const sz = SIZES[idx];
+  log(`档位 → ${sz.name}（线 ${sz.stroke}px / 字 ${sz.textPx}px / 块 ${sz.block}px）`);
+}
+
+let failCopy = false, failSave = false, saveCloseTimer = null, copyResetTimer = null;
+
+function copyImage(trigger) {
+  if (S.editing) commitText();
+  clearTimeout(saveCloseTimer);
+  clearTimeout(copyResetTimer);
+  S.saveFb = null;
+  const ok = !failCopy; failCopy = false;
+  log(`<b>on_copy_image</b>(png ${S.box.w}×${S.box.h}, ${S.ops.length} 项标注) [${trigger}] → ${ok ? '<em>True</em>' : '<i>False</i>'}`);
+  if (ok) {
+    S.copyFb = null;
+    closeOverlay(`${trigger} 复制成功，自动关闭`);
+    return;
+  }
+  S.copyFb = { until: performance.now() + 1500 };
+  syncBar();
+  copyResetTimer = setTimeout(() => { S.copyFb = null; syncBar(); }, 1550);
+}
+
+function saveImage() {
+  if (S.editing) commitText();
+  clearTimeout(copyResetTimer);
+  S.copyFb = null;
+  const path = '~/图片/截图/截图 2026-11-22 14-20-08.png';
+  const ok = !failSave; failSave = false;
+  clearTimeout(saveCloseTimer);
+  log(ok
+    ? `<b>on_save_image</b>(png) → <em>SaveResult(path="${path}")</em>`
+    : `<b>on_save_image</b>(png) → <i>SaveResult(error="目录不可写")</i>`);
+  if (ok) {
+    S.saveFb = { ok: true, text: `✓ 已保存 ${path}`, until: performance.now() + 2500 };
+    syncBar();
+    saveCloseTimer = setTimeout(() => {
+      if (S.phase === 'annotate') closeOverlay('保存完成 2.5s 后自动关闭');
+    }, 2500);
+  } else {
+    S.saveFb = { ok: false, text: '保存失败：目录不可写', until: performance.now() + 999999 };
+    syncBar();
+  }
+}
+
+function openAnnotate(preserveLog = false) {
+  clearTimeout(saveCloseTimer);
+  clearTimeout(copyResetTimer);
+  Object.assign(S, {
+    phase: 'annotate', tool: null, ops: [], draft: null, selDraft: null, cursor: null, copyFb: null, saveFb: null,
+  });
+  cancelText();
+  renderWork();
+  buildBars();
+  syncBar();
+  document.getElementById('closed-tip').hidden = true;
+  if (!preserveLog) {
+    const st = currentStyle();
+    log(`打开标注浮窗 ${S.box.w}×${S.box.h} · 语义图标主条 ${mainBar.offsetWidth}px · 记忆：${st.colorName}/${st.name}`);
+  }
+}
+
+function closeOverlay(reason) {
+  clearTimeout(saveCloseTimer);
+  clearTimeout(copyResetTimer);
+  cancelText();
+  Object.assign(S, { phase: 'closed', draft: null, cursor: null });
+  syncBar();
+  document.getElementById('closed-msg').textContent =
+    `浮窗已关闭（${reason}）· 点「仅主条」验证单次运行内记忆（当前记住：${currentStyle().colorName} / ${currentStyle().name}）`;
+  document.getElementById('closed-tip').hidden = false;
+  log(`<b>on_closed</b>() ← ${reason}`);
+}
+
+const screenEl = document.getElementById('screen');
+function openText(p) {
+  cancelText();
+  const el = document.createElement('input');
+  el.className = 'edit';
+  el.style.left = p.x + 'px'; el.style.top = (p.y - 2) + 'px';
+  const st = currentStyle();
+  el.style.font = `600 ${st.textPx}px ${SANS}`;
+  el.style.color = st.color;
+  el.style.height = (st.textPx + 8) + 'px';
+  const fit = () => {
+    const cur = currentStyle();
+    octx.font = `600 ${cur.textPx}px ${SANS}`;
+    const maxW = Math.max(48, S.box.x + S.box.w - p.x);
+    el.style.width = Math.min(maxW, Math.max(48, octx.measureText(el.value).width + 18)) + 'px';
+  };
+  el.oninput = fit; fit();
+  el.onkeydown = e => {
+    if (e.key === 'Enter') {
+      e.preventDefault(); e.stopPropagation();
+      commitText('文字输入态按 Enter：先提交文字（再按 Enter 复制关闭）');
+      return;
+    }
+    if (e.key === 'Escape') {
+      e.preventDefault(); e.stopPropagation();
+      cancelText();
+      log('文字输入态按 Esc：仅取消本次输入，浮窗保持打开');
+    }
+  };
+  screenEl.appendChild(el);
+  S.editing = el; S.editAt = p; el._fit = fit;
+  if (!auto) el.focus();
+}
+function commitText(note) {
+  const el = S.editing; if (!el) return;
+  S.editing = null;
+  const v = el.value.trim(); const at = S.editAt; S.editAt = null;
+  el.remove();
+  if (v && at) commit(opFor('text', at, at, { text: v }));
+  if (note) log(note);
+}
+function cancelText() { if (S.editing) { S.editing.remove(); S.editing = null; S.editAt = null; } }
+
+function toScreen(e) {
+  const r = ov.getBoundingClientRect();
+  return { x: Math.round((e.clientX - r.left) * SCREEN.w / r.width), y: Math.round((e.clientY - r.top) * SCREEN.h / r.height) };
+}
+function inBox(p) { const b = S.box; return p.x >= b.x && p.x <= b.x + b.w && p.y >= b.y && p.y <= b.y + b.h; }
+
+ov.addEventListener('mousedown', e => {
+  if (S.phase !== 'annotate' || e.button !== 0) return;
+  const p = toScreen(e);
+  if (!inBox(p)) { if (S.editing) commitText(); return; }
+  stopAuto();
+  if (S.editing) { commitText(); return; }
+  if (!S.tool) return;
+  if (S.tool === 'text') { openText(p); e.preventDefault(); return; }
+  if (S.tool === 'brush') { S.draft = opFor('brush', p, p, { points: [p] }); return; }
+  S.draft = opFor(S.tool, p, p);
+});
+
+window.addEventListener('mousemove', e => {
+  if (S.phase !== 'annotate') return;
+  const p = toScreen(e);
+  ov.style.cursor = !inBox(p) ? 'default' : S.tool === 'text' ? 'text' : S.tool ? 'crosshair' : 'default';
+  if (!S.draft) return;
+  const clamped = clampToBox(p);
+  if (S.draft.type === 'brush') {
+    const pts = S.draft.points;
+    const prev = pts[pts.length - 1];
+    if (Math.hypot(clamped.x - prev.x, clamped.y - prev.y) >= 2) { pts.push(clamped); S.draft.b = clamped; }
+  } else {
+    S.draft.b = clamped;
+  }
+});
+
+window.addEventListener('mouseup', () => {
+  if (!S.draft) return;
+  const d = S.draft; S.draft = null;
+  if (d.type === 'brush') {
+    if (d.points.length >= 2 && pathLength(d.points) >= 2) commit(d);
+    return;
+  }
+  const r = norm(d.a, d.b);
+  if (r.w + r.h > 6) commit(d);
+});
+
+document.addEventListener('keydown', e => {
+  if (S.phase !== 'annotate' || S.editing) return;
+  if (e.key === 'Enter') { e.preventDefault(); stopAuto(); copyImage('非输入态按 Enter'); }
+  else if (e.key === 'Escape') { e.preventDefault(); stopAuto(); closeOverlay('按了 Esc'); }
+});
+
+/* ================= 7. 演示样本与自动演示 ================= */
+function sampleBrushLoop(boxKey) {
+  if (boxKey === 'narrow') {
+    const pts = [];
+    for (let i = 0; i <= 26; i++) {
+      const a = (i / 26) * Math.PI * 2 + 0.25;
+      pts.push({ x: Math.round(3105 + Math.cos(a) * 92), y: Math.round(676 + Math.sin(a) * 20) });
+    }
+    return pts;
+  }
+  const pts = [];
+  for (let i = 0; i <= 24; i++) {
+    const t = i / 24;
+    pts.push({ x: Math.round(1814 + t * 308), y: Math.round(762 + Math.sin(t * Math.PI * 6) * 5) });
+  }
+  return pts;
+}
+
+function seedShowcase(boxKey) {
+  openAnnotate(true);
+  if (boxKey === 'narrow') {
+    S.ops.push(opFor('rect', { x: 3008, y: 626 }, { x: 3240, y: 702 }, { color: '#3fb950', stroke: 3 }));
+    S.ops.push(opFor('brush', { x: 3013, y: 676 }, { x: 3197, y: 676 }, { points: sampleBrushLoop('narrow'), color: '#f8fafc', stroke: 3 }));
+    S.ops.push(opFor('arrow', { x: 3140, y: 550 }, { x: 3110, y: 622 }, { color: '#f59e0b', stroke: 3 }));
+    MEMORY.colorIdx = 4; MEMORY.sizeIdx = 1;
+    S.tool = 'brush';
+    renderWork(); syncBar();
+    log(`窄选区示例：语义图标主条仅 ${mainBar.offsetWidth}px，绿主复制钮在暗色面板上依然清晰可辨`);
+    return;
+  }
+  S.ops.push(opFor('rect', { x: 2036, y: 340 }, { x: 2212, y: 530 }, { color: '#ff2d2d', stroke: 3 }));
+  S.ops.push(opFor('brush', { x: 1814, y: 762 }, { x: 2122, y: 762 }, { points: sampleBrushLoop('mid'), color: '#f59e0b', stroke: 6 }));
+  S.ops.push(opFor('arrow', { x: 1715, y: 785 }, { x: 1806, y: 752 }, { color: '#2f81f7', stroke: 3 }));
+  S.ops.push(opFor('text', { x: 1510, y: 598 }, { x: 1510, y: 598 }, { text: '待支付项，请核对', color: '#3fb950', textPx: 20 }));
+  S.ops.push(opFor('mosaic', { x: 1370, y: 478 }, { x: 1620, y: 508 }, { block: 10 }));
+  MEMORY.colorIdx = 0; MEMORY.sizeIdx = 1;
+  S.tool = 'brush';
+  renderWork(); syncBar();
+  log(`模板 B 已就绪：主条 ${mainBar.offsetWidth}px · 唯一绿主钮复制(32px) · 取消悬停微红`);
+}
+
+const lerp = (a, b, p) => ({ x: Math.round(a.x + (b.x - a.x) * p), y: Math.round(a.y + (b.y - a.y) * p) });
+const press = id => {
+  const b = mainBar.querySelector('#' + id) || subBar.querySelector('#' + id);
+  if (!b) return;
+  b.classList.add('press');
+  setTimeout(() => b.classList.remove('press'), 220);
+};
+function seq(groups) {
+  const out = []; let t = 0;
+  for (const [gap, steps] of groups) {
+    t += gap;
+    for (const [dt, dur, fn] of steps) out.push({ at: t + dt, dur, fn });
+    t += Math.max(...steps.map(([dt, dur]) => dt + dur));
+  }
+  return out;
+}
+
+function buildScript() {
+  const b = BOXES[S.boxKey];
+  const brushPts = sampleBrushLoop(S.boxKey);
+  return seq([
+    [300, [
+      [0, 420, p => {
+        Object.assign(S, { phase: 'select', selDraft: null, cursor: lerp({ x: b.x + 200, y: b.y + 160 }, { x: b.x, y: b.y }, p) });
+        mainBar.hidden = true; subBar.hidden = true; hideTip(); document.getElementById('closed-tip').hidden = true;
+      }],
+      [480, 700, p => {
+        S.cursor = lerp({ x: b.x, y: b.y }, { x: b.x + b.w, y: b.y + b.h }, p);
+        S.selDraft = norm({ x: b.x, y: b.y }, S.cursor);
+        if (p === 1) { S.box = { ...b }; openAnnotate(); }
+      }],
+    ]],
+    [600, [
+      [0, 0, () => { pickTool('brush'); press('tool-brush'); showTip(mainBar.querySelector('#tool-brush')); }],
+      [350, 0, () => { hideTip(); pickColor(S.boxKey === 'narrow' ? 4 : 1); pickSize(2); }],
+      [520, 740, p => {
+        const count = Math.max(1, Math.round(p * brushPts.length));
+        const sub = brushPts.slice(0, count);
+        S.cursor = sub[sub.length - 1];
+        S.draft = opFor('brush', sub[0], S.cursor, { points: sub });
+        if (p === 1) { commit(S.draft); S.draft = null; }
+      }],
+    ]],
+    [520, [
+      [0, 0, () => { pickTool('mosaic'); press('tool-mosaic'); }],
+      [280, 600, p => {
+        const a0 = S.boxKey === 'narrow' ? { x: 3010, y: 730 } : { x: 1370, y: 478 };
+        const b0 = S.boxKey === 'narrow' ? { x: 3180, y: 758 } : { x: 1620, y: 508 };
+        S.cursor = lerp(a0, b0, p);
+        S.draft = opFor('mosaic', a0, S.cursor);
+        if (p === 1) { commit(S.draft); S.draft = null; }
+      }],
+    ]],
+    [600, [
+      [0, 0, () => { showTip(mainBar.querySelector('#copy')); }],
+      [550, 0, () => { hideTip(); S.cursor = null; copyImage('非输入态按 Enter'); }],
+    ]],
+    [1600, [[0, 0, () => {}]]],
+  ]);
+}
+
+let SCRIPT = [], auto = false, vt = 0, last = performance.now();
+const done = new Set();
+function stopAuto() { if (!auto) return; auto = false; S.cursor = null; hideTip(); syncCtrl(); }
+function startAuto() {
+  auto = true; vt = 0; done.clear(); SCRIPT = buildScript();
+  cancelText(); S.phase = 'closed'; syncBar(); syncCtrl();
+}
+function syncCtrl() { document.getElementById('btn-auto').classList.toggle('on', auto); }
+
+const STEPS = [
+  ['仅主条', () => { S.box = { ...BOXES[S.boxKey] }; openAnnotate(); }],
+  ['画笔展开', () => { S.box = { ...BOXES[S.boxKey] }; seedShowcase(S.boxKey); }],
+  ['马赛克(藏色)', () => { if (S.phase !== 'annotate') seedShowcase(S.boxKey); pickTool('mosaic'); }],
+  ['文字输入', () => {
+    if (S.phase !== 'annotate') seedShowcase(S.boxKey);
+    pickTool('text');
+    const at = S.boxKey === 'narrow' ? { x: 3012, y: 460 } : { x: 1520, y: 598 };
+    openText(at); S.editing.value = '输入中按 Enter 提交'; S.editing._fit(); S.editing.focus();
+  }],
+  ['Enter 复制', () => { if (S.phase !== 'annotate') seedShowcase(S.boxKey); copyImage('按 Enter'); }],
+  ['复制失败', () => { if (S.phase !== 'annotate') seedShowcase(S.boxKey); failCopy = true; copyImage('按 Enter'); }],
+  ['保存成功', () => { if (S.phase !== 'annotate') seedShowcase(S.boxKey); saveImage(); }],
+  ['保存失败', () => { if (S.phase !== 'annotate') seedShowcase(S.boxKey); failSave = true; saveImage(); }],
+];
+const stepBox = document.getElementById('steps');
+STEPS.forEach(([label, fn]) => {
+  const b = document.createElement('button'); b.type = 'button'; b.textContent = label;
+  b.onclick = () => { stopAuto(); fn(); };
+  stepBox.appendChild(b);
+});
+document.getElementById('btn-auto').onclick = () => (auto ? stopAuto() : startAuto());
+document.querySelectorAll('[data-box]').forEach(b => {
+  b.onclick = () => {
+    S.boxKey = b.dataset.box;
+    document.querySelectorAll('[data-box]').forEach(x => x.classList.toggle('on', x === b));
+    stopAuto(); S.box = { ...BOXES[S.boxKey] };
+    updateFocus(S.boxKey); layoutView(); seedShowcase(S.boxKey);
+  };
+});
+
+/* ================= 8. 视口对准 ================= */
+const vp = document.getElementById('vp');
+const FOCUS = { x: 1720, y: 600 };
+let fit = false;
+
+function updateFocus(key) {
+  const b = BOXES[key];
+  FOCUS.x = key === 'narrow' ? 2960 : b.x + b.w / 2;
+  FOCUS.y = { mid: b.y + 370, bottom: b.y + 200, tall: b.y + b.h - 330, narrow: b.y + 300 }[key];
+}
+function updateVpTag() {
+  const mw = mainBar.offsetWidth || 0;
+  const sw = subBar.hidden ? 0 : (subBar.offsetWidth || 0);
+  const extra = S.phase === 'annotate'
+    ? ` · ${S.placement} 主条 ${mw}px` + (sw ? ` + 二级条 ${sw}px` : '（二级条收起）')
+    : '';
+  document.getElementById('vp-tag').textContent = (fit ? '3440×1440 全屏缩略' : '3440×1440 1:1 局部') + extra;
+}
+function layoutView() {
+  const W = vp.clientWidth;
+  if (fit) {
+    const k = W / SCREEN.w; vp.style.height = Math.round(SCREEN.h * k) + 'px';
+    screenEl.style.transform = `scale(${k})`;
+  } else {
+    vp.style.height = '740px'; const H = 740;
+    const tx = Math.min(0, Math.max(W - SCREEN.w, W / 2 - FOCUS.x));
+    const ty = Math.min(0, Math.max(H - SCREEN.h, H / 2 - FOCUS.y));
+    screenEl.style.transform = `translate(${tx}px,${ty}px)`;
+  }
+  document.getElementById('btn-view').textContent = fit ? '全屏缩略' : '1:1 局部';
+  updateVpTag();
+}
+document.getElementById('btn-view').onclick = () => { fit = !fit; layoutView(); };
+window.addEventListener('resize', layoutView);
+
+function frame(now) {
+  const dt = Math.min(100, now - last); last = now;
+  if (auto) {
+    vt += dt;
+    SCRIPT.forEach((s, i) => {
+      if (done.has(i) || vt < s.at) return;
+      const p = s.dur ? Math.min(1, (vt - s.at) / s.dur) : 1;
+      s.fn(p); if (p >= 1) done.add(i);
+    });
+    if (done.size === SCRIPT.length) startAuto();
+  }
+  drawOverlay();
+  requestAnimationFrame(frame);
+}
+
+/* URL 参数：?state=annotated|bar|mosaic|editing|copy_fail|saved|save_fail|closed&box=mid|bottom|tall|narrow&view=fit&hover=<id> */
+(function init() {
+  drawDesk();
+  buildGlyphStrip();
+  const q = new URLSearchParams(location.search);
+  if (q.get('view') === 'fit') fit = true;
+  if (q.get('box') && BOXES[q.get('box')]) {
+    S.boxKey = q.get('box');
+    document.querySelectorAll('[data-box]').forEach(x => x.classList.toggle('on', x.dataset.box === S.boxKey));
+  }
+  S.box = { ...BOXES[S.boxKey] };
+  updateFocus(S.boxKey);
+  layoutView();
+  const st = q.get('state') || 'annotated';
+  if (st === 'bar') {
+    openAnnotate();
+  } else if (st === 'closed') {
+    closeOverlay('初始演示关闭态');
+  } else {
+    seedShowcase(S.boxKey);
+    if (st === 'mosaic') pickTool('mosaic');
+    if (st === 'editing') {
+      pickTool('text');
+      const at = S.boxKey === 'narrow' ? { x: 3012, y: 460 } : { x: 1480, y: 548 };
+      openText(at); S.editing.value = '按 Enter 先提交'; S.editing._fit();
+    }
+    if (st === 'copy_fail') { failCopy = true; copyImage('按 Enter'); }
+    if (st === 'saved') saveImage();
+    if (st === 'save_fail') { failSave = true; saveImage(); }
+  }
+  const hoverId = q.get('hover');
+  if (hoverId) {
+    const target = mainBar.querySelector('#' + hoverId) || subBar.querySelector('#' + hoverId);
+    if (target) { target.classList.add('hover-preview'); showTip(target); }
+  }
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>

@@ -47,7 +47,10 @@ ACCENT_SWATCH_HOVER_BORDER_RGBA = (88, 166, 255, 166)
 ACCENT_SWATCH_HOVER_BG_RGBA = (88, 166, 255, 20)
 
 OK_HEX = "#3fb950"
+OK_BRIGHT_HEX = "#56d364"
 OK_SOFT_RGBA = (63, 185, 80, 41)
+OK_HOVER_BG_RGBA = (63, 185, 80, 66)
+OK_BORDER_RGBA = (63, 185, 80, 122)
 WARN_HEX = "#d29922"
 WARN_SOFT_RGBA = (210, 153, 34, 46)
 ERROR_HEX = "#f85149"
@@ -96,7 +99,7 @@ TAIL_TEXT_HEX = "#94a3b8"
 CAPTION_STABLE_TEXT_HEX = STABLE_TEXT_HEX
 CAPTION_TAIL_TEXT_HEX = TAIL_TEXT_HEX
 
-# 截屏标注浮窗（UI 验收标准 docs/design/v3.5/annotate-brush-b.html）
+# 截屏标注浮窗（UI 验收标准 docs/design/v3.5/annotate-icons-b.html）
 ANNOTATE_COLOR_AMBER_HEX = "#f59e0b"
 ANNOTATE_COLOR_BLUE_HEX = "#2f81f7"
 ANNOTATE_COLOR_BLACK_HEX = "#111827"
@@ -161,12 +164,17 @@ ANNOTATE_EDIT_EXTRA_HEIGHT_PX = 8
 ANNOTATE_EDIT_PADDING_X_PX = 18
 ANNOTATE_SUB_BAR_GAP_PX = 4
 ANNOTATE_SUB_BAR_RESERVE_H_PX = 34
+ANNOTATE_ICON_BTN_PX = 28
+ANNOTATE_PRIMARY_BTN_W_PX = 32
+ANNOTATE_ICON_GLYPH_PX = 16
+ANNOTATE_ICON_STROKE_PX = 1.6
 ANNOTATE_SWATCH_BTN_PX = 24
 ANNOTATE_SWATCH_CIRCLE_PX = 12
 ANNOTATE_SWATCH_DOT_PX = 4
-ANNOTATE_SIZE_BTN_W_PX = 46
-ANNOTATE_SIZE_BTN_H_PX = 24
+ANNOTATE_SIZE_BTN_PX = 24
 ANNOTATE_PX_TAG_MIN_W_PX = 34
+ANNOTATE_DISABLED_OPACITY = 0.38
+ANNOTATE_MOSAIC_DIM_OPACITY = 0.28
 
 # 一体底栏动效（UI 验收标准 docs/design/v3.3/voice-a.html「动效参数」表）
 VOICE_FRAME_MS = 16
@@ -344,9 +352,7 @@ def _rgba_css(rgba: tuple[int, int, int, int]) -> str:
 
 
 def float_bar_stylesheet() -> str:
-    """悬浮工具条与二级样式条 QSS（overlay-a 与 annotate-brush-b 共用；全部引用本模块令牌）。"""
-    accent_soft = _rgba_css(ACCENT_SOFT_RGBA)
-    accent_border = _rgba_css(ACCENT_ACTIVE_BORDER_RGBA)
+    """悬浮工具条与二级样式条 QSS（overlay-a 与 annotate-icons-b 共用；全部引用本模块令牌）。"""
     err_border = _rgba_css(ERROR_BORDER_RGBA)
     err_bg = _rgba_css(ERROR_BG_RGBA)
     return (
@@ -373,7 +379,7 @@ def float_bar_stylesheet() -> str:
         f"QLabel#oviFloatError {{"
         f"  color: {ERROR_HEX};"
         f"}}"
-        f"QLabel#oviFloatHint, QLabel#oviStyleHint, QLabel#oviStylePx {{"
+        f"QLabel#oviFloatHint, QLabel#oviStylePx {{"
         f"  color: {TEXT_MUTED_HEX};"
         f"  font-size: {FS_MONO_TAG}px;"
         f"  background: transparent;"
@@ -400,11 +406,6 @@ def float_bar_stylesheet() -> str:
         f"  color: {TEXT_MUTED_HEX};"
         f"  border-color: transparent;"
         f"}}"
-        f'QPushButton[active="true"] {{'
-        f"  background-color: {accent_soft};"
-        f"  border-color: {accent_border};"
-        f"  color: {ACCENT_HEX};"
-        f"}}"
         f'QPushButton[feedback="ok"] {{'
         f"  color: {OK_HEX};"
         f"}}"
@@ -413,16 +414,24 @@ def float_bar_stylesheet() -> str:
         f"  border-color: {err_border};"
         f"  background-color: {err_bg};"
         f"}}"
-        f"QPushButton#oviSwatchBtn, QPushButton#oviSizeBtn {{"
+        f"QPushButton#oviIconBtn, QPushButton#oviSwatchBtn, QPushButton#oviSizeBtn {{"
         f"  padding: 0;"
         f"  border: none;"
         f"  background: transparent;"
+        f"}}"
+        f"QToolTip {{"
+        f"  background-color: {BG_DARK_HEX};"
+        f"  color: {TEXT_PRIMARY_HEX};"
+        f"  border: 1px solid {BORDER_HEX};"
+        f"  border-radius: {RADIUS_SM}px;"
+        f"  padding: 3px 8px;"
+        f"  font-size: {FS_MONO_TAG}px;"
         f"}}"
     )
 
 
 def annotate_edit_stylesheet(*, color: str = ANNOTATE_DEFAULT_COLOR_HEX) -> str:
-    """标注文字内联输入框 QSS（annotate-brush-b `.edit`；全部引用本模块令牌）。"""
+    """标注文字内联输入框 QSS（annotate-icons-b `.edit`；全部引用本模块令牌）。"""
     return (
         f"QLineEdit#oviAnnotateEdit {{"
         f"  background: transparent;"

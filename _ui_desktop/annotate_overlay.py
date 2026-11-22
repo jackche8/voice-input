@@ -1,11 +1,11 @@
-"""截屏标注浮窗（UI 验收标准 docs/design/v3.5/annotate-brush-b.html 模板 B）。
+"""截屏标注浮窗（UI 验收标准 docs/design/v3.5/annotate-icons-b.html 模板 B）。
 
 单一职责：全屏透明窗口，在选区原位显示冻结截图与标注合成画布，选区外覆暗色遮罩，
-采用精简主条 `AnnotateToolbar` + 按需二级样式条 `AnnotateStyleBar`（6 色 + 3 档，
+采用纯矢量图标主条 `AnnotateToolbar` + 按需纯圆点二级样式条 `AnnotateStyleBar`（6 色 + 3 档，
 马赛克藏色，联合高度锁锚保证主条 0px 抖动），支持自由手绘画笔与无修饰 Enter 自动复制；
-点框外不关闭；复制成功立即关闭、失败提示 1.5s 不关；保存成功显示路径
-`theme.ANNOTATE_SAVED_FEEDBACK_MS` 后关闭、失败显示原因不关；Esc 按焦点状态裁决。
-纯 UI，不含文件 IO、网络或剪贴板调用。
+点框外不关闭；复制成功立即关闭、失败复制钮亮红框锁宽且右侧提示「复制失败」1.5s 不关；
+保存成功显示路径 `theme.ANNOTATE_SAVED_FEEDBACK_MS` 后关闭、失败显示原因不关；
+复制失败与保存反馈严格四态互斥；Esc 按焦点状态裁决。纯 UI，不含文件 IO、网络或剪贴板调用。
 """
 from __future__ import annotations
 
@@ -35,7 +35,7 @@ from _ui_desktop.annotate_tools import (
     render_composite,
 )
 from _ui_desktop.annotate_widgets import AnnotateStyleBar, AnnotateToolbar, InlineTextEdit, is_plain_enter_event
-from _ui_desktop.mini_menu import has_window_keyboard_focus, place_menu, place_secondary_bar
+from _ui_desktop.mini_menu import COPY_FAILED_TEXT, has_window_keyboard_focus, place_menu, place_secondary_bar
 
 SAVED_PREFIX = "✓ 已保存 "
 SAVE_FAILED_PREFIX = "保存失败："
@@ -260,33 +260,40 @@ class AnnotateOverlay(QWidget):
         self._cancel_text()
         self.close()
 
-    def _copy_image(self) -> None:
-        self._save_close_timer.stop()
+    def _reset_feedback(self) -> None:
+        """原子重置既有复制/保存反馈状态与双计时器（保证四态互斥，且回调异常前已同步重排）。"""
+        self._stop_timers()
+        self.toolbar.set_copy_failed(False)
         if self.toolbar.status_text():
             self.toolbar.set_status("", ok=True)
             self._place_toolbar()
+
+    def _copy_image(self) -> None:
+        self._reset_feedback()
         if self._text_edit is not None:
             self._commit_text()
         self._finalize_draft()
         ok = bool(self._on_copy_image(self.export_png())) if self._on_copy_image is not None else False
         if ok:
-            self._copy_reset_timer.stop()
             self.close()
             return
         self.toolbar.set_copy_failed(True)
+        self.toolbar.set_status(COPY_FAILED_TEXT, ok=False)
         self._place_toolbar()
         self._copy_reset_timer.start(self._copy_feedback_ms)
 
     def _clear_copy_failed(self) -> None:
         self.toolbar.set_copy_failed(False)
-        self._place_toolbar()
+        if self.toolbar.status_text() == COPY_FAILED_TEXT:
+            self.toolbar.set_status("", ok=True)
+            self._place_toolbar()
 
     def _save_image(self) -> None:
+        self._reset_feedback()
         if self._text_edit is not None:
             self._commit_text()
         self._finalize_draft()
         if self._on_save_image is None:
-            self._save_close_timer.stop()
             self.toolbar.set_status(f"{SAVE_FAILED_PREFIX}未配置保存回调", ok=False)
             self._place_toolbar()
             return
@@ -298,7 +305,6 @@ class AnnotateOverlay(QWidget):
             self._place_toolbar()
             self._save_close_timer.start(self._saved_feedback_ms)
             return
-        self._save_close_timer.stop()
         self.toolbar.set_status(f"{SAVE_FAILED_PREFIX}{result.error}", ok=False)
         self._place_toolbar()
 

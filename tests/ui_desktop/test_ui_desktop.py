@@ -11,10 +11,10 @@ from pathlib import Path
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
-from PySide6.QtCore import QBuffer, QByteArray, QIODevice, QPoint, QPointF, QRect, Qt
+from PySide6.QtCore import QBuffer, QByteArray, QEvent, QIODevice, QPoint, QPointF, QRect, QSize, Qt
 from PySide6.QtGui import QColor, QCursor, QEnterEvent, QGuiApplication, QImage, QPainter
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QSystemTrayIcon, QWidget
+from PySide6.QtWidgets import QApplication, QLabel, QSystemTrayIcon, QWidget
 
 from _contracts import OcrTextBlock, OcrTextLine
 from _ui_desktop import (
@@ -27,6 +27,8 @@ from _ui_desktop import (
     render_status_image,
     theme,
 )
+from _ui_desktop.annotate_icons import ANNOTATE_ICON_KEYS, draw_annotate_icon
+from _ui_desktop.annotate_widgets import _IconButton
 from _ui_desktop.caption_bar import CAPTION_AUTO_HIDE_MS, passive_overlay_flags
 from _ui_desktop.inplace_layout import layout_ocr_block, layout_translated_block
 from _ui_desktop.mini_menu import COPY_OCR, COPY_TRANSLATED, ESC_HINT, place_secondary_bar
@@ -89,6 +91,21 @@ def test_theme_tokens_and_ui_layer_purity() -> None:
     assert not hasattr(theme, "ANNOTATE_STROKE_PX")
     assert not hasattr(theme, "ANNOTATE_TEXT_PX")
     assert not hasattr(theme, "ANNOTATE_MOSAIC_BLOCK_PX")
+    assert not hasattr(theme, "ANNOTATE_SIZE_BTN_W_PX")
+    assert not hasattr(theme, "ANNOTATE_SIZE_BTN_H_PX")
+    assert theme.OK_BRIGHT_HEX == "#56d364"
+    assert theme.ANNOTATE_ICON_BTN_PX == 28
+    assert theme.ANNOTATE_PRIMARY_BTN_W_PX == 32
+    assert theme.ANNOTATE_ICON_GLYPH_PX == 16
+    assert theme.ANNOTATE_ICON_STROKE_PX == 1.6
+    assert theme.ANNOTATE_SIZE_BTN_PX == 24
+    assert theme.ANNOTATE_DISABLED_OPACITY == 0.38
+    assert theme.ANNOTATE_MOSAIC_DIM_OPACITY == 0.28
+    qss = theme.float_bar_stylesheet()
+    assert "QLabel#oviStyleHint" not in qss
+    assert 'QPushButton[active="true"]' not in qss
+    assert "QPushButton#oviIconBtn" in qss
+    assert "QToolTip" in qss
     assert [c.hex for c in theme.ANNOTATE_COLORS] == [
         "#ff2d2d",
         "#f59e0b",
@@ -121,6 +138,7 @@ def test_theme_tokens_and_ui_layer_purity() -> None:
     py_files = sorted(UI_DESKTOP_DIR.glob("*.py"))
     assert [f.name for f in py_files] == [
         "__init__.py",
+        "annotate_icons.py",
         "annotate_overlay.py",
         "annotate_tools.py",
         "annotate_widgets.py",
@@ -1142,7 +1160,7 @@ def test_passive_overlay_flags_xcb_vs_wayland_and_offscreen(
 
 
 # ---------------------------------------------------------------------------
-# 6. AnnotateOverlay 截屏标注浮窗与 Esc 焦点裁决（U12 · annotate-a.html）
+# 6. AnnotateOverlay 截屏标注浮窗与 Esc 焦点裁决（U12 · annotate-icons-b.html）
 # ---------------------------------------------------------------------------
 @dataclass(frozen=True)
 class _FakeSaveResult:
@@ -1170,7 +1188,7 @@ def _open_annotator(
 def test_annotate_overlay_toolbar_placement_no_shift_and_outside_click_stays_open(
     qapp: QApplication,
 ) -> None:
-    """U12 + v3.5 模板 B：5 工具主条、按需等高二级条（马赛克藏色）、切工具 0px 抖动、inside 防穿透无死区、反馈变宽联动。"""
+    """U12 + v3.5 模板 B：309×38 纯矢量图标主条、34px 纯圆点二级条（马赛克藏色）、切工具 0px 抖动、inside 防穿透无死区、反馈变宽联动。"""
     with pytest.raises(ValueError):
         AnnotateOverlay(b"", (0, 0, 100, 100))
     with pytest.raises(ValueError):
@@ -1178,21 +1196,50 @@ def test_annotate_overlay_toolbar_placement_no_shift_and_outside_click_stays_ope
     with pytest.raises(ValueError):
         AnnotateOverlay(_make_png(100, 100), (0, 0, 0, 100))
 
+    expected_tips = {
+        "rect": "矩形",
+        "arrow": "箭头",
+        "brush": "画笔",
+        "text": "文字",
+        "mosaic": "马赛克",
+        "undo": "撤销",
+        "copy": "复制 (Enter)",
+        "save": "保存 PNG 到图片目录",
+        "cancel": "取消 (Esc)",
+    }
+
     closed: list[int] = []
     mid = _open_annotator((200, 160, 480, 260), on_closed=lambda: closed.append(1))
     try:
         assert mid.testAttribute(Qt.WidgetAttribute.WA_TranslucentBackground) is True
         assert mid.testAttribute(Qt.WidgetAttribute.WA_InputMethodEnabled) is False
-        assert mid.toolbar.visible_labels() == ["矩形", "箭头", "画笔", "文字", "马赛克", "撤销", "复制", "保存", "取消"]
-        assert mid.toolbar.key_hint_text() == "Enter/Esc"
+        assert mid.toolbar.size() == QSize(309, 38)
+        assert mid.toolbar.visible_button_keys() == list(expected_tips)
+        assert not hasattr(mid.toolbar, "visible_labels")
+        assert not hasattr(mid.toolbar, "key_hint_text")
+        assert not hasattr(mid.style_bar, "is_mosaic_label_visible")
+        assert [lbl for lbl in mid.toolbar.findChildren(QLabel) if not lbl.isHidden()] == []
+        for key, tip in expected_tips.items():
+            btn = mid.toolbar.button(key)
+            assert btn.text() == ""
+            assert btn.focusPolicy() == Qt.FocusPolicy.NoFocus
+            assert btn.toolTip() == tip
+            assert btn.accessibleName() == tip
+            expected_w = theme.ANNOTATE_PRIMARY_BTN_W_PX if key == "copy" else theme.ANNOTATE_ICON_BTN_PX
+            assert btn.size() == QSize(expected_w, theme.ANNOTATE_ICON_BTN_PX)
+        for sz in theme.ANNOTATE_SIZES:
+            sz_btn = mid.style_bar.size_button(sz.key)
+            assert sz_btn.text() == ""
+            assert sz_btn.focusPolicy() == Qt.FocusPolicy.NoFocus
+            assert sz_btn.size() == QSize(theme.ANNOTATE_SIZE_BTN_PX, theme.ANNOTATE_SIZE_BTN_PX)
         assert mid.toolbar.button("undo").isEnabled() is False
         assert mid.style_bar.isVisible() is False
         assert mid.menu_placement == "below"
         assert mid.toolbar.geometry().top() > mid.canvas_rect().bottom()
 
-        # 连续切换 5 工具 + 再点 toggle 收起 3 轮：主条与全部主条按钮 0px 位移，二级条色板/马赛克等高
+        # 连续切换 5 工具 + 再点 toggle 收起 3 轮：主条与全部主条按钮 0px 位移，二级条色板/马赛克等高且 3 档动态 ToolTip 对齐
         baseline_bar = mid.toolbar.geometry()
-        all_keys = ("rect", "arrow", "brush", "text", "mosaic", "undo", "copy", "save", "cancel")
+        all_keys = tuple(expected_tips)
         baseline_btns = {k: mid.toolbar.button(k).geometry() for k in all_keys}
         sub_heights: set[int] = set()
         for _ in range(3):
@@ -1209,18 +1256,36 @@ def test_annotate_overlay_toolbar_placement_no_shift_and_outside_click_stays_ope
                 sub_heights.add(mid.style_bar.height())
                 if key == "mosaic":
                     assert mid.style_bar.is_palette_visible() is False
-                    assert mid.style_bar.is_mosaic_label_visible() is True
+                    assert [lbl.text() for lbl in mid.style_bar.findChildren(QLabel) if not lbl.isHidden()] == ["10px"]
+                    assert [mid.style_bar.size_button(s.key).toolTip() for s in theme.ANNOTATE_SIZES] == [
+                        "细 · 块尺寸 (6px)",
+                        "中 · 块尺寸 (10px)",
+                        "粗 · 块尺寸 (16px)",
+                    ]
+                elif key == "text":
+                    assert mid.style_bar.is_palette_visible() is True
+                    assert [mid.style_bar.size_button(s.key).toolTip() for s in theme.ANNOTATE_SIZES] == [
+                        "细 · 字号 (16px)",
+                        "中 · 字号 (20px)",
+                        "粗 · 字号 (28px)",
+                    ]
                 else:
                     assert mid.style_bar.is_palette_visible() is True
-                    assert mid.style_bar.is_mosaic_label_visible() is False
+                    assert [mid.style_bar.size_button(s.key).toolTip() for s in theme.ANNOTATE_SIZES] == [
+                        "细 (2px)",
+                        "中 (3px)",
+                        "粗 (6px)",
+                    ]
+                for s in theme.ANNOTATE_SIZES:
+                    assert mid.style_bar.size_button(s.key).accessibleName() == mid.style_bar.size_button(s.key).toolTip()
             # 再次点击当前工具（马赛克）收起二级条，主条依然 0px 位移
             QTest.mouseClick(mid.toolbar.button("mosaic"), Qt.MouseButton.LeftButton)
             qapp.processEvents()
             assert mid.current_tool is None
             assert mid.style_bar.isVisible() is False
             assert mid.toolbar.geometry() == baseline_bar
-        assert len(sub_heights) == 1
-        assert next(iter(sub_heights)) == mid.style_bar.reserved_height()
+        assert sub_heights == {theme.ANNOTATE_SUB_BAR_RESERVE_H_PX}
+        assert mid.style_bar.reserved_height() == theme.ANNOTATE_SUB_BAR_RESERVE_H_PX
 
         # 框外为 DIM_MASK_RGBA 暗罩；点框外消费点击但不关闭浮窗
         grabbed = mid.grab().toImage()
@@ -1282,7 +1347,7 @@ def test_annotate_overlay_toolbar_placement_no_shift_and_outside_click_stays_ope
         qapp.processEvents()
         assert tall.operations == ()
 
-        # 选区右缘窄框下主条因复制失败变宽左移时，可见二级条同步跟随对齐且不出屏
+        # 隐藏二级条后原覆盖区域恢复可绘制，不留隐藏死区
         tall.style_bar.hide()
         QTest.mousePress(tall, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, sub_center)
         QTest.mouseMove(tall, sub_center + QPoint(24, 0))
@@ -1293,7 +1358,7 @@ def test_annotate_overlay_toolbar_placement_no_shift_and_outside_click_stays_ope
         tall.close_silent()
         tall.deleteLater()
 
-    # 靠右窄选区：复制失败导致主条变宽左移，可见二级条同步联动对齐主条左缘且不出右屏
+    # 靠右窄选区：复制失败导致右侧状态栏显示「复制失败」主条变宽左移，复制钮锁宽 32px 且可见二级条同步联动对齐不出右屏
     narrow = _open_annotator(
         (980, 160, 260, 220),
         on_copy_image=lambda _png: False,
@@ -1305,7 +1370,10 @@ def test_annotate_overlay_toolbar_placement_no_shift_and_outside_click_stays_ope
         before_main_x = narrow.toolbar.geometry().x()
         QTest.mouseClick(narrow.toolbar.button("copy"), Qt.MouseButton.LeftButton)
         qapp.processEvents()
-        assert narrow.toolbar.geometry().x() <= before_main_x
+        assert narrow.toolbar.button("copy").width() == theme.ANNOTATE_PRIMARY_BTN_W_PX
+        assert narrow.toolbar.is_copy_failed() is True
+        assert narrow.toolbar.status_text() == "复制失败"
+        assert narrow.toolbar.geometry().x() < before_main_x
         assert narrow.toolbar.geometry().right() < 1280
         assert narrow.style_bar.geometry().x() == narrow.toolbar.geometry().x()
         assert narrow.style_bar.geometry().right() < 1280
@@ -1445,8 +1513,16 @@ def test_annotate_overlay_copy_and_save_feedback_and_auto_close(qapp: QApplicati
         assert len(copy_payloads) == 1
         assert ov_copy.isVisible() is True
         assert copy_closed == []
-        assert ov_copy.toolbar.button("copy").text() == "复制失败"
-        assert _wait_until(lambda: ov_copy.toolbar.button("copy").text() == "复制", 1000)
+        assert ov_copy.toolbar.button("copy").text() == ""
+        assert ov_copy.toolbar.button("copy").width() == theme.ANNOTATE_PRIMARY_BTN_W_PX
+        assert ov_copy.toolbar.is_copy_failed() is True
+        assert ov_copy.toolbar.button("copy").property("feedback") == "fail"
+        assert ov_copy.toolbar.status_text() == "复制失败"
+        assert _wait_until(
+            lambda: not ov_copy.toolbar.is_copy_failed() and ov_copy.toolbar.status_text() == "",
+            1000,
+        )
+        assert ov_copy.toolbar.size() == QSize(309, 38)
 
         copy_ok[0] = True
         QTest.mouseClick(ov_copy.toolbar.button("copy"), Qt.MouseButton.LeftButton)
@@ -1496,6 +1572,63 @@ def test_annotate_overlay_copy_and_save_feedback_and_auto_close(qapp: QApplicati
     finally:
         ov_bad.close_silent()
         ov_bad.deleteLater()
+
+    # 4. 四态互斥：copy_failed → save_ok 与 copy_failed → save_failed 均停复制表、清红框，且 _clear_copy_failed 不误清保存文案
+    mutex_closed: list[int] = []
+    ov_mutex_ok = _open_annotator(
+        (100, 100, 320, 180),
+        on_copy_image=lambda _png: False,
+        on_save_image=lambda _png: _FakeSaveResult(path="/home/u/Pictures/ok.png"),
+        on_closed=lambda: mutex_closed.append(1),
+        copy_feedback_ms=80,
+        saved_feedback_ms=120,
+    )
+    try:
+        QTest.mouseClick(ov_mutex_ok.toolbar.button("copy"), Qt.MouseButton.LeftButton)
+        qapp.processEvents()
+        assert ov_mutex_ok.toolbar.is_copy_failed() is True
+        assert ov_mutex_ok.toolbar.status_text() == "复制失败"
+        assert ov_mutex_ok._copy_reset_timer.isActive() is True
+
+        QTest.mouseClick(ov_mutex_ok.toolbar.button("save"), Qt.MouseButton.LeftButton)
+        qapp.processEvents()
+        assert ov_mutex_ok._copy_reset_timer.isActive() is False
+        assert ov_mutex_ok.toolbar.is_copy_failed() is False
+        assert ov_mutex_ok.toolbar.status_text() == "✓ 已保存 /home/u/Pictures/ok.png"
+        assert ov_mutex_ok._save_close_timer.isActive() is True
+
+        # 直接触发 _clear_copy_failed() 守卫：绝不误清已保存文案
+        ov_mutex_ok._clear_copy_failed()
+        assert ov_mutex_ok.toolbar.status_text() == "✓ 已保存 /home/u/Pictures/ok.png"
+        assert _wait_until(lambda: not ov_mutex_ok.isVisible(), 1500)
+        assert mutex_closed == [1]
+    finally:
+        ov_mutex_ok.close_silent()
+        ov_mutex_ok.deleteLater()
+
+    ov_mutex_err = _open_annotator(
+        (100, 100, 320, 180),
+        on_copy_image=lambda _png: False,
+        on_save_image=lambda _png: _FakeSaveResult(error="磁盘已满"),
+        copy_feedback_ms=80,
+    )
+    try:
+        QTest.mouseClick(ov_mutex_err.toolbar.button("copy"), Qt.MouseButton.LeftButton)
+        qapp.processEvents()
+        assert ov_mutex_err._copy_reset_timer.isActive() is True
+
+        QTest.mouseClick(ov_mutex_err.toolbar.button("save"), Qt.MouseButton.LeftButton)
+        qapp.processEvents()
+        assert ov_mutex_err._copy_reset_timer.isActive() is False
+        assert ov_mutex_err.toolbar.is_copy_failed() is False
+        assert ov_mutex_err.toolbar.status_text() == "保存失败：磁盘已满"
+
+        ov_mutex_err._clear_copy_failed()
+        assert ov_mutex_err.toolbar.status_text() == "保存失败：磁盘已满"
+        assert ov_mutex_err.isVisible() is True
+    finally:
+        ov_mutex_err.close_silent()
+        ov_mutex_err.deleteLater()
 
 
 def test_overlays_escape_focus_arbitration_and_two_step_text_edit(qapp: QApplication) -> None:
@@ -1854,15 +1987,20 @@ def test_annotate_overlay_enter_copy_modifiers_draft_save_timer_and_inplace_unch
         assert ov3.toolbar.status_text().startswith("✓ 已保存 ")
         assert ov3._save_close_timer.isActive() is True
 
-        # 立刻按 Enter 复制（返回 False）：停保存自动关闭表、清保存文案、显示复制失败；
-        # 等到 copy_feedback_ms(100ms) > saved_feedback_ms(40ms) 恢复「复制」时浮窗仍未关闭
+        # 立刻按 Enter 复制（返回 False）：停保存自动关闭表、清保存文案、亮红框且右侧显「复制失败」；
+        # 等到 copy_feedback_ms(100ms) > saved_feedback_ms(40ms) 恢复常态时浮窗仍未关闭
         QTest.keyClick(ov3, Qt.Key.Key_Return)
         qapp.processEvents()
         assert len(copied_3) == 1
         assert ov3._save_close_timer.isActive() is False
-        assert ov3.toolbar.status_text() == ""
-        assert ov3.toolbar.button("copy").text() == "复制失败"
-        assert _wait_until(lambda: ov3.toolbar.button("copy").text() == "复制", 1000)
+        assert ov3.toolbar.is_copy_failed() is True
+        assert ov3.toolbar.button("copy").text() == ""
+        assert ov3.toolbar.button("copy").width() == theme.ANNOTATE_PRIMARY_BTN_W_PX
+        assert ov3.toolbar.status_text() == "复制失败"
+        assert _wait_until(
+            lambda: not ov3.toolbar.is_copy_failed() and ov3.toolbar.status_text() == "",
+            1000,
+        )
         assert ov3.isVisible() is True
         assert closed_3 == []
 
@@ -2103,3 +2241,180 @@ def test_annotate_real_chain_capture_flow_bridge_overlay_memory_and_enter_copy(
             sel.close_silent()
             sel.deleteLater()
         qapp.processEvents()
+
+
+def test_annotate_toolbar_vector_icons_semantic_colors_and_hover_states(
+    qapp: QApplication,
+) -> None:
+    """模板 B 纯矢量图标：强校验、9 钮像素、复制绿/失败压过悬停红、取消悬停红、激活蓝、撤销悬停禁用清蓝降透明、3 档圆点面积递增。"""
+    assert ANNOTATE_ICON_KEYS == frozenset(
+        {"rect", "arrow", "brush", "text", "mosaic", "undo", "copy", "save", "cancel"}
+    )
+
+    # 1. 非法图标键、非法尺寸与非法语义角色立即抛 ValueError
+    probe_img = QImage(24, 24, QImage.Format.Format_ARGB32)
+    probe_img.fill(Qt.GlobalColor.transparent)
+    probe_painter = QPainter(probe_img)
+    try:
+        with pytest.raises(ValueError):
+            draw_annotate_icon(probe_painter, "unknown", QColor(theme.TEXT_PRIMARY_HEX))
+        with pytest.raises(ValueError):
+            draw_annotate_icon(probe_painter, "rect", QColor(theme.TEXT_PRIMARY_HEX), size=0)
+        with pytest.raises(ValueError):
+            draw_annotate_icon(probe_painter, "rect", QColor(theme.TEXT_PRIMARY_HEX), size=-4)
+        with pytest.raises(ValueError):
+            draw_annotate_icon(probe_painter, "rect", QColor(theme.TEXT_PRIMARY_HEX), size=False)
+    finally:
+        probe_painter.end()
+
+    with pytest.raises(ValueError):
+        _IconButton("unknown", "非法图标")
+    with pytest.raises(ValueError):
+        _IconButton("rect", "矩形", role="invalid")  # type: ignore[arg-type]
+
+    # 2. mosaic 淡块在 save/restore 内叠乘 painter.opacity() * 0.28（不覆盖既有不透明度）
+    mosaic_half = QImage(16, 16, QImage.Format.Format_ARGB32)
+    mosaic_half.fill(Qt.GlobalColor.transparent)
+    mp = QPainter(mosaic_half)
+    mp.setOpacity(0.5)
+    draw_annotate_icon(mp, "mosaic", QColor(theme.TEXT_PRIMARY_HEX), size=16)
+    mp.end()
+    solid_alpha = mosaic_half.pixelColor(4, 4).alpha()
+    dim_alpha = mosaic_half.pixelColor(8, 4).alpha()
+    assert abs(solid_alpha - round(255 * 0.5)) <= 3
+    assert abs(dim_alpha - round(255 * 0.5 * theme.ANNOTATE_MOSAIC_DIM_OPACITY)) <= 3
+
+    def _hover(widget: QWidget, enter: bool) -> None:
+        if enter:
+            center = QPointF(widget.width() / 2.0, widget.height() / 2.0)
+            gpos = QPointF(widget.mapToGlobal(center.toPoint()))
+            QApplication.sendEvent(widget, QEnterEvent(center, center, gpos))
+        else:
+            QApplication.sendEvent(widget, QEvent(QEvent.Type.Leave))
+        qapp.processEvents()
+
+    def _ink_count(img: QImage, bg_hex: str, rect: QRect | None = None, tol: int = 12) -> int:
+        bg = QColor(bg_hex)
+        box = rect if rect is not None else img.rect()
+        count = 0
+        for y in range(box.top(), box.bottom() + 1):
+            for x in range(box.left(), box.right() + 1):
+                c = img.pixelColor(x, y)
+                if (
+                    abs(c.red() - bg.red()) > tol
+                    or abs(c.green() - bg.green()) > tol
+                    or abs(c.blue() - bg.blue()) > tol
+                ):
+                    count += 1
+        return count
+
+    def _max_luma_delta(img: QImage, bg_hex: str) -> int:
+        bg = QColor(bg_hex)
+        return max(
+            abs(img.pixelColor(x, y).red() - bg.red())
+            + abs(img.pixelColor(x, y).green() - bg.green())
+            + abs(img.pixelColor(x, y).blue() - bg.blue())
+            for y in range(img.height())
+            for x in range(img.width())
+        )
+
+    def _grab_child(host: QWidget, child: QWidget) -> QImage:
+        top_left = child.mapTo(host, QPoint(0, 0))
+        return host.grab().toImage().copy(QRect(top_left, child.size()))
+
+    ov = _open_annotator(
+        (160, 120, 420, 240),
+        on_copy_image=lambda _png: False,
+        copy_feedback_ms=500,
+    )
+    try:
+        # 3. 9 枚按钮均有非空矢量像素绘制（从主条整帧裁切，确保真实合成在 SURFACE_HEX 上）
+        rect_img = _grab_child(ov.toolbar, ov.toolbar.button("rect"))
+        assert rect_img.pixelColor(0, 0).rgb() == QColor(theme.SURFACE_HEX).rgb()
+        for key in ("rect", "arrow", "brush", "text", "mosaic", "undo", "copy", "save", "cancel"):
+            btn_img = _grab_child(ov.toolbar, ov.toolbar.button(key))
+            assert _ink_count(btn_img, theme.SURFACE_HEX) > 15, f"{key} 图标像素异常稀疏"
+
+        # 4. 复制主钮：静息绿 → 悬停亮绿 → 悬停中触发复制失败必须显红（failed > primary + hovered）
+        copy_btn = ov.toolbar.button("copy")
+        copy_idle = _grab_child(ov.toolbar, copy_btn)
+        assert _pixels_of(copy_idle, theme.OK_HEX, tol=16)
+        assert _pixels_of(copy_idle, theme.ERROR_HEX, tol=16) == []
+
+        _hover(copy_btn, True)
+        copy_hover = _grab_child(ov.toolbar, copy_btn)
+        assert _pixels_of(copy_hover, theme.OK_BRIGHT_HEX, tol=16)
+
+        QTest.mouseClick(copy_btn, Qt.MouseButton.LeftButton)
+        qapp.processEvents()
+        assert ov.toolbar.is_copy_failed() is True
+        assert copy_btn.width() == theme.ANNOTATE_PRIMARY_BTN_W_PX
+        copy_fail_hover = _grab_child(ov.toolbar, copy_btn)
+        assert _pixels_of(copy_fail_hover, theme.ERROR_HEX, tol=16)
+        assert _pixels_of(copy_fail_hover, theme.OK_HEX, tol=16) == []
+        assert _pixels_of(copy_fail_hover, theme.OK_BRIGHT_HEX, tol=16) == []
+        _hover(copy_btn, False)
+
+        # 5. 取消钮：静息无红 → 悬停转微红 → 离开恢复无红
+        cancel_btn = ov.toolbar.button("cancel")
+        assert _pixels_of(_grab_child(ov.toolbar, cancel_btn), theme.ERROR_HEX, tol=16) == []
+        _hover(cancel_btn, True)
+        assert _pixels_of(_grab_child(ov.toolbar, cancel_btn), theme.ERROR_HEX, tol=16)
+        _hover(cancel_btn, False)
+        assert _pixels_of(_grab_child(ov.toolbar, cancel_btn), theme.ERROR_HEX, tol=16) == []
+
+        # 6. 工具激活蓝态 + 撤销悬停中回空栈禁用立即清蓝框并降至 0.38 不透明度
+        QTest.mouseClick(ov.toolbar.button("brush"), Qt.MouseButton.LeftButton)
+        qapp.processEvents()
+        assert _pixels_of(_grab_child(ov.toolbar, ov.toolbar.button("brush")), theme.ACCENT_HEX, tol=16)
+        assert _pixels_of(_grab_child(ov.toolbar, ov.toolbar.button("rect")), theme.ACCENT_HEX, tol=16) == []
+
+        c = ov.canvas_rect()
+        QTest.mousePress(ov, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, c.topLeft() + QPoint(30, 30))
+        QTest.mouseMove(ov, c.topLeft() + QPoint(90, 30))
+        QTest.mouseRelease(ov, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, c.topLeft() + QPoint(90, 30))
+        qapp.processEvents()
+        undo_btn = ov.toolbar.button("undo")
+        assert undo_btn.isEnabled() is True
+        enabled_delta = _max_luma_delta(_grab_child(ov.toolbar, undo_btn), theme.SURFACE_HEX)
+
+        _hover(undo_btn, True)
+        assert _pixels_of(_grab_child(ov.toolbar, undo_btn), theme.ACCENT_HEX, tol=16)
+
+        # 悬停中点击撤销回到空栈：按钮禁用并立即清蓝框且降不透明度，且后续重新启用不残留陈旧悬停蓝框
+        QTest.mouseClick(undo_btn, Qt.MouseButton.LeftButton)
+        qapp.processEvents()
+        assert undo_btn.isEnabled() is False
+        undo_disabled_img = _grab_child(ov.toolbar, undo_btn)
+        assert _pixels_of(undo_disabled_img, theme.ACCENT_HEX, tol=16) == []
+        disabled_delta = _max_luma_delta(undo_disabled_img, theme.SURFACE_HEX)
+        assert 0 < disabled_delta < enabled_delta * 0.35
+
+        # 未发 Leave 即通过画布再次起笔重新启用撤销：因禁用已清 _hovered，不应出现幽灵悬停蓝框
+        QTest.mousePress(ov, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, c.topLeft() + QPoint(30, 50))
+        QTest.mouseMove(ov, c.topLeft() + QPoint(90, 50))
+        QTest.mouseRelease(ov, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, c.topLeft() + QPoint(90, 50))
+        qapp.processEvents()
+        assert undo_btn.isEnabled() is True
+        assert _pixels_of(_grab_child(ov.toolbar, undo_btn), theme.ACCENT_HEX, tol=16) == []
+
+        # 7. 二级样式条 3 档纯圆点：像素面积严格递增 thin < medium < thick，悬停转蓝离开恢复
+        inner = QRect(5, 5, 14, 14)
+        thin_btn = ov.style_bar.size_button("thin")
+        med_btn = ov.style_bar.size_button("medium")
+        thick_btn = ov.style_bar.size_button("thick")
+        thin_img = _grab_child(ov.style_bar, thin_btn)
+        assert thin_img.pixelColor(0, 0).rgb() == QColor(theme.SURFACE_2_HEX).rgb()
+        thin_area = _ink_count(thin_img, theme.SURFACE_2_HEX, rect=inner, tol=24)
+        med_area = len(_pixels_of(_grab_child(ov.style_bar, med_btn).copy(inner), theme.ACCENT_HEX, tol=40))
+        thick_area = _ink_count(_grab_child(ov.style_bar, thick_btn), theme.SURFACE_2_HEX, rect=inner, tol=24)
+        assert 0 < thin_area < med_area < thick_area, (thin_area, med_area, thick_area)
+
+        assert _pixels_of(_grab_child(ov.style_bar, thin_btn), theme.ACCENT_HEX, tol=16) == []
+        _hover(thin_btn, True)
+        assert _pixels_of(_grab_child(ov.style_bar, thin_btn), theme.ACCENT_HEX, tol=16)
+        _hover(thin_btn, False)
+        assert _pixels_of(_grab_child(ov.style_bar, thin_btn), theme.ACCENT_HEX, tol=16) == []
+    finally:
+        ov.close_silent()
+        ov.deleteLater()
