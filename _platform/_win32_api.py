@@ -385,3 +385,23 @@ class CtypesWin32Api:
                     self._user32.EmptyClipboard()
                 finally:
                     self._user32.CloseClipboard()
+
+
+def set_windows_app_user_model_id(app_id: str, *, shell32=None) -> bool:
+    """为当前 Windows 进程注册显式 AppUserModelID（任务栏分组与图标归属单源）。非 Windows 下为无操作返回 False。"""
+    if not isinstance(app_id, str) or not app_id.strip():
+        raise ValueError(f"AppUserModelID 不能为空，收到: {app_id!r}")
+    if shell32 is None:
+        if os.name != "nt":
+            return False
+        windll = getattr(ctypes, "windll", None)
+        if windll is None:
+            return False
+        shell32 = windll.shell32
+    fn = getattr(shell32, "SetCurrentProcessExplicitAppUserModelID", None)
+    if fn is None:
+        return False
+    fn.argtypes = [wintypes.LPCWSTR]
+    fn.restype = ctypes.c_long
+    hr = int(fn(app_id.strip()))
+    return hr == 0

@@ -10,14 +10,17 @@ from pathlib import Path
 import pytest
 
 from _paths import INTERNAL_CHILD_GUARD_FLAG
-from _platform import _child_posix, _child_windows
+from _platform import _child_posix, _child_windows, child_process as cp_mod
 from _platform.child_process import (
+    CREATE_NEW_PROCESS_GROUP,
+    CREATE_NO_WINDOW,
     LOG_ROTATE_BYTES,
     SessionRecord,
     kill_recorded_session,
     process_identity,
     session_record,
     spawn_child,
+    windows_subprocess_kwargs,
 )
 from _procfs import session_members
 
@@ -182,8 +185,37 @@ def test_windows_child_is_assigned_to_kill_on_close_job_and_terminated_with_it(t
     assert api.calls == [("create",), ("assign", 77, 9001)]
     assert child.terminate_session(1.0) == [4242] and api.calls[-1] == ("terminate", 77)
 
-    ran: list[list[str]] = []
-    run = lambda argv, **kw: ran.append(argv)  # noqa: E731
+    ran: list[tuple[list[str], dict]] = []
+    run = lambda argv, **kw: ran.append((list(argv), dict(kw)))  # noqa: E731
     assert _child_windows.kill_recorded(4242, "other", api=api, run=run) == [] and ran == []
     assert _child_windows.kill_recorded(4242, api.created, api=api, run=run) == [4242]
-    assert ran == [["taskkill", "/PID", "4242", "/T", "/F"]]
+    assert ran[0][0] == ["taskkill", "/PID", "4242", "/T", "/F"]
+    assert "encoding" not in ran[0][1] and ran[0][1]["errors"] == "replace"
+
+
+def test_windows_subprocess_kwargs_splits_nt_and_posix(monkeypatch):
+    monkeypatch.setattr(cp_mod.os, "name", "posix")
+    assert windows_subprocess_kwargs(encoding="oem") == {"errors": "replace"}
+    assert windows_subprocess_kwargs(encoding="utf-8") == {"encoding": "utf-8", "errors": "replace"}
+    assert windows_subprocess_kwargs(new_process_group=True, errors=None) == {}
+
+    monkeypatch.setattr(cp_mod.os, "name", "nt")
+    assert windows_subprocess_kwargs(encoding="oem") == {
+        "creationflags": CREATE_NO_WINDOW,
+        "encoding": "oem",
+        "errors": "replace",
+    }
+    assert windows_subprocess_kwargs(encoding="utf-8", errors="replace") == {
+        "creationflags": CREATE_NO_WINDOW,
+        "encoding": "utf-8",
+        "errors": "replace",
+    }
+    assert windows_subprocess_kwargs(new_process_group=True, errors=None) == {
+        "creationflags": CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP,
+    }
+
+    api = _FakeJobApi()
+    seen: list[dict] = []
+    assert _child_windows.kill_recorded(4242, api.created, api=api, run=lambda argv, **kw: seen.append(dict(kw))) == [4242]
+    assert seen[0]["creationflags"] == CREATE_NO_WINDOW
+    assert seen[0]["encoding"] == "oem" and seen[0]["errors"] == "replace"

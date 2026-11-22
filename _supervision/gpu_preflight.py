@@ -25,6 +25,8 @@ import subprocess
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 
+from _platform.child_process import windows_subprocess_kwargs
+
 Runner = Callable[..., subprocess.CompletedProcess]
 MIB = 1024 * 1024
 ASR_MODULE = "runtimes.asr"
@@ -84,7 +86,14 @@ def query_gpus(*, run: Runner = subprocess.run, which: Callable[[str], str | Non
         raise ValueError("未找到 nvidia-smi，无法读取显存")
     cmd = ["nvidia-smi", "--query-gpu=index,uuid,memory.total,memory.free,name", "--format=csv,noheader,nounits"]
     try:
-        proc = run(cmd, capture_output=True, text=True, timeout=10, check=False)
+        proc = run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+            **windows_subprocess_kwargs(encoding="utf-8", errors="replace"),
+        )
     except (OSError, subprocess.SubprocessError) as exc:
         raise ValueError(f"nvidia-smi 调用失败：{type(exc).__name__}: {exc}") from exc
     if proc.returncode != 0:

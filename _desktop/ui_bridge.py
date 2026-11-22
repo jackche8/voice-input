@@ -4,6 +4,7 @@ from __future__ import annotations
 import os
 import sys
 from collections.abc import Callable
+from pathlib import Path
 
 from PySide6.QtCore import QObject, Qt, Signal, Slot
 
@@ -18,6 +19,25 @@ def configure_qt_platform_env() -> None:
     """
     if sys.platform.startswith("linux") and os.environ.get("DISPLAY") and not os.environ.get("QT_QPA_PLATFORM"):
         os.environ["QT_QPA_PLATFORM"] = "xcb"
+
+
+def apply_qt_app_icon(app, paths, *, icon_factory=None) -> bool:
+    """为 Qt 主进程设置应用级窗口图标：优先加载 `.ico`（走 QtGui 内置 qico 插件，无需 QtSvg），缺失时回退 `.svg`。"""
+    factory = icon_factory
+    if factory is None:
+        from PySide6.QtGui import QIcon
+
+        factory = QIcon
+    res_dir = Path(paths.program_root) / "resources"
+    for filename in ("ollama-voice-input.ico", "ollama-voice-input.svg"):
+        candidate = res_dir / filename
+        if not candidate.is_file():
+            continue
+        icon = factory(str(candidate))
+        if not icon.isNull():
+            app.setWindowIcon(icon)
+            return True
+    return False
 
 
 def query_virtual_screen_rect(app) -> RectTuple | None:

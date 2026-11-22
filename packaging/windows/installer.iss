@@ -30,6 +30,8 @@ LicenseFile=..\..\LICENSE
 InfoBeforeFile=..\..\COMMERCIAL.md
 OutputDir=..\..\dist
 OutputBaseFilename=Ollama-Voice-Input-{#MyAppVersion}-windows-x64-setup
+SetupIconFile=..\..\resources\ollama-voice-input.ico
+UninstallDisplayIcon={app}\{#MyAppExeName}
 Compression=lzma2/normal
 SolidCompression=no
 WizardStyle=modern
@@ -47,8 +49,8 @@ Source: "..\..\COMMERCIAL.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\..\THIRD-PARTY-NOTICES.md"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
-Name: "{autoprograms}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
-Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
+Name: "{autoprograms}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; IconFilename: "{app}\{#MyAppExeName}"; AppUserModelID: "io.github.jackche8.ollama-voice-input"
+Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; IconFilename: "{app}\{#MyAppExeName}"; AppUserModelID: "io.github.jackche8.ollama-voice-input"; Tasks: desktopicon
 
 [Registry]
 ; Clean per-user autostart entry written by _platform/windows.py on uninstall without touching user data directories

@@ -52,10 +52,12 @@ def _release(blob: bytes, digest: str):
 class Recorder:
     def __init__(self, fail_on: str | None = None) -> None:
         self.calls: list[tuple[list[str], dict]] = []
+        self.kwargs: list[dict] = []
         self.fail_on = fail_on
 
     def __call__(self, argv, **kw):
         self.calls.append((list(argv), kw["env"]))
+        self.kwargs.append(dict(kw))
         failed = self.fail_on is not None and self.fail_on in argv
         return subprocess.CompletedProcess(argv, 1 if failed else 0, "", "network unreachable" if failed else "")
 
@@ -97,7 +99,8 @@ def test_installs_uv_python_venv_and_hashed_lock_then_writes_manifest_last(paths
     ]
     env = run.calls[0][1]
     assert env["UV_PYTHON_INSTALL_DIR"] == str(paths.python_dir) and env["UV_NO_CONFIG"] == "1"
-    assert env["UV_PYTHON_PREFERENCE"] == "only-managed"
+    assert env["UV_PYTHON_PREFERENCE"] == "only-managed" and env["PYTHONUTF8"] == "1"
+    assert run.kwargs[0]["encoding"] == "utf-8" and run.kwargs[0]["errors"] == "replace"
     manifest = json.loads(paths.asr_manifest.read_text(encoding="utf-8"))
     assert manifest == {"variant": "cpu", "python": PYTHON_VERSION, "uv": UV_VERSION,
                         "lock_sha256": hashlib.sha256(lock_file("cpu").read_bytes()).hexdigest(),
@@ -140,3 +143,15 @@ def test_lock_file_uses_isolated_asr_runtime_root_when_frozen(tmp_path):
     assert lock_file("cpu", program_root=tmp_path, frozen=True) == (
         tmp_path / "_asr_runtime" / "runtimes" / "asr" / "requirements-cpu.lock"
     )
+
+
+def test_run_uv_passes_windows_no_window_and_utf8_on_nt(paths, monkeypatch):
+    from _platform import child_process as cp_mod
+
+    blob = _uv_tarball()
+    run = Recorder()
+    monkeypatch.setattr(cp_mod, "_is_nt", lambda: True)
+    _action(paths, run, _release(blob, hashlib.sha256(blob).hexdigest()))(lambda _p: None)
+    assert all(kw["creationflags"] == cp_mod.CREATE_NO_WINDOW for kw in run.kwargs)
+    assert all(kw["encoding"] == "utf-8" and kw["errors"] == "replace" for kw in run.kwargs)
+    assert all(env["PYTHONUTF8"] == "1" for _argv, env in run.calls)

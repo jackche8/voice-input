@@ -304,3 +304,55 @@ def test_certs_cli_module_runs_cleanly_without_runpy_warning(tmp_path: Path):
     assert str(out_dir / "ca.pem") in proc.stdout
     assert str(out_dir / "cert.pem") in proc.stdout
     assert str(out_dir / "key.pem") in proc.stdout
+
+
+def test_discover_lan_ipv4s_windows_ipconfig_flags_and_fullwidth_colon(monkeypatch):
+    from _platform import certs as certs_mod
+    from _platform import child_process as cp_mod
+
+    which_calls: list[str] = []
+    run_calls: list[tuple[list[str], dict]] = []
+
+    def fake_which(name: str) -> str | None:
+        which_calls.append(name)
+        return f"C:\\Windows\\System32\\{name}.exe"
+
+    def fake_run(cmd, **kw):
+        run_calls.append((list(cmd), dict(kw)))
+        out = (
+            "无线局域网适配器 WLAN:\n"
+            "   IPv4 地址 . . . . . . . . . . . . : 192.168.1.33(首选)\n"
+            "以太网适配器 以太网:\n"
+            "   IPv4 地址 . . . . . . . . . . . . ： 10.0.0.8(首选)\n"
+        )
+        return subprocess.CompletedProcess(cmd, 0, out, "")
+
+    monkeypatch.setattr(certs_mod.os, "name", "nt")
+    monkeypatch.setattr(cp_mod.os, "name", "nt")
+    monkeypatch.setattr(certs_mod.socket, "getaddrinfo", lambda *a, **k: [])
+    monkeypatch.setattr(certs_mod.socket, "socket", lambda *a, **k: (_ for _ in ()).throw(OSError("offline")))
+
+    ips = certs_mod.discover_lan_ipv4s(run=fake_run, which=fake_which)
+    assert ips == ["192.168.1.33", "10.0.0.8"]
+    assert which_calls == ["ipconfig"]  # Windows 下不调用 ip / ifconfig
+    assert len(run_calls) == 1 and run_calls[0][0] == ["ipconfig"]
+    assert run_calls[0][1]["creationflags"] == cp_mod.CREATE_NO_WINDOW
+    assert run_calls[0][1]["encoding"] == "oem" and run_calls[0][1]["errors"] == "replace"
+
+
+def test_run_openssl_passes_windows_subprocess_kwargs(monkeypatch):
+    from _platform import _certs_openssl as openssl_mod
+    from _platform import child_process as cp_mod
+
+    seen: list[dict] = []
+
+    def fake_run(cmd, **kw):
+        seen.append(dict(kw))
+        return subprocess.CompletedProcess(cmd, 0, "OpenSSL 3.0\n", "")
+
+    monkeypatch.setattr(openssl_mod.shutil, "which", lambda _n: "C:\\openssl.exe")
+    monkeypatch.setattr(openssl_mod.subprocess, "run", fake_run)
+    monkeypatch.setattr(cp_mod.os, "name", "nt")
+    assert openssl_mod.run_openssl(["version"]) == "OpenSSL 3.0\n"
+    assert seen[0]["creationflags"] == cp_mod.CREATE_NO_WINDOW
+    assert seen[0]["encoding"] == "utf-8" and seen[0]["errors"] == "replace"

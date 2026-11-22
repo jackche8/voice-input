@@ -30,14 +30,15 @@ from _desktop.singleton import try_acquire_singleton_lock
 from _desktop.status import PlatformStatus
 from _desktop.supervisor import create_supervisor
 from _desktop.ui_bridge import (
-    QtUiBridge, configure_qt_platform_env, open_annotator, open_live_selector, open_translate_overlay,
+    QtUiBridge, apply_qt_app_icon, configure_qt_platform_env, open_annotator, open_live_selector, open_translate_overlay,
     query_virtual_screen_rect,
 )
 from _desktop.voice import VoiceFlow, build_keywords_context_provider, new_job_id
 from _hotkey import HotkeyBindings, format_hotkey
-from _paths import APP_DISPLAY_NAME, default_app_paths, pictures_dir
+from _paths import APP_DISPLAY_NAME, APP_USER_MODEL_ID, default_app_paths, pictures_dir
 from _platform import create_platform_adapter
 from _platform._common import SoundDeviceSource
+from _platform._win32_api import set_windows_app_user_model_id
 from _platform.certs import ensure_tls_certificates
 from _platform.child_process import attach_app_log
 from _ports import local_ports
@@ -61,8 +62,10 @@ def main() -> None:
     paths = default_app_paths(os.environ)
     origin = local_ports(os.environ).server_origin
     configure_qt_platform_env()
+    set_windows_app_user_model_id(APP_USER_MODEL_ID)
     app = QApplication(sys.argv[:1])
     app.setApplicationName("Ollama Voice Input")
+    apply_qt_app_icon(app, paths)
     app.setQuitOnLastWindowClosed(False)
     lock = try_acquire_singleton_lock(paths.lock)
     if lock is None:  # 已有实例在运行：请它打开主窗口，本进程退出

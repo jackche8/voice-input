@@ -17,7 +17,14 @@ from _linux.ibus import IBusCommitter
 from _linux.modifiers import ModifierJanitor
 from _linux.paste_backend import FocusedWindowInfo
 from _platform._common import play_beep as common_play_beep, png_dimensions
-from _platform._win32_api import CF_DIB, CF_HDROP, CF_UNICODETEXT, CtypesWin32Api, _configure_win32_signatures
+from _platform._win32_api import (
+    CF_DIB,
+    CF_HDROP,
+    CF_UNICODETEXT,
+    CtypesWin32Api,
+    _configure_win32_signatures,
+    set_windows_app_user_model_id,
+)
 from _platform.detect import create_platform_adapter, detect_os
 from _platform.linux import LinuxPlatformAdapter
 from _platform.macos import (
@@ -1578,3 +1585,27 @@ def test_write_clipboard_png_across_linux_windows_and_macos(tmp_path: Path, monk
     mac_bad_tmp = MacOSPlatformAdapter(macos_api=mac_api, temp_dir=file_not_dir)
     os_err = mac_bad_tmp.write_clipboard_png(sample_png)
     assert os_err is not None and "临时文件" in os_err
+
+
+def test_set_windows_app_user_model_id_ctypes_signature_and_guards(monkeypatch):
+    from _platform import _win32_api as win32_mod
+
+    with pytest.raises(ValueError):
+        set_windows_app_user_model_id("   ")
+
+    monkeypatch.setattr(win32_mod.os, "name", "posix")
+    assert set_windows_app_user_model_id("io.github.jackche8.ollama-voice-input") is False
+
+    seen: list[str] = []
+    rc = {"value": 0}
+    shell32 = _FakeWinDll(
+        {"SetCurrentProcessExplicitAppUserModelID": lambda val: (seen.append(val) or rc["value"])}
+    )
+    assert set_windows_app_user_model_id("io.github.jackche8.ollama-voice-input", shell32=shell32) is True
+    fn = shell32.SetCurrentProcessExplicitAppUserModelID
+    assert fn.argtypes == [wintypes.LPCWSTR]
+    assert fn.restype is ctypes.c_long
+    assert seen == ["io.github.jackche8.ollama-voice-input"]
+
+    rc["value"] = -2147467259  # E_FAIL
+    assert set_windows_app_user_model_id("io.github.jackche8.ollama-voice-input", shell32=shell32) is False

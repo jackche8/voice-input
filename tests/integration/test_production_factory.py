@@ -286,3 +286,92 @@ def test_production_setup_worker_uses_internal_flag_when_frozen(world, monkeypat
     argv, _kwargs = world["workers"].calls[-1]
     assert argv[:2] == ["/app/ollama-voice-input", INTERNAL_SETUP_WORKER_FLAG]
     assert "--task-file" in argv and "--kind" in argv and "ollama_pull" in argv
+
+
+def test_production_setup_and_lan_dispatch_for_windows_and_macos(tmp_path):
+    services = FakeServices()
+    linux_only_caps = {"xclip", "portal_screenshot", "portal_shortcuts", "maim", "evdev_keyboards", "hotkey_conflicts"}
+
+    # 1. Windows 真实组合链：/api/setup/check 走 WindowsPlatformAdapter，/api/v1/lan-access 走 ipconfig（绝不调 ip）
+    win_cmds: list[list[str]] = []
+
+    def win_run(cmd, **_kw):
+        win_cmds.append(list(cmd))
+        assert cmd == ["ipconfig"]
+        out = (
+            "无线局域网适配器 WLAN:\n"
+            "   IPv4 地址 . . . . . . . . . . . . : 192.168.1.42(首选)\n"
+            "以太网适配器 vEthernet (WSL):\n"
+            "   IPv4 地址 . . . . . . . . . . . . : 172.24.16.1(首选)\n"
+        )
+        return subprocess.CompletedProcess(cmd, 0, stdout=out, stderr="")
+
+    win_paths = AppPaths.for_roots(
+        config_root=tmp_path / "win" / "c",
+        data_root=tmp_path / "win" / "d",
+        runtime_dir=tmp_path / "win" / "r",
+        os_name="windows",
+        environ={"APPDATA": str(tmp_path / "live-app"), "LOCALAPPDATA": str(tmp_path / "live-local")},
+    )
+    win_adapters = SystemAdapters(
+        environ={},
+        run=win_run,
+        which=lambda _n: None,
+        ocr_languages=lambda: ["chi_sim", "chi_tra", "eng"],
+        http_transport=httpx.MockTransport(services),
+    )
+    win_rt = compose_production_runtime(paths=win_paths, token=FAKE_TOKEN, adapters=win_adapters, endpoints=ENDPOINTS)
+    with TestClient(create_app(win_rt, static_v3=STATIC_V3), client=("127.0.0.1", 50000), base_url="https://127.0.0.1:17945") as c:
+        chk = c.get("/api/setup/check").json()
+        assert chk["session_type"] == "windows"
+        cap_ids = {cap["id"] for cap in chk["capabilities"]}
+        assert {"win32_input", "win32_capture", "win32_hotkeys", "ocr_chi_sim", "ocr_chi_tra", "ocr_eng"} <= cap_ids
+        assert cap_ids.isdisjoint(linux_only_caps)
+
+        lan = c.get("/api/v1/lan-access")
+        assert lan.status_code == 200
+        assert [e["ip"] for e in lan.json()["entries"]] == ["192.168.1.42"]
+        assert win_cmds == [["ipconfig"]]
+
+    # 2. macOS 真实组合链：/api/setup/check 走 MacOSPlatformAdapter，/api/v1/lan-access 走 ifconfig（绝不调 ip）
+    mac_cmds: list[list[str]] = []
+
+    def mac_run(cmd, **_kw):
+        mac_cmds.append(list(cmd))
+        assert cmd == ["ifconfig"]
+        out = (
+            "lo0: flags=8049<UP,LOOPBACK,RUNNING,MULTICAST> mtu 16384\n"
+            "\tinet 127.0.0.1 netmask 0xff000000\n"
+            "en0: flags=8863<UP,BROADCAST,SMART,RUNNING,SIMPLEX,MULTICAST> mtu 1500\n"
+            "\tinet 192.168.50.7 netmask 0xffffff00 broadcast 192.168.50.255\n"
+            "utun2: flags=8051<UP,POINTOPOINT,RUNNING,MULTICAST> mtu 1380\n"
+            "\tinet 10.8.0.2 --> 10.8.0.1 netmask 0xffffffff\n"
+        )
+        return subprocess.CompletedProcess(cmd, 0, stdout=out, stderr="")
+
+    mac_paths = AppPaths.for_roots(
+        config_root=tmp_path / "mac" / "c",
+        data_root=tmp_path / "mac" / "d",
+        runtime_dir=tmp_path / "mac" / "r",
+        os_name="macos",
+        environ={"HOME": str(tmp_path / "live-home")},
+    )
+    mac_adapters = SystemAdapters(
+        environ={},
+        run=mac_run,
+        which=lambda _n: None,
+        ocr_languages=lambda: ["chi_sim", "chi_tra", "eng"],
+        http_transport=httpx.MockTransport(services),
+    )
+    mac_rt = compose_production_runtime(paths=mac_paths, token=FAKE_TOKEN, adapters=mac_adapters, endpoints=ENDPOINTS)
+    with TestClient(create_app(mac_rt, static_v3=STATIC_V3), client=("127.0.0.1", 50000), base_url="https://127.0.0.1:17945") as c:
+        chk = c.get("/api/setup/check").json()
+        assert chk["session_type"] == "macos"
+        cap_ids = {cap["id"] for cap in chk["capabilities"]}
+        assert {"macos_accessibility", "macos_screen_recording", "clipboard", "ocr_chi_sim", "ocr_chi_tra", "ocr_eng"} <= cap_ids
+        assert cap_ids.isdisjoint(linux_only_caps)
+
+        lan = c.get("/api/v1/lan-access")
+        assert lan.status_code == 200
+        assert [e["ip"] for e in lan.json()["entries"]] == ["192.168.50.7"]
+        assert mac_cmds == [["ifconfig"]]

@@ -8,7 +8,9 @@ import pytest
 from fastapi.testclient import TestClient
 
 from _contracts import ComponentReport, ComponentStatus, SetupTaskKind
+from _paths import RESOURCES_DIR
 from _v3.component_routes import ComponentRegistry
+from _v3.pages import install_pages
 from _v3.production import STATIC_V3
 from _v3_app import build_sandbox_runtime, create_app, export_openapi_document
 from tests.api.conftest import TEST_TOKEN, lan_client, lan_headers, local_client, local_headers
@@ -256,6 +258,38 @@ def test_phone_page_reachable_from_lan_but_setup_is_local(tmp_path):
     assert remote.get("/openapi.json", headers=lan_host).status_code == 403
     public = TestClient(app, client=("8.8.8.8", 5000), base_url="https://8.8.8.8:17945")
     assert public.get("/voice", headers={"Host": "8.8.8.8:17945"}).status_code == 403
+
+
+def test_favicons_served_on_local_and_lan_forbidden_on_public_and_fail_fast(tmp_path):
+    from fastapi import FastAPI
+
+    _rt, app = _app(tmp_path)
+    local = local_client(app)
+    remote = lan_client(app)
+    lan_host = {"Host": "192.168.10.20:17945"}
+    public = TestClient(app, client=("8.8.8.8", 5000), base_url="https://8.8.8.8:17945")
+
+    expected = (
+        ("/favicon.svg", RESOURCES_DIR / "ollama-voice-input.svg", "image/svg+xml"),
+        ("/favicon.ico", RESOURCES_DIR / "ollama-voice-input.ico", "image/x-icon"),
+    )
+    for url, disk_path, mime in expected:
+        raw = disk_path.read_bytes()
+        r_local = local.get(url)
+        assert r_local.status_code == 200 and r_local.content == raw
+        assert r_local.headers.get("cache-control") == "no-cache"
+        assert mime in (r_local.headers.get("content-type") or "")
+
+        r_lan = remote.get(url, headers=lan_host)
+        assert r_lan.status_code == 200 and r_lan.content == raw
+
+        r_pub = public.get(url, headers={"Host": "8.8.8.8:17945"})
+        assert r_pub.status_code == 403
+
+    empty_res = tmp_path / "empty-resources"
+    empty_res.mkdir()
+    with pytest.raises(RuntimeError, match="resources 缺少图标文件"):
+        install_pages(FastAPI(), STATIC_V3, resources_dir=empty_res)
 
 
 @pytest.mark.parametrize("method,path", LEGACY_PATHS)

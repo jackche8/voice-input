@@ -12,11 +12,13 @@ from _contracts import OLLAMA_VERSION
 from _paths import (
     APP_DISPLAY_NAME,
     APP_ID,
+    APP_USER_MODEL_ID,
     ASR_RUNTIME_DIRNAME,
     DEB_LAUNCHER,
     DEB_PROGRAM_ROOT,
     INTERNAL_SERVER_FLAG,
     PROGRAM_ROOT,
+    RESOURCES_DIR,
     AppPaths,
     app_command,
     asr_runtime_root,
@@ -169,3 +171,8 @@ def test_pictures_dir_across_linux_windows_and_macos():
     assert pictures_dir({}, os_name="windows") == Path.home() / "Pictures"
     assert pictures_dir({"HOME": "/Users/bob"}, os_name="macos") == Path("/Users/bob/Pictures")
     assert pictures_dir({}, os_name="macos") == Path.home() / "Pictures"
+
+
+def test_app_user_model_id_and_resources_dir_single_source():
+    assert APP_USER_MODEL_ID == "io.github.jackche8.ollama-voice-input"
+    assert RESOURCES_DIR == PROGRAM_ROOT / "resources"

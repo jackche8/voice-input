@@ -19,6 +19,7 @@ import httpx
 from _atomic_file import atomic_write_bytes
 from _contracts import ErrorCode, LogicError, SetupProgress
 from _paths import PROGRAM_ROOT, AppPaths, asr_runtime_root
+from _platform.child_process import windows_subprocess_kwargs
 from _platform.protocol import OsName
 from _supervision.gpu_preflight import query_gpus
 from _v3.release_download import download_verified, extract_archive
@@ -115,7 +116,15 @@ def _install_uv(paths: AppPaths, os_name: OsName, machine: str, client: httpx.Cl
 
 
 def _run_uv(run: Runner, argv: list[str], env: Mapping[str, str], what: str) -> None:
-    proc = run(argv, env=dict(env), capture_output=True, text=True, timeout=INSTALL_TIMEOUT_S, check=False)
+    proc = run(
+        argv,
+        env={**env, "PYTHONUTF8": "1"},
+        capture_output=True,
+        text=True,
+        timeout=INSTALL_TIMEOUT_S,
+        check=False,
+        **windows_subprocess_kwargs(encoding="utf-8", errors="replace"),
+    )
     if proc.returncode != 0:
         tail = (proc.stderr or proc.stdout or "").strip()[-600:]
         raise LogicError(ErrorCode.dependency_failed, f"{what}失败（退出码 {proc.returncode}）：{tail}")

@@ -20,6 +20,7 @@ from pathlib import Path
 import httpx
 
 from _contracts import ErrorCode, LogicError, SetupProgress
+from _platform.child_process import windows_subprocess_kwargs
 from _v3.release_download import download_verified, extract_archive, percent
 from _v3.setup_probe import probe_asr_weights
 from _v3.setup_tasks import ProgressFn, SetupAction
@@ -91,6 +92,13 @@ def _remove_dir(path: Path) -> None:
         shutil.rmtree(path)
 
 
+def _remove_existing_path(path: Path) -> None:
+    if path.is_symlink() or path.is_file():
+        path.unlink()
+    elif path.exists():
+        shutil.rmtree(path)
+
+
 def ollama_install_cleanup(install_dir: Path) -> None:
     """删除下载文件与解压目录（安装结束时、或重试前清理上次中断的半成品；不碰已安装好的 install_dir）。"""
     download, staging = _ollama_partials(install_dir)
@@ -126,6 +134,8 @@ def ollama_install_action(
             extract_archive(download, asset, staging, run=run)
             if not (staging / binary_rel).is_file():
                 raise LogicError(ErrorCode.dependency_failed, f"发行包 {asset} 内没有 {binary_rel}")
+            if install_dir.exists() or install_dir.is_symlink():
+                _remove_existing_path(install_dir)
             os.replace(staging, install_dir)
         finally:
             ollama_install_cleanup(install_dir)
@@ -152,8 +162,14 @@ def asr_download_action(
         log_path.parent.mkdir(parents=True, exist_ok=True)
         total = {"bytes": 0}
         with log_path.open("w", encoding="utf-8") as log:
-            proc = popen([str(python), str(worker), repo_id, str(model_dir)],
-                         stdout=subprocess.PIPE, stderr=log, text=True, env=env)
+            proc = popen(
+                [str(python), str(worker), repo_id, str(model_dir)],
+                stdout=subprocess.PIPE,
+                stderr=log,
+                text=True,
+                env={**env, "PYTHONUTF8": "1"},
+                **windows_subprocess_kwargs(encoding="utf-8", errors="replace"),
+            )
 
             def read_stdout() -> None:
                 for line in proc.stdout:

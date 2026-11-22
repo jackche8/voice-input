@@ -20,6 +20,9 @@ if str(ROOT) not in sys.path:
 
 from _version import APP_VERSION  # noqa: E402
 
+WIN_ICON = ROOT / "resources" / "ollama-voice-input.ico"
+MAC_ICON = ROOT / "resources" / "ollama-voice-input.icns"
+
 datas: list[tuple[str, str]] = [
     (str(ROOT / "static" / "v3"), "static/v3"),
     (str(ROOT / "_v3" / "asr_download_worker.py"), "_v3"),
@@ -31,6 +34,7 @@ datas: list[tuple[str, str]] = [
     (str(ROOT / "_procfs.py"), "_asr_runtime"),
     # 运行时图标资源与双许可/第三方合规文档（严禁将 .svg 传给 EXE/BUNDLE icon=）
     (str(ROOT / "resources" / "ollama-voice-input.svg"), "resources"),
+    (str(ROOT / "resources" / "ollama-voice-input.ico"), "resources"),
     (str(ROOT / "LICENSE"), "."),
     (str(ROOT / "COMMERCIAL.md"), "."),
     (str(ROOT / "THIRD-PARTY-NOTICES.md"), "."),
@@ -118,7 +122,7 @@ exe = EXE(
     upx=False,
     console=False,
     disable_windowed_traceback=False,
-    icon=None,
+    icon=str(WIN_ICON) if sys.platform == "win32" else None,
 )
 
 coll = COLLECT(
@@ -134,7 +138,7 @@ if sys.platform == "darwin":
     app = BUNDLE(
         coll,
         name="Ollama Voice Input.app",
-        icon=None,
+        icon=str(MAC_ICON),
         bundle_identifier="io.github.jackche8.ollama-voice-input",
         info_plist={
             "CFBundleName": "Ollama Voice Input",

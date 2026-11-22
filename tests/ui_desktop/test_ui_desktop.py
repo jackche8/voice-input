@@ -24,6 +24,7 @@ from _ui_desktop import (
     StudioTrayIcon,
     VoiceHudOverlay,
     compute_trailing_two_lines,
+    render_status_icon,
     render_status_image,
     theme,
 )
@@ -986,6 +987,19 @@ def test_tray_vector_icons_callbacks_and_safe_degradation(qapp: QApplication) ->
     badge_pt = QPoint(int(64 * 0.76), int(64 * 0.76))
     assert idle_img.pixelColor(badge_pt).rgb() == QColor(theme.STATE_OK_HEX).rgb()
     assert rec_img.pixelColor(badge_pt).rgb() == QColor(theme.STATE_RECORDING_HEX).rgb()
+
+    # 校验多尺寸托盘 QIcon 包含 64/48/32/24/20/16 槽位且重复 size 自动去重（适配 Windows 125%/150% DPI）
+    idle_icon = render_status_icon("idle")
+    expected_sizes = {(px, px) for px in (64, 48, 32, 24, 20, 16)}
+    assert {(s.width(), s.height()) for s in idle_icon.availableSizes()} == expected_sizes
+    for px in (64, 48, 32, 24, 20, 16):
+        pm = idle_icon.pixmap(QSize(px, px))
+        assert not pm.isNull()
+        assert (pm.width(), pm.height()) == (px, px)
+    dedup_icon = render_status_icon("idle", size=48)
+    dedup_sizes = [(s.width(), s.height()) for s in dedup_icon.availableSizes()]
+    assert len(dedup_sizes) == len(set(dedup_sizes))
+    assert set(dedup_sizes) == {(px, px) for px in (48, 32, 24, 20, 16)}
 
     events: list[object] = []
     # 1. 无系统托盘环境安全降级（offscreen 默认或显式返回 False）

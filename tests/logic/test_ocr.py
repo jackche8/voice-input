@@ -19,9 +19,11 @@ from _ocr import (
     default_ocr_languages,
     get_cached_languages,
     image_to_text,
+    list_tesseract_languages,
     prepare_ocr_image,
 )
 from _ocr_text import clean_cjk_spaces
+from _platform import child_process as cp_mod
 
 
 def test_default_languages_and_their_capability_labels_come_from_one_constant():
@@ -154,15 +156,14 @@ def test_tesseract_timeout_maps_to_error_code_timeout():
 
 
 def test_thread_safe_language_cache_and_clear(monkeypatch):
-    pytesseract = pytest.importorskip("pytesseract")
     calls = {"count": 0}
 
-    def fake_get_languages(config: str = ""):
+    def fake_list_languages():
         calls["count"] += 1
         return ["chi_sim", "eng"]
 
     clear_language_cache()
-    monkeypatch.setattr(pytesseract, "get_languages", fake_get_languages)
+    monkeypatch.setattr(_ocr, "list_tesseract_languages", fake_list_languages)
     try:
         with ThreadPoolExecutor(max_workers=8) as pool:
             results = list(pool.map(lambda _: get_cached_languages(), range(16)))
@@ -173,6 +174,38 @@ def test_thread_safe_language_cache_and_clear(monkeypatch):
         assert calls["count"] == 2
     finally:
         clear_language_cache()
+
+
+def test_list_tesseract_languages_runs_hidden_and_parses_headers_and_errors(monkeypatch):
+    seen_kw: list[dict] = []
+
+    def fake_run(cmd, **kw):
+        seen_kw.append({"cmd": list(cmd), **kw})
+        out = 'List of available languages in "/usr/share/tesseract-ocr/5/tessdata/" (4):\nchi_sim\nchi_tra\neng\nchi_sim\nosd\n'
+        return subprocess.CompletedProcess(cmd, 0, out, "")
+
+    monkeypatch.setattr(cp_mod.os, "name", "nt")
+    langs = list_tesseract_languages(run=fake_run, tesseract_cmd="tesseract.exe")
+    assert langs == ["chi_sim", "chi_tra", "eng", "osd"]
+    assert seen_kw[0]["cmd"] == ["tesseract.exe", "--list-langs"]
+    assert seen_kw[0]["creationflags"] == cp_mod.CREATE_NO_WINDOW
+    assert seen_kw[0]["encoding"] == "utf-8" and seen_kw[0]["errors"] == "replace"
+
+    # Tesseract 3 风格输出到 stderr 也能解析
+    stderr_only = lambda cmd, **kw: subprocess.CompletedProcess(cmd, 0, "", "List of available languages (2):\neng\nchi_sim\n")  # noqa: E731
+    assert list_tesseract_languages(run=stderr_only, tesseract_cmd="tesseract") == ["eng", "chi_sim"]
+
+    # 非零退出与命令缺失均抛 LogicError(ocr_failed)
+    with pytest.raises(LogicError) as bad_rc:
+        list_tesseract_languages(run=lambda cmd, **kw: subprocess.CompletedProcess(cmd, 1, "", "boom"), tesseract_cmd="tesseract")
+    assert bad_rc.value.code == ErrorCode.ocr_failed and "boom" in bad_rc.value.message
+
+    def missing_bin(cmd, **kw):
+        raise FileNotFoundError("tesseract")
+
+    with pytest.raises(LogicError) as missing:
+        list_tesseract_languages(run=missing_bin, tesseract_cmd="tesseract")
+    assert missing.value.code == ErrorCode.ocr_failed
 
 
 def test_tesseract_error_maps_language_missing():

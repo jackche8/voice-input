@@ -1798,3 +1798,67 @@ def test_startup_issues_wayland_and_x11():
         conflicts=lambda b: ConflictScan((), ()),
     )
     assert ok == []
+
+
+def test_apply_qt_app_icon_prefers_ico_and_falls_back_to_svg(tmp_path: Path, monkeypatch):
+    from types import SimpleNamespace
+
+    from _desktop.ui_bridge import apply_qt_app_icon
+    from _paths import PROGRAM_ROOT
+
+    class _FakeIcon:
+        def __init__(self, path: str, *, null: bool = False) -> None:
+            self.path = path
+            self._null = null
+
+        def isNull(self) -> bool:
+            return self._null
+
+    class _FakeApp:
+        def __init__(self) -> None:
+            self.icon = None
+
+        def setWindowIcon(self, icon) -> None:
+            self.icon = icon
+
+    # 1. 同时存在 .ico 与 .svg 时优先选 .ico
+    root_both = tmp_path / "both"
+    (root_both / "resources").mkdir(parents=True)
+    ico_file = root_both / "resources" / "ollama-voice-input.ico"
+    svg_file = root_both / "resources" / "ollama-voice-input.svg"
+    ico_file.write_bytes(b"ico")
+    svg_file.write_text("<svg/>", encoding="utf-8")
+    app1 = _FakeApp()
+    assert apply_qt_app_icon(app1, SimpleNamespace(program_root=root_both), icon_factory=_FakeIcon) is True
+    assert app1.icon.path == str(ico_file)
+
+    # 2. .ico 加载为空或缺失时回退 .svg
+    app2 = _FakeApp()
+    assert (
+        apply_qt_app_icon(
+            app2,
+            SimpleNamespace(program_root=root_both),
+            icon_factory=lambda p: _FakeIcon(p, null=p.endswith(".ico")),
+        )
+        is True
+    )
+    assert app2.icon.path == str(svg_file)
+
+    ico_file.unlink()
+    app3 = _FakeApp()
+    assert apply_qt_app_icon(app3, SimpleNamespace(program_root=root_both), icon_factory=_FakeIcon) is True
+    assert app3.icon.path == str(svg_file)
+
+    # 3. 均缺失返回 False 且不调用 setWindowIcon
+    app4 = _FakeApp()
+    assert apply_qt_app_icon(app4, SimpleNamespace(program_root=tmp_path / "empty"), icon_factory=_FakeIcon) is False
+    assert app4.icon is None
+
+    # 4. 真实 Qt QIcon 加载仓库单源 .ico（headless offscreen）
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtGui import QGuiApplication
+
+    _qt_app = QGuiApplication.instance() or QGuiApplication([])
+    app_real = _FakeApp()
+    assert apply_qt_app_icon(app_real, SimpleNamespace(program_root=PROGRAM_ROOT)) is True
+    assert app_real.icon is not None and not app_real.icon.isNull()

@@ -48,6 +48,7 @@ def test_specs_commands_env_ports_and_timeouts(paths):
     assert ollama.env["OLLAMA_HOST"] == f"127.0.0.1:{DEFAULT_OLLAMA_PORT}" and ollama.env["OLLAMA_MODELS"] == str(paths.ollama_models)
     assert asr.argv[:9] == (str(paths.asr_python), "-m", "runtimes.asr", "serve", "--host", "127.0.0.1", "--port", str(ASR_PORT), "--model")
     assert asr.env["PYTHONPATH"] == str(paths.program_root) and asr.env["HF_HUB_OFFLINE"] == "1" and asr.cwd == paths.program_root
+    assert asr.env["PYTHONUTF8"] == "1" and server.env["PYTHONUTF8"] == "1"
     assert server.argv[:5] == (sys.executable, "-m", "uvicorn", "--factory", "app:create_production_app")
     assert server.argv[server.argv.index("--port") + 1] == str(SERVER_PORT) and str(paths.cert) in server.argv
     assert [(s.start_timeout_s, s.stop_timeout_s) for s in specs.values()] == [(60, 10), (300, 30), (60, 10)]
@@ -218,3 +219,31 @@ def test_port_owner_on_macos_and_windows(os_name, outputs, expected):
         return subprocess.CompletedProcess(cmd, 0 if out else 1, out, "")
 
     assert port_owner(17947, os_name=os_name, run=run, in_use=lambda p: True) == expected
+
+
+def test_windows_port_owner_passes_oem_and_no_window_flags(monkeypatch):
+    from _platform import child_process as cp_mod
+
+    seen: list[tuple[list[str], dict]] = []
+
+    def fake_run(cmd, **kw):
+        seen.append((list(cmd), dict(kw)))
+        if cmd[0] == "netstat":
+            return subprocess.CompletedProcess(cmd, 0, "  TCP    0.0.0.0:17947   0.0.0.0:0   LISTENING   321\n", "")
+        return subprocess.CompletedProcess(cmd, 0, '"ollama.exe","321","Console"\n', "")
+
+    # POSIX 不传 creationflags 或 oem 编码
+    monkeypatch.setattr(cp_mod.os, "name", "posix")
+    assert port_owner(17947, os_name="windows", run=fake_run, in_use=lambda p: True) == "PID 321（ollama.exe）"
+    assert len(seen) == 2
+    for _cmd, kw in seen:
+        assert "creationflags" not in kw and "encoding" not in kw and kw["errors"] == "replace"
+
+    # Windows(nt) 传 CREATE_NO_WINDOW + encoding="oem" + errors="replace"
+    seen.clear()
+    monkeypatch.setattr(cp_mod.os, "name", "nt")
+    assert port_owner(17947, os_name="windows", run=fake_run, in_use=lambda p: True) == "PID 321（ollama.exe）"
+    assert len(seen) == 2
+    for _cmd, kw in seen:
+        assert kw["creationflags"] == cp_mod.CREATE_NO_WINDOW
+        assert kw["encoding"] == "oem" and kw["errors"] == "replace"

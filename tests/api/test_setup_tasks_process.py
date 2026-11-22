@@ -162,3 +162,33 @@ def test_disk_shortage_unknown_kind_dead_worker_and_retention(tmp_path):
     m.latest(PULL)
     assert len(list(world.tasks_dir.glob("*.json"))) == TASK_RETENTION
     assert not (world.tasks_dir / "old00.json").exists()
+
+
+def test_spawn_worker_passes_utf8_and_windows_no_window_flags(tmp_path, monkeypatch):
+    from _platform import child_process as cp_mod
+
+    seen: list[dict] = []
+
+    class _DummyProc:
+        pid = 9999
+        returncode = None
+
+        def poll(self):
+            return None
+
+    def fake_popen(argv, **kw):
+        seen.append({"argv": list(argv), **kw})
+        return _DummyProc()
+
+    world = World(tmp_path)
+    monkeypatch.setattr(cp_mod, "_is_nt", lambda: False)
+    world.manager(popen=fake_popen).start(PULL)
+    assert seen[-1]["start_new_session"] is True
+    assert "creationflags" not in seen[-1] and "errors" not in seen[-1]
+    assert seen[-1]["env"]["PYTHONUTF8"] == "1"
+
+    monkeypatch.setattr(cp_mod, "_is_nt", lambda: True)
+    world.manager(popen=fake_popen).start(INSTALL)
+    assert "start_new_session" not in seen[-1] and "errors" not in seen[-1]
+    assert seen[-1]["creationflags"] == (cp_mod.CREATE_NO_WINDOW | cp_mod.CREATE_NEW_PROCESS_GROUP)
+    assert seen[-1]["env"]["PYTHONUTF8"] == "1"

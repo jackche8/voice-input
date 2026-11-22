@@ -11,8 +11,12 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Protocol
 
-CREATE_NEW_PROCESS_GROUP = 0x00000200
-CREATE_NO_WINDOW = 0x08000000
+from _platform.child_process import (
+    CREATE_NEW_PROCESS_GROUP,
+    CREATE_NO_WINDOW,
+    windows_subprocess_kwargs,
+)
+
 JOB_OBJECT_EXTENDED_LIMIT_INFORMATION_CLASS = 9
 JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000
 PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
@@ -149,8 +153,23 @@ def kill_recorded(pid: int, identity: str | None, *, api: JobApi, run=subprocess
     current = api.creation_time(pid)
     if current is None or current != identity:
         return []
-    run(["taskkill", "/PID", str(pid), "/T", "/F"], capture_output=True, text=True, timeout=30, check=False)
+    run(
+        ["taskkill", "/PID", str(pid), "/T", "/F"],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+        **windows_subprocess_kwargs(encoding="oem", errors="replace"),
+    )
     return [pid]
 
 
-__all__ = ["CtypesJobApi", "JobApi", "WindowsChild", "kill_recorded", "spawn"]
+__all__ = [
+    "CREATE_NEW_PROCESS_GROUP",
+    "CREATE_NO_WINDOW",
+    "CtypesJobApi",
+    "JobApi",
+    "WindowsChild",
+    "kill_recorded",
+    "spawn",
+]

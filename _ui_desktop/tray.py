@@ -97,9 +97,9 @@ def watch_tray_host(on_registered: Callable[[], None], parent: QObject) -> QObje
 
 
 def render_status_icon(state: str = "idle", size: int = 64) -> QIcon:
-    """生成多尺寸自适应 QIcon。"""
+    """生成多尺寸自适应 QIcon（含 Windows 125%/150% DPI 所需的 20px/48px 槽位）。"""
     icon = QIcon()
-    for target_px in (size, 32, 24, 16):
+    for target_px in dict.fromkeys((size, 48, 32, 24, 20, 16)):
         img = render_status_image(state=state, size=target_px)
         icon.addPixmap(QPixmap.fromImage(img))
     return icon

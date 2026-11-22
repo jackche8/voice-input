@@ -14,6 +14,7 @@ import subprocess
 from collections.abc import Callable
 from pathlib import Path
 
+from _platform.child_process import windows_subprocess_kwargs
 from _platform.detect import detect_os
 from _platform.protocol import OsName
 
@@ -69,7 +70,8 @@ def _macos_owner(port: int, run: Runner) -> str:
 
 
 def _windows_owner(port: int, run: Runner) -> str:
-    proc = run(["netstat", "-ano", "-p", "TCP"], capture_output=True, text=True, timeout=10, check=False)
+    win_kw = windows_subprocess_kwargs(encoding="oem", errors="replace")
+    proc = run(["netstat", "-ano", "-p", "TCP"], capture_output=True, text=True, timeout=10, check=False, **win_kw)
     pid = None
     for line in proc.stdout.splitlines():
         fields = line.split()
@@ -78,7 +80,14 @@ def _windows_owner(port: int, run: Runner) -> str:
             break
     if pid is None:
         return f"未能识别占用进程（netstat 退出码 {proc.returncode}）"
-    listing = run(["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"], capture_output=True, text=True, timeout=10, check=False)
+    listing = run(
+        ["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"],
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+        **win_kw,
+    )
     row = next(csv.reader(io.StringIO(listing.stdout)), None)
     return f"PID {pid}（{row[0]}）" if row else f"PID {pid}"
 

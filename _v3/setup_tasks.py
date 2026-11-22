@@ -23,7 +23,7 @@ from pathlib import Path
 from _atomic_file import atomic_write_bytes
 from _contracts import ErrorCode, LogicError, SetupProgress, SetupTask, SetupTaskKind, SetupTaskState
 from _paths import PROGRAM_ROOT
-from _platform.child_process import process_identity
+from _platform.child_process import process_identity, windows_subprocess_kwargs
 
 ProgressFn = Callable[[SetupProgress], None]
 SetupAction = Callable[[ProgressFn], str]
@@ -33,7 +33,6 @@ TASK_RETENTION = 20
 GIB = 1024**3
 DISK_MARGIN_BYTES = GIB
 INTERRUPTED_BY_RESTART = "安装进程已中断（服务重启或被结束），可重试"
-_CREATE_NEW_PROCESS_GROUP = 0x00000200
 
 
 def now_iso() -> str:
@@ -169,9 +168,10 @@ class SetupTaskManager:
         self._log_dir.mkdir(parents=True, exist_ok=True)
         argv = [*self._worker_argv, "--task-file", str(self._file(task.task_id)), "--kind", task.kind.value,
                 "--owner-pid", str(self._owner_pid), "--owner-identity", self._owner_identity or ""]
-        session = {"creationflags": _CREATE_NEW_PROCESS_GROUP} if os.name == "nt" else {"start_new_session": True}
+        session = windows_subprocess_kwargs(new_process_group=True, errors=None) or {"start_new_session": True}
+        env = {**self._environ, "PYTHONUTF8": "1"}
         with open(self._log_dir / f"setup-{task.kind.value}.log", "ab") as log:
-            proc = self._popen(argv, cwd=str(self._cwd), env=self._environ, stdin=subprocess.DEVNULL, stdout=log,
+            proc = self._popen(argv, cwd=str(self._cwd), env=env, stdin=subprocess.DEVNULL, stdout=log,
                                stderr=subprocess.STDOUT, close_fds=True, **session)
         self._children.append(proc)
         return proc

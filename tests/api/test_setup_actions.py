@@ -13,6 +13,7 @@ import httpx
 import pytest
 
 from _contracts import LogicError, SetupProgress
+from _platform import child_process as cp_mod
 from _v3.lan_access import list_physical_lan_ipv4, load_or_create_token
 from _v3.setup_actions import (
     asr_download_action,
@@ -20,7 +21,7 @@ from _v3.setup_actions import (
     ollama_install_action,
     ollama_pull_action,
 )
-from _v3.setup_probe import probe_asr_sidecar, probe_asr_weights, probe_ollama
+from _v3.setup_probe import probe_asr_sidecar, probe_asr_weights, probe_ollama, session_type
 
 
 def _client(handler) -> httpx.Client:
@@ -161,9 +162,11 @@ class FakePopen:
         self.stderr_text = stderr_text
         self.polls = 0
         self.args = None
+        self.kwargs = None
 
     def __call__(self, args, **kw):
         self.args = args
+        self.kwargs = dict(kw)
         kw["stderr"].write(self.stderr_text)
         self.stdout = io.StringIO(json.dumps({"total_bytes": 1000}) + "\n")
         return self
@@ -285,3 +288,205 @@ def test_token_file_created_0600_and_stable(tmp_path):
     assert len(first) >= 24
     assert stat.S_IMODE(os.stat(path).st_mode) == 0o600
     assert load_or_create_token(path) == first
+
+
+def test_lan_ip_listing_windows_filters_virtual_adapters_and_falls_back_only_on_error(monkeypatch):
+    ipconfig_out = (
+        "\nWindows IP 配置\n\n"
+        "无线局域网适配器 WLAN:\n"
+        "   IPv4 地址 . . . . . . . . . . . . : 192.168.1.25(首选)\n"
+        "   自动配置 IPv4 地址 . . . . . . . : 169.254.10.2(首选)\n"
+        "   默认网关. . . . . . . . . . . . . : 192.168.1.1\n\n"
+        "Ethernet adapter Ethernet:\n"
+        "   IPv4 Address. . . . . . . . . . . : 10.0.0.9(Preferred)\n\n"
+        "以太网适配器 有线:\n"
+        "   IPv4 地址 . . . . . . . . . . . . ： 172.16.8.4(首选)\n\n"
+        "以太网适配器 vEthernet (WSL (Hyper-V firewall)):\n"
+        "   IPv4 地址 . . . . . . . . . . . . : 172.24.16.1(首选)\n\n"
+        "Ethernet adapter VMware Network Adapter VMnet8:\n"
+        "   IPv4 Address. . . . . . . . . . . : 192.168.152.1\n\n"
+        "Ethernet adapter VirtualBox Host-Only Network:\n"
+        "   IPv4 Address. . . . . . . . . . . : 192.168.56.1\n\n"
+        "以太网适配器 DockerNAT:\n"
+        "   IPv4 地址 . . . . . . . . . . . . : 10.0.75.1\n\n"
+        "未知适配器 Tailscale:\n"
+        "   IPv4 地址 . . . . . . . . . . . . : 100.64.0.1\n\n"
+        "以太网适配器 TAP-Windows Adapter V9:\n"
+        "   IPv4 地址 . . . . . . . . . . . . : 10.9.0.5\n\n"
+        "以太网适配器 蓝牙网络连接:\n"
+        "   IPv4 地址 . . . . . . . . . . . . : 192.168.137.1\n\n"
+        "隧道适配器 Teredo Tunneling Pseudo-Interface:\n"
+        "   IPv4 地址 . . . . . . . . . . . . : 10.20.30.40\n"
+    )
+    seen_kw: list[dict] = []
+
+    def win_run(cmd, **kw):
+        seen_kw.append(dict(kw))
+        assert cmd == ["ipconfig"]
+        return subprocess.CompletedProcess(cmd, 0, stdout=ipconfig_out, stderr="")
+
+    monkeypatch.setattr(cp_mod.os, "name", "nt")
+    probe_called = {"n": 0}
+    ips = list_physical_lan_ipv4(
+        run=win_run,
+        os_name="windows",
+        socket_probe=lambda: (probe_called.__setitem__("n", probe_called["n"] + 1) or ["192.168.99.9"]),
+    )
+    assert ips == ["192.168.1.25", "10.0.0.9", "172.16.8.4"]
+    assert probe_called["n"] == 0
+    assert seen_kw[0]["creationflags"] == cp_mod.CREATE_NO_WINDOW
+    assert seen_kw[0]["encoding"] == "oem" and seen_kw[0]["errors"] == "replace"
+
+    # returncode == 0 但全部为虚拟网卡或离线 → 返回 []，严禁触发 socket_probe 回退
+    virtual_only = "以太网适配器 vEthernet (WSL):\n   IPv4 地址 . . . : 172.24.16.1(首选)\n"
+    offline = list_physical_lan_ipv4(
+        run=lambda cmd, **kw: subprocess.CompletedProcess(cmd, 0, stdout=virtual_only, stderr=""),
+        os_name="windows",
+        socket_probe=lambda: (probe_called.__setitem__("n", probe_called["n"] + 1) or ["192.168.99.9"]),
+    )
+    assert offline == [] and probe_called["n"] == 0
+
+    # 命令失败（FileNotFoundError / returncode != 0）时才回退 socket_probe 且走同一过滤规则
+    def missing_ipconfig(cmd, **kw):
+        raise FileNotFoundError("ipconfig")
+
+    fb1 = list_physical_lan_ipv4(
+        run=missing_ipconfig,
+        os_name="windows",
+        socket_probe=lambda: ["127.0.0.1", "169.254.1.2", "198.18.0.1", "192.168.77.8"],
+    )
+    assert fb1 == ["192.168.77.8"]
+    fb2 = list_physical_lan_ipv4(
+        run=lambda cmd, **kw: subprocess.CompletedProcess(cmd, 1, stdout="", stderr="err"),
+        os_name="windows",
+        socket_probe=lambda: ["10.1.1.2"],
+    )
+    assert fb2 == ["10.1.1.2"]
+
+
+def test_lan_ip_listing_macos_filters_virtual_and_down_and_falls_back_only_on_error():
+    ifconfig_out = (
+        "lo0: flags=8049<UP,LOOPBACK,RUNNING,MULTICAST> mtu 16384\n"
+        "\tinet 127.0.0.1 netmask 0xff000000\n"
+        "en0: flags=8863<UP,BROADCAST,SMART,RUNNING,SIMPLEX,MULTICAST> mtu 1500\n"
+        "\tinet6 fe80::1%en0 prefixlen 64\n"
+        "\tinet 192.168.50.12 netmask 0xffffff00 broadcast 192.168.50.255\n"
+        "en1: flags=8822<BROADCAST,SMART,SIMPLEX,MULTICAST> mtu 1500\n"
+        "\tinet 192.168.50.99 netmask 0xffffff00 broadcast 192.168.50.255\n"
+        "utun3: flags=8051<UP,POINTOPOINT,RUNNING,MULTICAST> mtu 1380\n"
+        "\tinet 10.8.0.2 --> 10.8.0.1 netmask 0xffffffff\n"
+        "bridge100: flags=8863<UP,BROADCAST,SMART,RUNNING,SIMPLEX,MULTICAST> mtu 1500\n"
+        "\tinet 192.168.64.1 netmask 0xffffff00 broadcast 192.168.64.255\n"
+        "awdl0: flags=8943<UP,BROADCAST,RUNNING,PROMISC,SIMPLEX,MULTICAST> mtu 1500\n"
+        "\tinet 10.99.0.1 netmask 0xffffff00\n"
+        "en5: flags=8863<UP,BROADCAST,SMART,RUNNING,SIMPLEX,MULTICAST> mtu 1500\n"
+        "\tinet 169.254.2.3 netmask 0xffff0000\n"
+        "\tinet 10.1.2.3 netmask 0xffffff00 broadcast 10.1.2.255\n"
+    )
+    probe_called = {"n": 0}
+    ips = list_physical_lan_ipv4(
+        run=lambda cmd, **kw: subprocess.CompletedProcess(cmd, 0, stdout=ifconfig_out, stderr=""),
+        os_name="macos",
+        socket_probe=lambda: (probe_called.__setitem__("n", probe_called["n"] + 1) or ["192.168.1.1"]),
+    )
+    assert ips == ["192.168.50.12", "10.1.2.3"] and probe_called["n"] == 0
+
+    # returncode == 0 但无可用物理网卡 → 返回 []，不触发 socket_probe
+    empty = list_physical_lan_ipv4(
+        run=lambda cmd, **kw: subprocess.CompletedProcess(cmd, 0, stdout="lo0: flags=8049<UP,LOOPBACK>\n\tinet 127.0.0.1\n", stderr=""),
+        os_name="macos",
+        socket_probe=lambda: (probe_called.__setitem__("n", probe_called["n"] + 1) or ["192.168.1.1"]),
+    )
+    assert empty == [] and probe_called["n"] == 0
+
+    # ifconfig 命令失败时才回退
+    fb = list_physical_lan_ipv4(
+        run=lambda cmd, **kw: subprocess.CompletedProcess(cmd, 127, stdout="", stderr="not found"),
+        os_name="macos",
+        socket_probe=lambda: ["172.16.0.9", "169.254.0.1"],
+    )
+    assert fb == ["172.16.0.9"]
+
+
+def test_session_type_cross_platform():
+    assert session_type({}, os_name="windows") == "windows"
+    assert session_type({}, os_name="macos") == "macos"
+    assert session_type({"XDG_SESSION_TYPE": "Wayland"}, os_name="linux") == "wayland"
+    assert session_type({}, os_name="linux") == "unknown"
+
+
+def test_ollama_install_replaces_existing_partial_dir_or_file(tmp_path):
+    blob = b"fake-tar-zst-bytes" * 10
+    digest = hashlib.sha256(blob).hexdigest()
+
+    def extract(cmd):
+        staging = Path(cmd[cmd.index("-C") + 1])
+        (staging / "bin").mkdir(parents=True)
+        (staging / "bin" / "ollama").write_text("#!/bin/sh\n")
+
+    # 1. 残留半成品目录（缺少 binary）
+    install_dir = tmp_path / "ollama-partial-dir"
+    (install_dir / "leftover").mkdir(parents=True)
+    (install_dir / "leftover" / "stale.txt").write_text("stale")
+    action_dir = ollama_install_action(
+        version="0.40.16",
+        install_dir=install_dir,
+        binary=install_dir / "bin" / "ollama",
+        asset="ollama-linux-amd64.tar.zst",
+        client_factory=lambda: httpx.Client(transport=httpx.MockTransport(_release_handler(blob, digest))),
+        run=FakeRun(effect=extract),
+    )
+    assert "已安装" in action_dir(lambda _p: None)
+    assert (install_dir / "bin" / "ollama").is_file()
+    assert not (install_dir / "leftover").exists()
+
+    # 2. 残留普通文件占用了 install_dir 路径
+    file_dir = tmp_path / "ollama-file"
+    file_dir.write_text("stray file")
+    action_file = ollama_install_action(
+        version="0.40.16",
+        install_dir=file_dir,
+        binary=file_dir / "bin" / "ollama",
+        asset="ollama-linux-amd64.tar.zst",
+        client_factory=lambda: httpx.Client(transport=httpx.MockTransport(_release_handler(blob, digest))),
+        run=FakeRun(effect=extract),
+    )
+    assert "已安装" in action_file(lambda _p: None)
+    assert (file_dir / "bin" / "ollama").is_file()
+
+    # 3. 残留悬空符号链接占用了 install_dir 路径
+    link_dir = tmp_path / "ollama-broken-link"
+    link_dir.symlink_to(tmp_path / "nonexistent-target")
+    action_link = ollama_install_action(
+        version="0.40.16",
+        install_dir=link_dir,
+        binary=link_dir / "bin" / "ollama",
+        asset="ollama-linux-amd64.tar.zst",
+        client_factory=lambda: httpx.Client(transport=httpx.MockTransport(_release_handler(blob, digest))),
+        run=FakeRun(effect=extract),
+    )
+    assert "已安装" in action_link(lambda _p: None)
+    assert (link_dir / "bin" / "ollama").is_file()
+
+
+def test_asr_download_passes_utf8_and_windows_no_window_flags(tmp_path, monkeypatch):
+    python = tmp_path / "venv" / "python.exe"
+    python.parent.mkdir(parents=True)
+    python.write_text("")
+    model_dir = tmp_path / "models" / "Qwen3-ASR-1.7B"
+    popen = FakePopen(model_dir=model_dir, returncode=0, write_weights=True)
+    monkeypatch.setattr(cp_mod.os, "name", "nt")
+    action = asr_download_action(
+        python=python,
+        worker=Path("/w.py"),
+        repo_id="Qwen/Qwen3-ASR-1.7B",
+        model_dir=model_dir,
+        log_path=tmp_path / "log" / "a.log",
+        env={"HF_HOME": str(tmp_path / "hf")},
+        popen=popen,
+        sleep=lambda _s: None,
+    )
+    assert "已下载" in action(lambda _p: None)
+    assert popen.kwargs["env"]["PYTHONUTF8"] == "1"
+    assert popen.kwargs["encoding"] == "utf-8" and popen.kwargs["errors"] == "replace"
+    assert popen.kwargs["creationflags"] == cp_mod.CREATE_NO_WINDOW

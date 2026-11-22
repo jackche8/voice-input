@@ -41,7 +41,7 @@ from _jobs import JobStore
 from _jobs_service import JobsService
 from _linux.conflicts import scan_hotkey_conflicts
 from _linux.evdev_keyboards import readable_keyboard_paths
-from _ocr import image_to_text
+from _ocr import image_to_text, list_tesseract_languages
 from _ocr_layout import extract_ocr_layout
 from _ollama import OllamaClient
 from _paths import INTERNAL_SETUP_WORKER_FLAG, PROGRAM_ROOT, STATIC_V3, AppPaths, default_app_paths, internal_subcommand
@@ -96,15 +96,9 @@ class SystemAdapters:
     portal_version: Callable[[str], tuple[int | None, str | None]] = dbus_portal_version
     ocr_languages: Callable[[], list[str]] | None = None
     keyboard_devices: Callable[[], list[str]] = readable_keyboard_paths
-    list_ips: Callable[[], list[str]] = list_physical_lan_ipv4
+    list_ips: Callable[[], list[str]] | None = None
     http_transport: httpx.BaseTransport | None = None
     spawn: Spawn = thread_spawn
-
-
-def _tesseract_languages() -> list[str]:
-    import pytesseract
-
-    return list(pytesseract.get_languages(config=""))
 
 
 def _client(base_url: str, adapters: SystemAdapters, *, timeout: httpx.Timeout | float) -> httpx.Client:
@@ -220,7 +214,17 @@ def _setup_service(
         )
         return scan_hotkey_conflicts(bindings, run=adapters.run, which=adapters.which)
 
+    ocr_languages = adapters.ocr_languages or list_tesseract_languages
+
     def capabilities(session: str):
+        if paths.os_name == "windows":
+            from _platform.windows import WindowsPlatformAdapter
+
+            return WindowsPlatformAdapter(which=adapters.which, ocr_languages=ocr_languages).capabilities()
+        if paths.os_name == "macos":
+            from _platform.macos import MacOSPlatformAdapter
+
+            return MacOSPlatformAdapter(temp_dir=paths.temp_dir, ocr_languages=ocr_languages).capabilities()
         return [
             *probe_capabilities(
                 session=session,
@@ -232,9 +236,8 @@ def _setup_service(
             hotkey_conflicts_capability(hotkey_scan),
         ]
 
-    ocr_languages = adapters.ocr_languages or _tesseract_languages
     probes = SetupProbes(
-        session=lambda: session_type(adapters.environ),
+        session=lambda: session_type(adapters.environ, os_name=paths.os_name),
         ollama=ollama_probe,
         asr_weights=lambda: probe_asr_weights(paths.asr_model_dir),
         capabilities=capabilities,
@@ -324,6 +327,7 @@ def compose_production_runtime(
         polish=polish,
         transcribe=transcribe,
     )
+    list_ips = adapters.list_ips or (lambda: list_physical_lan_ipv4(run=adapters.run, os_name=paths.os_name))
     return Runtime(
         config=config,
         history=history,
@@ -342,7 +346,7 @@ def compose_production_runtime(
         stream_provider=SidecarStreamProvider(asr),
         setup=_setup_service(paths, endpoints, adapters, config, components),
         components=components,
-        lan=LanAccessService(token=token, list_ips=adapters.list_ips, port=endpoints.port),
+        lan=LanAccessService(token=token, list_ips=list_ips, port=endpoints.port),
         upload_tmp=paths.upload_tmp,
     )
 
@@ -360,7 +364,7 @@ def build_production_app(
     ports = local_ports(environ)
     paths.config_root.mkdir(mode=0o700, parents=True, exist_ok=True)  # 首次运行：令牌与证书所在目录只给本用户
     token = load_or_create_token(paths.token)
-    adapters = SystemAdapters(environ=environ, ocr_languages=_tesseract_languages)
+    adapters = SystemAdapters(environ=environ, ocr_languages=list_tesseract_languages)
     endpoints = ProductionEndpoints(port=ports.server, sidecar_url=ports.asr_url, ollama_url=ports.ollama_url)
     runtime = compose_production_runtime(paths=paths, token=token, adapters=adapters, endpoints=endpoints)
     return create_app(runtime, static_v3=static_v3), paths

@@ -3,14 +3,17 @@ from __future__ import annotations
 
 import ast
 import json
+import os
 import re
+import struct
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-from _paths import PROGRAM_ROOT
+from _paths import APP_USER_MODEL_ID, PROGRAM_ROOT, RESOURCES_DIR
 
 ROOT = PROGRAM_ROOT
 SPEC_PATH = ROOT / "packaging" / "pyinstaller" / "ollama-voice-input.spec"
@@ -77,15 +80,23 @@ def test_pyinstaller_spec_compiles_and_enforces_single_exe_isolated_asr_and_lgpl
     assert ast.literal_eval(_kw(exe_call, "name")) == "ollama-voice-input"
     assert ast.literal_eval(_kw(exe_call, "console")) is False
     assert ast.literal_eval(_kw(exe_call, "upx")) is False
-    assert ast.literal_eval(_kw(exe_call, "icon")) is None
+    exe_icon = _kw(exe_call, "icon")
+    assert isinstance(exe_icon, ast.IfExp)
+    exe_icon_src = ast.get_source_segment(src, exe_icon) or ""
+    assert 'sys.platform == "win32"' in exe_icon_src and "WIN_ICON" in exe_icon_src and ".svg" not in exe_icon_src
+    assert ast.literal_eval(exe_icon.orelse) is None
+    assert 'WIN_ICON = ROOT / "resources" / "ollama-voice-input.ico"' in src
 
     coll_call = calls["COLLECT"][0]
     assert ast.literal_eval(_kw(coll_call, "upx")) is False
     assert ast.literal_eval(_kw(coll_call, "name")) == "ollama-voice-input"
 
     bundle_call = calls["BUNDLE"][0]
-    assert ast.literal_eval(_kw(bundle_call, "icon")) is None
-    assert ast.literal_eval(_kw(bundle_call, "bundle_identifier")) == "io.github.jackche8.ollama-voice-input"
+    bundle_icon = _kw(bundle_call, "icon")
+    bundle_icon_src = ast.get_source_segment(src, bundle_icon) or ""
+    assert "MAC_ICON" in bundle_icon_src and ".svg" not in bundle_icon_src
+    assert 'MAC_ICON = ROOT / "resources" / "ollama-voice-input.icns"' in src
+    assert ast.literal_eval(_kw(bundle_call, "bundle_identifier")) == APP_USER_MODEL_ID
 
     # collect_all 与按平台守卫的 _sounddevice_data 必须齐全
     for pkg in ("webview", "uvicorn", "av", "cryptography", "pythonnet", "clr_loader", "webview.platforms.cocoa"):
@@ -129,6 +140,8 @@ def test_pyinstaller_spec_compiles_and_enforces_single_exe_isolated_asr_and_lgpl
     assert '(str(ROOT / "runtimes" / "asr"), "_asr_runtime/runtimes/asr")' in src
     assert '(str(ROOT / "static" / "v3"), "static/v3")' in src
     assert '(str(ROOT / "_v3" / "asr_download_worker.py"), "_v3")' in src
+    assert '(str(ROOT / "resources" / "ollama-voice-input.svg"), "resources")' in src
+    assert '(str(ROOT / "resources" / "ollama-voice-input.ico"), "resources")' in src
     for doc in ("LICENSE", "COMMERCIAL.md", "THIRD-PARTY-NOTICES.md"):
         assert f'(str(ROOT / "{doc}"), ".")' in src
 
@@ -175,12 +188,19 @@ def test_macos_and_windows_packaging_scripts_and_inno_setup():
         r"LicenseFile=..\..\LICENSE",
         r"InfoBeforeFile=..\..\COMMERCIAL.md",
         "OutputBaseFilename=Ollama-Voice-Input-{#MyAppVersion}-windows-x64-setup",
+        r"SetupIconFile=..\..\resources\ollama-voice-input.ico",
+        r"UninstallDisplayIcon={app}\{#MyAppExeName}",
         "ollama-voice-input.exe",
         r'Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"',
         'ValueName: "OllamaVoiceInput"',
         "Flags: uninsdeletevalue",
     ):
         assert token in iss_src, f"installer.iss 缺少 {token!r}"
+    icon_lines = [line.strip() for line in iss_src.splitlines() if line.strip().startswith('Name: "{auto')]
+    assert len(icon_lines) == 2
+    for icon_line in icon_lines:
+        assert r'IconFilename: "{app}\{#MyAppExeName}"' in icon_line, icon_line
+        assert f'AppUserModelID: "{APP_USER_MODEL_ID}"' in icon_line, icon_line
     for forbidden in ("ollama-voice-input-window.exe", "IGNORE_SSL_ERRORS", "PYTHONHTTPSVERIFY", "SSL_CERT_FILE"):
         assert forbidden not in iss_src, f"installer.iss 违规包含 {forbidden!r}"
 
@@ -296,3 +316,63 @@ def test_dual_license_notices_and_packaging_readme_are_complete():
     readme = PKG_README.read_text(encoding="utf-8")
     for token in ("Ubuntu 24.04", "Windows", "macOS", "arm64", "SmartScreen", "xattr -cr"):
         assert token in readme, f"packaging/README.md 缺少 {token!r}"
+
+
+def test_single_source_icons_match_svg_and_binary_layouts():
+    """单源 SVG → .ico/.icns 校验：build_icons.py --check 逐字节一致，且 ICO 8 尺寸与 ICNS 11 块布局合规。"""
+    chk = subprocess.run(
+        [sys.executable, str(ROOT / "packaging" / "build_icons.py"), "--check"],
+        cwd=str(ROOT),
+        env={**os.environ, "QT_QPA_PLATFORM": "offscreen"},
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert chk.returncode == 0, chk.stdout + chk.stderr
+
+    ico = (RESOURCES_DIR / "ollama-voice-input.ico").read_bytes()
+    res, typ, count = struct.unpack_from("<HHH", ico, 0)
+    assert (res, typ, count) == (0, 1, 8)
+    found_ico_sizes: list[int] = []
+    for i in range(count):
+        w, h, _cc, _r, planes, bpp, payload_len, offset = struct.unpack_from("<BBBBHHII", ico, 6 + i * 16)
+        dim = 256 if w == 0 else w
+        assert h == w and planes == 1 and bpp == 32
+        found_ico_sizes.append(dim)
+        payload = ico[offset : offset + payload_len]
+        if dim == 256:
+            assert payload.startswith(b"\x89PNG\r\n\x1a\n")
+            assert struct.unpack_from(">II", payload, 16) == (256, 256)
+        else:
+            hdr = struct.unpack_from("<IiiHH", payload, 0)
+            assert hdr == (40, dim, dim * 2, 1, 32)
+            and_stride = ((dim + 31) // 32) * 4
+            assert len(payload) == 40 + dim * dim * 4 + dim * and_stride
+    assert found_ico_sizes == [16, 20, 24, 32, 48, 64, 128, 256]
+
+    icns = (RESOURCES_DIR / "ollama-voice-input.icns").read_bytes()
+    magic, total_len = struct.unpack_from(">4sI", icns, 0)
+    assert magic == b"icns" and total_len == len(icns)
+    pos = 8
+    found_chunks: list[tuple[bytes, int, int]] = []
+    while pos < len(icns):
+        tag, chunk_len = struct.unpack_from(">4sI", icns, pos)
+        data = icns[pos + 8 : pos + chunk_len]
+        assert data.startswith(b"\x89PNG\r\n\x1a\n")
+        w, h = struct.unpack_from(">II", data, 16)
+        found_chunks.append((tag, w, h))
+        pos += chunk_len
+    assert pos == len(icns)
+    assert found_chunks == [
+        (b"icp4", 16, 16),
+        (b"icp5", 32, 32),
+        (b"icp6", 64, 64),
+        (b"ic07", 128, 128),
+        (b"ic08", 256, 256),
+        (b"ic09", 512, 512),
+        (b"ic10", 1024, 1024),
+        (b"ic11", 32, 32),
+        (b"ic12", 64, 64),
+        (b"ic13", 256, 256),
+        (b"ic14", 512, 512),
+    ]

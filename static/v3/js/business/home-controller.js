@@ -165,11 +165,16 @@
         message: "",
         history: { loading: true, message: null }
       });
+      var lanPromise = client.call(OP.lanAccess).then(function (data) {
+        return { ok: true, data: data };
+      }, function (err) {
+        return { ok: false, error: err };
+      });
       return Promise.all([
         client.call(OP.check),
         client.call(OP.configGet),
         client.call(OP.history, { query: { limit: HISTORY_PAGE_SIZE, offset: 0 } }),
-        client.call(OP.lanAccess)
+        lanPromise
       ]).then(function (results) {
         if (destroyed || reqId !== loadReqId) return;
         var mapped = root.mapReadiness(results[0]);
@@ -191,12 +196,22 @@
           patch.translate = { lang_pair: patch.translate_lang_pair };
           patch.ocr = { lang_pair: patch.translate_lang_pair };
         }
-        if (results[3]) {
-          var lanMapped = root.mapLanAccess(results[3]);
-          patch.lanEntries = storeLan(lanMapped);
-          patch.lanMessage = lanMapped.message || "";
-          patch.tokenMasked = lanMapped.tokenMasked;
-          patch.tokenPresent = lanMapped.tokenPresent;
+        var lanResult = results[3];
+        if (lanResult && lanResult.ok) {
+          if (lanResult.data) {
+            var lanMapped = root.mapLanAccess(lanResult.data);
+            patch.lanEntries = storeLan(lanMapped);
+            patch.lanMessage = lanMapped.message || "";
+            patch.tokenMasked = lanMapped.tokenMasked;
+            patch.tokenPresent = lanMapped.tokenPresent;
+          }
+        } else if (lanResult) {
+          lanToken = null;
+          lanUrls = [];
+          patch.lanEntries = [];
+          patch.lanMessage = formatErr(lanResult.error);
+          patch.tokenMasked = "";
+          patch.tokenPresent = false;
         }
         setState(patch);
         setupActions.maybeResumePoll(mapped);

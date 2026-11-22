@@ -15,6 +15,8 @@ import httpx
 
 from _contracts import SetupCapability
 from _ocr import default_ocr_languages
+from _platform.detect import detect_os
+from _platform.protocol import OsName
 
 if TYPE_CHECKING:  # 只用于类型标注
     from _linux.conflicts import ConflictScan
@@ -119,7 +121,12 @@ def dbus_portal_version(interface: str) -> tuple[int | None, str | None]:
         return None, f"{type(exc).__name__}: {exc}"
 
 
-def session_type(environ: Mapping[str, str]) -> str:
+def session_type(environ: Mapping[str, str], *, os_name: OsName | None = None) -> str:
+    resolved = os_name or detect_os()
+    if resolved == "windows":
+        return "windows"
+    if resolved == "macos":
+        return "macos"
     value = (environ.get("XDG_SESSION_TYPE") or "").strip().lower()
     return value or "unknown"
 

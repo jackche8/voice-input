@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import inspect
 import io
+import re
 import subprocess
 import threading
 from collections.abc import Callable
@@ -13,6 +14,7 @@ from PIL import Image, ImageOps
 
 from _contracts import ErrorCode, LogicError
 from _ocr_text import clean_cjk_spaces
+from _platform.child_process import windows_subprocess_kwargs
 
 DEFAULT_OCR_LANG = "chi_sim+chi_tra+eng"
 DEFAULT_OCR_LANGS = DEFAULT_OCR_LANG
@@ -31,6 +33,7 @@ _DARK_CANVAS_RGB = (17, 24, 39)      # #111827
 
 _lang_cache_lock = threading.Lock()
 _cached_languages: tuple[str, ...] | None = None
+_LANG_CODE_RE = re.compile(r"^[A-Za-z0-9_/-]+$")
 
 
 def default_ocr_languages() -> list[tuple[str, str]]:
@@ -45,22 +48,62 @@ def clear_language_cache() -> None:
         _cached_languages = None
 
 
+def _resolve_tesseract_cmd(tesseract_cmd: str | None) -> str:
+    if tesseract_cmd:
+        return tesseract_cmd
+    try:
+        import pytesseract
+
+        configured = getattr(pytesseract.pytesseract, "tesseract_cmd", None)
+        if isinstance(configured, str) and configured.strip():
+            return configured.strip()
+    except ImportError:
+        pass
+    return "tesseract"
+
+
+def list_tesseract_languages(
+    *,
+    run: Callable[..., subprocess.CompletedProcess] = subprocess.run,
+    tesseract_cmd: str | None = None,
+) -> list[str]:
+    """直接以隐藏控制台方式执行 `tesseract --list-langs` 并解析语言代码列表（规避 pytesseract.get_languages 闪黑框）。"""
+    cmd = _resolve_tesseract_cmd(tesseract_cmd)
+    try:
+        proc = run(
+            [cmd, "--list-langs"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+            **windows_subprocess_kwargs(encoding="utf-8", errors="replace"),
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise LogicError(ErrorCode.ocr_failed, f"无法查询 Tesseract 语言包: {exc}") from exc
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout or "").strip()
+        raise LogicError(
+            ErrorCode.ocr_failed,
+            f"无法查询 Tesseract 语言包（退出码 {proc.returncode}）: {detail}",
+        )
+    raw = proc.stdout if (proc.stdout or "").strip() else (proc.stderr or "")
+    lines = [line.strip() for line in raw.splitlines() if line.strip()]
+    if lines and (":" in lines[0] or lines[0].lower().startswith("list of available languages")):
+        lines = lines[1:]
+    langs: list[str] = []
+    for line in lines:
+        if _LANG_CODE_RE.match(line) and line not in langs:
+            langs.append(line)
+    return langs
+
+
 def get_cached_languages() -> list[str]:
     """线程安全地查询并缓存系统已安装的 Tesseract 语言包。"""
     global _cached_languages
     with _lang_cache_lock:
         if _cached_languages is not None:
             return list(_cached_languages)
-        try:
-            import pytesseract
-        except ImportError as exc:
-            raise LogicError(ErrorCode.ocr_failed, f"OCR 依赖不可用: {exc}") from exc
-        try:
-            langs = tuple(pytesseract.get_languages(config=""))
-        except Exception as exc:
-            raise LogicError(
-                ErrorCode.ocr_failed, f"无法查询 Tesseract 语言包: {exc}"
-            ) from exc
+        langs = tuple(list_tesseract_languages())
         _cached_languages = langs
         return list(langs)
 
@@ -258,6 +301,7 @@ __all__ = [
     "get_cached_languages",
     "image_to_text",
     "invoke_ocr_runner",
+    "list_tesseract_languages",
     "prepare_ocr_image",
     "raise_ocr_error",
 ]

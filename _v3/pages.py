@@ -12,15 +12,21 @@ from fastapi import FastAPI
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
+from _paths import RESOURCES_DIR
+
 PAGES: dict[str, str] = {
     "/": "index.html",
     "/setup": "index.html",
     "/voice": "voice.html",
 }
+FAVICON_FILES: dict[str, tuple[str, str]] = {
+    "/favicon.svg": ("ollama-voice-input.svg", "image/svg+xml"),
+    "/favicon.ico": ("ollama-voice-input.ico", "image/x-icon"),
+}
 ASSET_DIRS = ("js", "css")
 OPENAPI_SNAPSHOT_FILE = "openapi.json"
 OPENAPI_SNAPSHOT_PATH = "/openapi.snapshot.json"
-LAN_PUBLIC_PAGES = frozenset({"/voice"})
+LAN_PUBLIC_PAGES = frozenset({"/voice", *FAVICON_FILES})
 _PAGE_HEADERS = {"Referrer-Policy": "no-referrer", "Cache-Control": "no-store"}
 _ASSET_CACHE_CONTROL = "no-cache"
 
@@ -34,7 +40,7 @@ class _RevalidatingStaticFiles(StaticFiles):
         return response
 
 
-def install_pages(app: FastAPI, static_v3: Path) -> None:
+def install_pages(app: FastAPI, static_v3: Path, *, resources_dir: Path = RESOURCES_DIR) -> None:
     root = Path(static_v3).resolve()
     missing = [
         name
@@ -44,6 +50,11 @@ def install_pages(app: FastAPI, static_v3: Path) -> None:
     if missing:
         raise RuntimeError(f"static/v3 缺少生产界面文件: {missing}")
 
+    res_root = Path(resources_dir).resolve()
+    missing_icons = [filename for filename, _media in FAVICON_FILES.values() if not (res_root / filename).is_file()]
+    if missing_icons:
+        raise RuntimeError(f"resources 缺少图标文件: {missing_icons}（目录 {res_root}）")
+
     def page_route(file: Path):
         async def serve() -> FileResponse:
             return FileResponse(file, media_type="text/html; charset=utf-8", headers=_PAGE_HEADERS)
@@ -52,6 +63,15 @@ def install_pages(app: FastAPI, static_v3: Path) -> None:
 
     for url, name in PAGES.items():
         app.add_api_route(url, page_route(root / name), methods=["GET"], include_in_schema=False)
+
+    def icon_route(file: Path, media_type: str):
+        async def serve() -> FileResponse:
+            return FileResponse(file, media_type=media_type, headers={"Cache-Control": _ASSET_CACHE_CONTROL})
+
+        return serve
+
+    for url, (filename, media_type) in FAVICON_FILES.items():
+        app.add_api_route(url, icon_route(res_root / filename, media_type), methods=["GET"], include_in_schema=False)
 
     snapshot = root / OPENAPI_SNAPSHOT_FILE
 

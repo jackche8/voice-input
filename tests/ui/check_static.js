@@ -131,6 +131,27 @@ for (const name of expectedHtml) {
 }
 pass("两页（index / voice）均引用共享主题与默认状态、声明 data-theme=dark 并预留 hooks 注入");
 
+const faviconFailures = [];
+for (const name of expectedHtml) {
+  const text = fs.readFileSync(path.join(v3, name), "utf8");
+  const headMatch = text.match(/<head\b[^>]*>([\s\S]*?)<\/head>/i);
+  const head = headMatch ? headMatch[1].replace(/<!--[\s\S]*?-->/g, "") : "";
+  const iconLinks = head.match(/<link\b[^>]*\brel=["']icon["'][^>]*>/gi) || [];
+  const hasSvgIcon = iconLinks.some(
+    (tag) => /\btype=["']image\/svg\+xml["']/i.test(tag) && /\bhref=["']\/favicon\.svg["']/i.test(tag)
+  );
+  const hasIcoIcon = iconLinks.some(
+    (tag) => /\btype=["']image\/x-icon["']/i.test(tag) && /\bhref=["']\/favicon\.ico["']/i.test(tag) && /\bsizes=["']any["']/i.test(tag)
+  );
+  if (!hasSvgIcon) faviconFailures.push(name + ' <head> 缺少 <link rel="icon" type="image/svg+xml" href="/favicon.svg" />');
+  if (!hasIcoIcon) faviconFailures.push(name + ' <head> 缺少 <link rel="icon" type="image/x-icon" href="/favicon.ico" sizes="any" />');
+}
+if (faviconFailures.length) {
+  for (const msg of faviconFailures) fail(msg);
+} else {
+  pass("两页（index / voice）<head> 均已声明 /favicon.svg 与 /favicon.ico 图标引用");
+}
+
 const theme = fs.readFileSync(path.join(v3, "css/theme.css"), "utf8");
 const requiredVars = [
   "--c-bg", "--c-accent", "--c-accent-solid", "--c-accent-solid-hover", "--c-danger-solid",

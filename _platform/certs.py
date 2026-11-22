@@ -45,6 +45,7 @@ from _platform._certs_openssl import (
     verify_ca_key_and_cert_openssl,
     verify_chain_and_key_openssl,
 )
+from _platform.child_process import windows_subprocess_kwargs
 
 APPLE_MAX_LEAF_DAYS = 398
 DEFAULT_SERVER_CERT_DAYS = 365
@@ -87,9 +88,16 @@ def discover_lan_ipv4s(
         if norm and norm not in found:
             found.append(norm)
 
-    if which("ip"):
+    if os.name != "nt" and which("ip"):
         try:
-            proc = run(["ip", "-j", "-4", "addr", "show", "up"], capture_output=True, text=True, timeout=3, check=False)
+            proc = run(
+                ["ip", "-j", "-4", "addr", "show", "up"],
+                capture_output=True,
+                text=True,
+                timeout=3,
+                check=False,
+                **windows_subprocess_kwargs(encoding="utf-8", errors="replace"),
+            )
             if proc.returncode == 0 and proc.stdout:
                 for iface in json.loads(proc.stdout):
                     for info in iface.get("addr_info") or []:
@@ -97,9 +105,16 @@ def discover_lan_ipv4s(
         except Exception:
             pass
 
-    if which("ifconfig"):
+    if os.name != "nt" and which("ifconfig"):
         try:
-            proc = run(["ifconfig"], capture_output=True, text=True, timeout=3, check=False)
+            proc = run(
+                ["ifconfig"],
+                capture_output=True,
+                text=True,
+                timeout=3,
+                check=False,
+                **windows_subprocess_kwargs(encoding="utf-8", errors="replace"),
+            )
             if proc.returncode == 0 and proc.stdout:
                 for match in re.findall(r"\binet\s+(?:addr:)?(\d+\.\d+\.\d+\.\d+)\b", proc.stdout):
                     _add(match)
@@ -108,9 +123,16 @@ def discover_lan_ipv4s(
 
     if os.name == "nt" and which("ipconfig"):
         try:
-            proc = run(["ipconfig"], capture_output=True, text=True, timeout=3, check=False)
+            proc = run(
+                ["ipconfig"],
+                capture_output=True,
+                text=True,
+                timeout=3,
+                check=False,
+                **windows_subprocess_kwargs(encoding="oem", errors="replace"),
+            )
             if proc.returncode == 0 and proc.stdout:
-                for match in re.findall(r"IPv4[^:]*:\s*(\d+\.\d+\.\d+\.\d+)", proc.stdout):
+                for match in re.findall(r"IPv4[^:：]*[:：]\s*(\d+\.\d+\.\d+\.\d+)", proc.stdout):
                     _add(match)
         except Exception:
             pass

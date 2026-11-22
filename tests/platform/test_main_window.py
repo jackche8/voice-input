@@ -14,8 +14,8 @@ from pathlib import Path
 import pytest
 
 from _desktop.main_window import MainWindow, window_command
-from _paths import APP_DISPLAY_NAME, INTERNAL_WINDOW_FLAG, AppPaths
-from _window import tls_policy
+from _paths import APP_DISPLAY_NAME, APP_USER_MODEL_ID, INTERNAL_WINDOW_FLAG, AppPaths
+from _window import BackendMissing, pywebview_host, tls_policy
 from _window.__main__ import EXIT_BACKEND_MISSING, choose_backend, main
 from _window.commands import Quit, Show, encode, parse_command, pump_commands
 
@@ -139,3 +139,352 @@ def test_window_command_uses_internal_window_flag_when_frozen(tmp_path):
         "/app/ollama-voice-input", INTERNAL_WINDOW_FLAG, "--url", "https://127.0.0.1:17945/setup",
         "--cert", str(paths.cert), "--title", APP_DISPLAY_NAME,
     ]
+
+
+# ---------------------------------------------------------------- pywebview_host (Windows WebView2 & macOS)
+class _FakeEventSlot:
+    def __init__(self, on_add=None) -> None:
+        self.handlers: list = []
+        self._on_add = on_add
+
+    def __iadd__(self, handler):
+        self.handlers.append(handler)
+        if self._on_add is not None:
+            self._on_add(handler)
+        return self
+
+    def fire(self, *args) -> None:
+        for handler in list(self.handlers):
+            handler(*args)
+
+
+class _FakeCertAction:
+    AlwaysAllow = "ALWAYS_ALLOW"
+    Cancel = "CANCEL"
+
+
+class _FakeCoreWebView2:
+    def __init__(self, timeline: list[tuple]) -> None:
+        self.timeline = timeline
+        self.ServerCertificateErrorDetected = _FakeEventSlot(
+            on_add=lambda _h: timeline.append(("bind_cert_handler",))
+        )
+
+    def Navigate(self, url: str) -> None:
+        self.timeline.append(("navigate", url))
+
+
+class _FakeWebView2Control:
+    def __init__(self, timeline: list[tuple], *, initial_core=None) -> None:
+        self.CoreWebView2 = initial_core
+        self.CoreWebView2InitializationCompleted = _FakeEventSlot(
+            on_add=lambda _h: timeline.append(("bind_init_completed",))
+        )
+
+
+class _FakeWinForm:
+    def __init__(self, wv: _FakeWebView2Control, timeline: list[tuple], *, invoke_required: bool = False) -> None:
+        self.webview = wv
+        self.timeline = timeline
+        self.InvokeRequired = invoke_required
+        self.IsDisposed = False
+        self.Disposing = False
+        self.Icon = None
+        self.invoked_delegates: list = []
+
+    def Invoke(self, delegate) -> None:
+        self.timeline.append(("invoke", type(delegate).__name__))
+        self.invoked_delegates.append(delegate)
+        delegate()
+
+
+class _FakeWindowEvents:
+    def __init__(self) -> None:
+        self.before_show = _FakeEventSlot()
+
+
+class _FakePyWebViewWindow:
+    def __init__(self, title: str, url: str | None, html: str | None, native, timeline: list[tuple]) -> None:
+        self.title = title
+        self.url = url
+        self.html = html
+        self.native = native
+        self.timeline = timeline
+        self.events = _FakeWindowEvents()
+        self.destroyed = False
+
+    def load_url(self, url: str) -> None:
+        self.timeline.append(("load_url", url))
+
+    def show(self) -> None:
+        self.timeline.append(("show",))
+
+    def destroy(self) -> None:
+        self.destroyed = True
+        self.timeline.append(("destroy",))
+
+
+class _FakePyWebViewModule:
+    def __init__(self, native_factory, timeline: list[tuple], on_start) -> None:
+        self._native_factory = native_factory
+        self.timeline = timeline
+        self._on_start = on_start
+        self.created: list[dict] = []
+        self.start_calls: list[dict] = []
+        self.window: _FakePyWebViewWindow | None = None
+
+    def create_window(self, title: str, url: str | None = None, *, html: str | None = None, width: int = 0, height: int = 0):
+        self.created.append({"title": title, "url": url, "html": html, "width": width, "height": height})
+        self.window = _FakePyWebViewWindow(title, url, html, self._native_factory(), self.timeline)
+        return self.window
+
+    def start(self, func, **kwargs) -> None:
+        self.start_calls.append(dict(kwargs))
+        self._on_start(self.window, func)
+
+
+def _write_fake_cert(tmp_path: Path, body: bytes = b"\x30\x82\x01\x2c" + b"A" * 64) -> tuple[Path, bytes, str]:
+    pem = ssl.DER_cert_to_PEM_cert(body)
+    cert_path = tmp_path / "cert.pem"
+    cert_path.write_text(pem, encoding="ascii")
+    return cert_path, body, pem
+
+
+def test_pywebview_windows_defers_navigation_binds_cert_first_and_sets_icon_and_aumid(tmp_path, capsys):
+    import argparse
+    import queue
+    import threading
+
+    cert_path, der, pem = _write_fake_cert(tmp_path)
+    other_der = der[:-1] + b"\xff"
+    other_pem = ssl.DER_cert_to_PEM_cert(other_der)
+    res_dir = tmp_path / "resources"
+    res_dir.mkdir()
+    ico_path = res_dir / "ollama-voice-input.ico"
+    ico_path.write_bytes(b"\x00\x00\x01\x00fake-ico")
+
+    timeline: list[tuple] = []
+    aumids: list[str] = []
+    icon_instances: list[str] = []
+    stdin_q: queue.Queue[str] = queue.Queue()
+    first_handled = threading.Event()
+
+    class _QueueStream:
+        def __init__(self) -> None:
+            self._delivered = 0
+
+        def __iter__(self):
+            return self
+
+        def __next__(self) -> str:
+            if self._delivered >= 1:
+                first_handled.set()
+            item = stdin_q.get()
+            if item == "":
+                raise StopIteration
+            self._delivered += 1
+            return item
+
+    class _FakeDrawingIcon:
+        def __init__(self, path: str) -> None:
+            self.path = path
+            icon_instances.append(path)
+
+    wv = _FakeWebView2Control(timeline, initial_core=None)
+    form = _FakeWinForm(wv, timeline, invoke_required=False)
+    core = _FakeCoreWebView2(timeline)
+
+    def on_start(win: _FakePyWebViewWindow, started_cb) -> None:
+        win.events.before_show.fire(win)
+        win.events.before_show.fire(win)  # 幂等：重复触发不得重复绑定
+        started_cb()
+        # 初始化完成前收到 show("/setup")：只更新 pending_url，不得提前 load_url
+        stdin_q.put('{"cmd": "show", "route": "/setup"}\n')
+        assert first_handled.wait(timeout=5.0)
+        assert not any(ev[0] == "load_url" for ev in timeline)
+        # WebView2 完成初始化：必须先绑 ServerCertificateErrorDetected 再 Navigate("/setup")
+        wv.CoreWebView2 = core
+        wv.CoreWebView2InitializationCompleted.fire(wv, type("E", (), {"IsSuccess": True})())
+        assert ("bind_cert_handler",) in timeline and ("navigate", "https://127.0.0.1:17945/setup") in timeline
+        assert timeline.index(("bind_cert_handler",)) < timeline.index(("navigate", "https://127.0.0.1:17945/setup"))
+        assert len(core.ServerCertificateErrorDetected.handlers) == 1
+
+        # 校证：1) ToPemEncoding + set_Action 放行本应用证书 + 127.0.0.1
+        actions: list[str] = []
+
+        class _PemCert:
+            def ToPemEncoding(self):
+                return pem
+
+        class _SetterEvent:
+            def __init__(self, uri: str, cert) -> None:
+                self.RequestUri = uri
+                self.ServerCertificate = cert
+
+            def set_Action(self, value) -> None:
+                actions.append(value)
+
+        handler = core.ServerCertificateErrorDetected.handlers[0]
+        handler(core, _SetterEvent("https://127.0.0.1:17945/setup", _PemCert()))
+        # 2) ToX509Certificate2 + 属性 Action 回退路径
+        class _X509Cert:
+            def ToX509Certificate2(self):
+                return type("X", (), {"GetRawCertData": lambda self: bytearray(der)})()
+
+        class _PropEvent:
+            def __init__(self, uri: str, cert) -> None:
+                self.RequestUri = uri
+                self.ServerCertificate = cert
+                self.Action = None
+
+        prop_ev = _PropEvent("https://127.0.0.1:17945/", _X509Cert())
+        handler(core, prop_ev)
+        # 3) 错误主机 / 错误证书 / 损坏 PEM 均严格 Cancel（损坏 PEM 写 stderr）
+        handler(core, _SetterEvent("https://localhost:17945/", _PemCert()))
+        handler(core, _SetterEvent("https://192.168.1.9:17945/", _PemCert()))
+        handler(core, _SetterEvent("https://127.0.0.1:17945/", type("Bad", (), {"ToPemEncoding": lambda self: other_pem})()))
+        handler(core, _SetterEvent("https://127.0.0.1:17945/", type("Broken", (), {"ToPemEncoding": lambda self: "not-pem"})()))
+
+        assert actions == [
+            _FakeCertAction.AlwaysAllow,
+            _FakeCertAction.Cancel,
+            _FakeCertAction.Cancel,
+            _FakeCertAction.Cancel,
+            _FakeCertAction.Cancel,
+        ]
+        assert prop_ev.Action == _FakeCertAction.AlwaysAllow
+
+        # 初始化完成后收到 show("/history") → load_url + show，随后 quit 结束
+        stdin_q.put('{"cmd": "show", "route": "/history"}\n')
+        stdin_q.put('{"cmd": "quit"}\n')
+        _wait_until(lambda: win.destroyed)
+
+    mod = _FakePyWebViewModule(lambda: form, timeline, on_start)
+    args = argparse.Namespace(title=APP_DISPLAY_NAME, url="https://127.0.0.1:17945/", cert=str(cert_path))
+    rc = pywebview_host.run(
+        args,
+        webview_mod=mod,
+        platform="win32",
+        resources_dir=res_dir,
+        stdin=_QueueStream(),
+        set_aumid=lambda aid: (aumids.append(aid) or True),
+        cert_action_cls=_FakeCertAction,
+        drawing_icon_cls=_FakeDrawingIcon,
+    )
+    assert rc == 0
+    assert aumids == [APP_USER_MODEL_ID]
+    assert mod.created == [{"title": APP_DISPLAY_NAME, "url": None, "html": "", "width": 1180, "height": 820}]
+    assert mod.start_calls == [{"icon": str(ico_path)}]
+    assert icon_instances == [str(ico_path)] and isinstance(form.Icon, _FakeDrawingIcon)
+    assert ("load_url", "https://127.0.0.1:17945/history") in timeline
+    err_text = capsys.readouterr().err
+    assert "主界面证书校验失败" in err_text
+    assert "证书校验异常" in err_text
+
+
+def test_pywebview_windows_invoke_marshalling_disposed_guard_and_init_failure(tmp_path, capsys):
+    import argparse
+
+    cert_path, _der, _pem = _write_fake_cert(tmp_path)
+    args = argparse.Namespace(title=APP_DISPLAY_NAME, url="https://127.0.0.1:17945/", cert=str(cert_path))
+
+    # 1. InvokeRequired=True 时必须用 System.Action 委托切回 UI 线程并直接绑定就绪 CoreWebView2
+    timeline: list[tuple] = []
+    core = _FakeCoreWebView2(timeline)
+    wv = _FakeWebView2Control(timeline, initial_core=core)
+    form = _FakeWinForm(wv, timeline, invoke_required=True)
+
+    class _FakeDotNetAction:
+        def __init__(self, fn) -> None:
+            self._fn = fn
+
+        def __call__(self) -> None:
+            self._fn()
+
+    mod1 = _FakePyWebViewModule(lambda: form, timeline, lambda _win, started: started())
+    rc1 = pywebview_host.run(
+        args,
+        webview_mod=mod1,
+        platform="win32",
+        resources_dir=tmp_path,
+        stdin=io.StringIO('{"cmd": "quit"}\n'),
+        set_aumid=lambda _a: True,
+        cert_action_cls=_FakeCertAction,
+        dotnet_action_cls=_FakeDotNetAction,
+    )
+    assert rc1 == 0
+    assert ("invoke", "_FakeDotNetAction") in timeline
+    assert timeline.index(("bind_cert_handler",)) < timeline.index(("navigate", "https://127.0.0.1:17945/"))
+
+    # 2. IsDisposed=True 时不得操作已销毁窗体或触发 Invoke
+    timeline2: list[tuple] = []
+    wv2 = _FakeWebView2Control(timeline2, initial_core=_FakeCoreWebView2(timeline2))
+    form2 = _FakeWinForm(wv2, timeline2, invoke_required=True)
+    form2.IsDisposed = True
+    mod2 = _FakePyWebViewModule(lambda: form2, timeline2, lambda win, started: (win.events.before_show.fire(win), started()))
+    rc2 = pywebview_host.run(
+        args,
+        webview_mod=mod2,
+        platform="win32",
+        resources_dir=tmp_path,
+        stdin=io.StringIO('{"cmd": "quit"}\n'),
+        set_aumid=lambda _a: True,
+        cert_action_cls=_FakeCertAction,
+        dotnet_action_cls=_FakeDotNetAction,
+    )
+    assert rc2 == 0 and form2.invoked_delegates == [] and not any(ev[0] == "navigate" for ev in timeline2)
+
+    # 3. CoreWebView2InitializationCompleted IsSuccess=False → 写 stderr、销毁窗口并返回非零退出码
+    timeline3: list[tuple] = []
+    wv3 = _FakeWebView2Control(timeline3, initial_core=None)
+    form3 = _FakeWinForm(wv3, timeline3, invoke_required=False)
+
+    def fail_init(win, started):
+        win.events.before_show.fire(win)
+        wv3.CoreWebView2InitializationCompleted.fire(
+            wv3, type("E", (), {"IsSuccess": False, "InitializationException": "HRESULT 0x80070002"})()
+        )
+        started()
+
+    mod3 = _FakePyWebViewModule(lambda: form3, timeline3, fail_init)
+    rc3 = pywebview_host.run(
+        args,
+        webview_mod=mod3,
+        platform="win32",
+        resources_dir=tmp_path,
+        stdin=io.StringIO(""),
+        set_aumid=lambda _a: True,
+        cert_action_cls=_FakeCertAction,
+    )
+    assert rc3 != 0 and mod3.window.destroyed is True
+    assert "WebView2 初始化失败" in capsys.readouterr().err
+
+
+def test_pywebview_macos_untouched_and_missing_backend_and_no_ignore_ssl(tmp_path, monkeypatch):
+    import argparse
+
+    cert_path, _der, _pem = _write_fake_cert(tmp_path)
+    args = argparse.Namespace(title=APP_DISPLAY_NAME, url="https://127.0.0.1:17945/", cert=str(cert_path))
+    aumids: list[str] = []
+    timeline: list[tuple] = []
+    mod = _FakePyWebViewModule(lambda: None, timeline, lambda _win, started: (started(), _wait_until(lambda: _win.destroyed)))
+    rc = pywebview_host.run(
+        args,
+        webview_mod=mod,
+        platform="darwin",
+        resources_dir=tmp_path,
+        stdin=io.StringIO('{"cmd": "quit"}\n'),
+        set_aumid=lambda aid: (aumids.append(aid) or True),
+    )
+    assert rc == 0 and aumids == []
+    assert mod.created == [{"title": APP_DISPLAY_NAME, "url": "https://127.0.0.1:17945/", "html": None, "width": 1180, "height": 820}]
+    assert mod.start_calls == [{}]  # macOS 不传 icon
+
+    # 缺少 pywebview 抛 BackendMissing
+    monkeypatch.setitem(sys.modules, "webview", None)
+    with pytest.raises(BackendMissing):
+        pywebview_host.run(args, platform="darwin")
+
+    # 严禁代码使用 IGNORE_SSL_ERRORS
+    src = (ROOT / "_window" / "pywebview_host.py").read_text(encoding="utf-8")
+    assert "IGNORE_SSL_ERRORS" not in src

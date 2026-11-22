@@ -19,6 +19,30 @@ from _platform.detect import detect_os
 from _platform.protocol import OsName
 
 LOG_ROTATE_BYTES = 10 * 1024 * 1024
+CREATE_NEW_PROCESS_GROUP = 0x00000200
+CREATE_NO_WINDOW = 0x08000000
+
+
+def _is_nt() -> bool:
+    return os.name == "nt"
+
+
+def windows_subprocess_kwargs(
+    *,
+    new_process_group: bool = False,
+    encoding: str | None = None,
+    errors: str | None = "replace",
+) -> dict[str, object]:
+    """跨平台 subprocess 关键字参数：Windows 下默认加 CREATE_NO_WINDOW，POSIX 下不下发 creationflags 与 Windows 专用的 oem 编码。"""
+    kwargs: dict[str, object] = {}
+    is_nt = _is_nt()
+    if is_nt:
+        kwargs["creationflags"] = CREATE_NO_WINDOW | (CREATE_NEW_PROCESS_GROUP if new_process_group else 0)
+    if encoding is not None and (is_nt or encoding.lower() != "oem"):
+        kwargs["encoding"] = encoding
+    if errors is not None:
+        kwargs["errors"] = errors
+    return kwargs
 
 
 @dataclass(frozen=True)
@@ -196,6 +220,8 @@ def kill_recorded_session(record: SessionRecord, *, timeout_s: float = 5.0, os_n
 
 __all__ = [
     "AppLogHandle",
+    "CREATE_NEW_PROCESS_GROUP",
+    "CREATE_NO_WINDOW",
     "ChildHandle",
     "LOG_ROTATE_BYTES",
     "SessionRecord",
@@ -205,4 +231,5 @@ __all__ = [
     "rotate_log",
     "session_record",
     "spawn_child",
+    "windows_subprocess_kwargs",
 ]

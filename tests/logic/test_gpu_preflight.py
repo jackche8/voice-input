@@ -135,3 +135,23 @@ def test_cuda_visible_devices_multi_or_unknown_id_rejects(cvd, needle):
 
 def test_no_torch_or_vllm_imported():
     assert not [m for m in sys.modules if m.split(".")[0] in ("torch", "vllm")]
+
+
+def test_query_gpus_passes_windows_subprocess_kwargs(monkeypatch):
+    from _platform import child_process as cp_mod
+    from _supervision.gpu_preflight import query_gpus
+
+    seen: list[dict] = []
+
+    def spy_run(cmd, **kw):
+        seen.append(dict(kw))
+        return subprocess.CompletedProcess(cmd, 0, one_gpu(12000), "")
+
+    monkeypatch.setattr(cp_mod.os, "name", "posix")
+    assert len(query_gpus(run=spy_run, which=WHICH)) == 1
+    assert "creationflags" not in seen[-1] and seen[-1]["encoding"] == "utf-8" and seen[-1]["errors"] == "replace"
+
+    monkeypatch.setattr(cp_mod.os, "name", "nt")
+    assert len(query_gpus(run=spy_run, which=WHICH)) == 1
+    assert seen[-1]["creationflags"] == cp_mod.CREATE_NO_WINDOW
+    assert seen[-1]["encoding"] == "utf-8" and seen[-1]["errors"] == "replace"

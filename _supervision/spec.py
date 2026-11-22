@@ -117,7 +117,7 @@ def _asr(
         "--model", str(paths.asr_model_dir), "--load", "--warmup", *_VARIANT_ARGS.get(variant or "", ()),
     )
     env = {**environ, "PYTHONPATH": str(asr_root), "HF_HOME": str(paths.hf_home), "HF_HUB_OFFLINE": "1",
-           "PYTHONUNBUFFERED": "1"}
+           "PYTHONUNBUFFERED": "1", "PYTHONUTF8": "1"}
 
     def ready() -> ReadyResult:
         def check(client: httpx.Client) -> ReadyResult:
@@ -167,7 +167,7 @@ def _server(
         "--port", str(ports.server), "--ssl-keyfile", str(paths.key), "--ssl-certfile", str(paths.cert),
     )
     return ComponentSpec(
-        name=ComponentName.server, argv=argv, env={**environ, "PYTHONUNBUFFERED": "1"}, cwd=paths.program_root,
+        name=ComponentName.server, argv=argv, env={**environ, "PYTHONUNBUFFERED": "1", "PYTHONUTF8": "1"}, cwd=paths.program_root,
         log_path=paths.logs / "server.log", port=ports.server, ready=ready, installed=lambda: None,
         start_timeout_s=60.0, stop_timeout_s=10.0,
     )

@@ -185,6 +185,8 @@ def test_build_deb_produces_lintian_clean_package_and_safe_maintainer_scripts(tm
         "./usr/lib/ollama-voice-input/requirements.txt",
         "./usr/lib/ollama-voice-input/wheelhouse/dummy-0.1-py3-none-any.whl",
         "./usr/lib/ollama-voice-input/static/v3/index.html",
+        "./usr/lib/ollama-voice-input/resources/ollama-voice-input.svg",
+        "./usr/lib/ollama-voice-input/resources/ollama-voice-input.ico",
         "./usr/lib/ollama-voice-input/runtimes/asr/server.py",
         "./usr/share/applications/ollama-voice-input.desktop",
         "./usr/share/applications/ollama-voice-input-daemon.desktop",

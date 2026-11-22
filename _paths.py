@@ -19,6 +19,7 @@ from _platform.protocol import OsName
 
 APP_ID = "ollama-voice-input"  # 目录名、锁名、套接字名
 APP_DISPLAY_NAME = "Ollama Voice Input"
+APP_USER_MODEL_ID = "io.github.jackche8.ollama-voice-input"
 DEB_PROGRAM_ROOT = Path("/usr/lib/ollama-voice-input")
 DEB_LAUNCHER = "/usr/bin/ollama-voice-input"
 ASR_RUNTIME_DIRNAME = "_asr_runtime"
@@ -43,6 +44,7 @@ def resolve_program_root(
 
 
 PROGRAM_ROOT = resolve_program_root()
+RESOURCES_DIR = PROGRAM_ROOT / "resources"
 STATIC_V3 = PROGRAM_ROOT / "static" / "v3"
 
 
@@ -315,6 +317,7 @@ def internal_subcommand(
 __all__ = [
     "APP_DISPLAY_NAME",
     "APP_ID",
+    "APP_USER_MODEL_ID",
     "ASR_RUNTIME_DIRNAME",
     "DEB_LAUNCHER",
     "DEB_PROGRAM_ROOT",
@@ -323,6 +326,7 @@ __all__ = [
     "INTERNAL_SETUP_WORKER_FLAG",
     "INTERNAL_WINDOW_FLAG",
     "PROGRAM_ROOT",
+    "RESOURCES_DIR",
     "STATIC_V3",
     "AppPaths",
     "app_command",

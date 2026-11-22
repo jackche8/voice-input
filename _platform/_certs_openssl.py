@@ -18,6 +18,7 @@ from _platform._certs_backends import (
     CertificateInspection,
     normalize_ip_str,
 )
+from _platform.child_process import windows_subprocess_kwargs
 
 
 def run_openssl(args: list[str], *, cwd: Path | None = None) -> str:
@@ -31,6 +32,7 @@ def run_openssl(args: list[str], *, cwd: Path | None = None) -> str:
         text=True,
         timeout=15,
         check=False,
+        **windows_subprocess_kwargs(encoding="utf-8", errors="replace"),
     )
     if proc.returncode != 0:
         detail = (proc.stderr or proc.stdout or "").strip()

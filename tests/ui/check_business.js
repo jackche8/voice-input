@@ -2098,6 +2098,134 @@ async function runUnit() {
   } else fail("loadAll 竞态防护失效：" + JSON.stringify({ asr: raceView.getState().asr, voice: raceView.getState().hotkey_voice }));
   raceCtl.destroy();
 
+  /* loadAll 容错隔离：lan-access 503 不阻断主连接、设置检查、历史与一键装齐，并清空陈旧局域网凭证 */
+  const lanFailWorld = createWorld();
+  lanFailWorld.failLan = false;
+  lanFailWorld.failCheck = false;
+  lanFailWorld.installPosts = 0;
+  lanFailWorld.check = setupCheckBody();
+  lanFailWorld.routes = [
+    { path: "/api/setup/check", method: "GET", handler: function () {
+      if (lanFailWorld.failCheck) return jsonRes(500, { ok: false, error: "internal", message: "设置检查内部异常" });
+      return jsonRes(200, lanFailWorld.check);
+    } },
+    { path: "/api/v1/config", method: "GET", handler: function () {
+      return jsonRes(200, {
+        polish_enabled: true,
+        custom_keywords: ["Kw"],
+        translate_lang_pair: "zh-en",
+        translate_auto_enabled: true,
+        hotkey_voice: "ctrl+alt+z",
+        hotkey_screenshot: "ctrl+alt+x",
+        hotkey_ocr: "ctrl+alt+o",
+        hotkey_repeat: "ctrl+alt+r",
+        hotkey_annotate: "ctrl+alt+a",
+        autostart_enabled: true
+      });
+    } },
+    { path: "/api/v1/history", method: "GET", handler: function () {
+      return jsonRes(200, {
+        records: [{ id: "h-lan-fail", source: "desktop", raw_text: "orig", final_text: "final", polish: "on", created_at: "2026-11-22T00:00:00Z" }],
+        total: 1,
+        skipped_malformed: 0
+      });
+    } },
+    { path: "/api/v1/lan-access", method: "GET", handler: function () {
+      if (lanFailWorld.failLan) {
+        return jsonRes(503, { ok: false, error: "dependency_failed", message: "无法枚举网卡地址" });
+      }
+      return jsonRes(200, {
+        port: 17945,
+        token: "stale-secret-token",
+        token_masked: "sta****ken",
+        entries: [{
+          ip: "192.0.2.9",
+          url: "https://192.0.2.9:17945/voice?token=stale-secret-token",
+          url_masked: "https://192.0.2.9:17945/voice?token=sta****ken",
+          qr_svg: "<svg xmlns='http://www.w3.org/2000/svg'></svg>"
+        }],
+        message: ""
+      });
+    } },
+    { path: "/api/setup/install-all", method: "POST", handler: function () {
+      lanFailWorld.installPosts += 1;
+      lanFailWorld.check = setupCheckBody({ install_all: installAllBody("running", ["running"], { current: "ollama_install" }) });
+      return jsonRes(202, lanFailWorld.check.install_all);
+    } }
+  ];
+  const lanFailTimers = [];
+  const lanFailCopied = [];
+  const lanFailCtl = B.createHomeController({
+    client: B.createHttp({ catalog: catalog, context: localCtx, fetch: lanFailWorld.fetch, origin: "https://127.0.0.1:17945" }),
+    context: localCtx,
+    catalog: catalog,
+    clipboard: { writeText: function (text) { lanFailCopied.push(text); return Promise.resolve(); } },
+    setTimeout: function (fn) { lanFailTimers.push(fn); return lanFailTimers.length; },
+    clearTimeout: function (id) { lanFailTimers[id - 1] = null; }
+  });
+  const lanFailView = fakeView(catalogCtx.V3.defaults.homeState());
+  lanFailCtl.bind(lanFailView);
+  await lanFailCtl.loadAll();
+  const seededLanOk = lanFailCtl._debug.getLanToken() === "stale-secret-token"
+    && lanFailCtl._debug.getLanUrls().length === 1
+    && lanFailView.getState().tokenPresent === true;
+
+  lanFailWorld.failLan = true;
+  await lanFailCtl.loadAll();
+  const afterLanFail = lanFailView.getState();
+  await lanFailCtl.hooks.onCopy({ kind: "token" });
+  await lanFailCtl.hooks.onCopy({ kind: "lan_url", index: 0 });
+  await lanFailCtl.hooks.onInstallAll();
+  const afterLanFailInstall = lanFailView.getState();
+  if (
+    seededLanOk
+    && afterLanFail.connection === "connected"
+    && afterLanFail.connectionError === null
+    && afterLanFail.asr && afterLanFail.asr.status === "missing"
+    && afterLanFail.polish_enabled === true
+    && Array.isArray(afterLanFail.custom_keywords) && afterLanFail.custom_keywords.join(",") === "Kw"
+    && afterLanFail.history && afterLanFail.history.records.length === 1 && afterLanFail.history.records[0].id === "h-lan-fail"
+    && lanFailCtl._debug.getLanToken() === null
+    && lanFailCtl._debug.getLanUrls().length === 0
+    && lanFailCopied.length === 0
+    && Array.isArray(afterLanFail.lanEntries) && afterLanFail.lanEntries.length === 0
+    && afterLanFail.tokenMasked === ""
+    && afterLanFail.tokenPresent === false
+    && /依赖失败/.test(afterLanFail.lanMessage || "")
+    && /无法枚举网卡地址/.test(afterLanFail.lanMessage || "")
+    && lanFailWorld.installPosts === 1
+    && afterLanFailInstall.connection === "connected"
+    && afterLanFailInstall.installAll && afterLanFailInstall.installAll.state === "running"
+    && afterLanFailInstall.installAll.current === "ollama_install"
+    && lanFailCtl._debug.polling() === true
+  ) {
+    pass("loadAll 隔离 lan-access 503：保持 connected 并装载设置/配置/历史、清空陈旧凭证、写 lanMessage 且一键装齐正常启动");
+  } else {
+    fail("loadAll lan-access 503 容错隔离失败：" + JSON.stringify({
+      seededLanOk: seededLanOk,
+      connection: afterLanFail.connection,
+      lanEntries: afterLanFail.lanEntries,
+      lanMessage: afterLanFail.lanMessage,
+      tokenMasked: afterLanFail.tokenMasked,
+      tokenPresent: afterLanFail.tokenPresent,
+      privToken: lanFailCtl._debug.getLanToken(),
+      privUrls: lanFailCtl._debug.getLanUrls(),
+      copied: lanFailCopied,
+      installPosts: lanFailWorld.installPosts,
+      installAll: afterLanFailInstall.installAll,
+      polling: lanFailCtl._debug.polling()
+    }));
+  }
+  lanFailWorld.failCheck = true;
+  await lanFailCtl.loadAll();
+  const afterCoreFail = lanFailView.getState();
+  if (afterCoreFail.connection === "error" && /设置检查内部异常/.test(afterCoreFail.connectionError || "")) {
+    pass("loadAll 核心接口（setup/check）失败仍显式进入 connection=error");
+  } else {
+    fail("loadAll 核心接口失败未进入 error：" + JSON.stringify({ connection: afterCoreFail.connection, err: afterCoreFail.connectionError }));
+  }
+  lanFailCtl.destroy();
+
   /* 非 / 或 /setup 路径（例如测试路径）不改地址栏 */
   const otherLoc = { protocol: "https:", hostname: "127.0.0.1", origin: "https://127.0.0.1:17945", pathname: "/custom/path", search: "", hash: "" };
   const otherHistCalls = [];
