@@ -1,30 +1,52 @@
 <div align="center">
 
-# 🎙️ Ollama Voice Input
+<img src="resources/ollama-voice-input.svg" width="96" height="96" alt="Ollama Voice Input" />
 
-**跨平台本地语音输入 + 原位截屏翻译 + 纯 OCR — 完全离线，零云服务依赖**
+# Ollama Voice Input
 
-按住快捷键说话 → Qwen3-ASR 流式识别 → 本地 `qwen3.5:4b` 只纠错不扩写 → 自动输入到任意应用
+**100% 本地离线的跨平台语音输入、截屏原位翻译与画笔标注工作台**
 
-[![Version](https://img.shields.io/badge/Version-3.4-blue?style=flat-square)](https://github.com/jackche8/voice-input)
-[![Python](https://img.shields.io/badge/Python-3.11+-3776AB?logo=python&logoColor=white)](https://python.org)
-[![Ollama](https://img.shields.io/badge/Ollama-0.40.16-000000?logo=ollama)](https://ollama.com)
-[![Qwen3-ASR](https://img.shields.io/badge/Qwen3--ASR-1.7B-green)](https://github.com/QwenLM/Qwen3-ASR)
-[![Platform](https://img.shields.io/badge/Platform-Linux%20%7C%20Windows%20%7C%20macOS-FCC624)](https://kernel.org)
-[![License](https://img.shields.io/badge/License-AGPL--3.0%20%2B%20Commercial-blue.svg)](LICENSE)
+按住快捷键说话 → `Qwen3-ASR 1.7B` 流式识别 → 本地 `qwen3.5:4b` 只纠错不扩写 → 自动输入到任意应用
+
+**简体中文** · [English](README.en.md) &nbsp;|&nbsp; [🌐 产品主页](https://jackche8.github.io/voice-input/) &nbsp;|&nbsp; [⬇️ 免费下载 v3.4.0](https://github.com/jackche8/voice-input/releases) &nbsp;|&nbsp; [📄 商业授权](COMMERCIAL.md)
+
+<br />
+
+[![Version](https://img.shields.io/badge/Version-3.4.0-2563EB?style=flat-square)](https://github.com/jackche8/voice-input/releases/tag/v3.4.0)
+[![Website](https://img.shields.io/badge/Website-GitHub%20Pages-0F766E?style=flat-square)](https://jackche8.github.io/voice-input/)
+[![Python](https://img.shields.io/badge/Python-3.11+-3776AB?style=flat-square&logo=python&logoColor=white)](https://python.org)
+[![Ollama](https://img.shields.io/badge/Ollama-0.40.16-111827?style=flat-square&logo=ollama)](https://ollama.com)
+[![Qwen3-ASR](https://img.shields.io/badge/Qwen3--ASR-1.7B-16A34A?style=flat-square)](https://github.com/QwenLM/Qwen3-ASR)
+[![Platform](https://img.shields.io/badge/Platform-Linux%20%7C%20Windows%20%7C%20macOS-475569?style=flat-square)](https://github.com/jackche8/voice-input/releases)
+[![License](https://img.shields.io/badge/License-AGPL--3.0%20%2B%20Commercial-1D4ED8?style=flat-square)](LICENSE)
 
 </div>
 
 ---
 
-## ✨ 核心特性
+## 🖼️ 实机界面一览
 
-- 🗣️ **全局流式语音输入 (`Ctrl+Alt+Z`)** — 任意应用中按住说话，屏幕底部居中一体底栏实时显示状态与流式字幕，松开后经 `qwen3.5:4b` 纠错并自动输入到原焦点窗口；支持连续快速录音自动排队与自定义热词提示。
-- 📸 **截屏原位翻译 (`Ctrl+Alt+X`)** — 全屏红色十字框选，按行识别原文位置与格式，整段翻译后以半透明贴片逐行排回原位；框下迷你菜单「复制译文 / 复制原文」；识别简体、繁体与英文。
-- 🔎 **纯 OCR 原位识别 (`Ctrl+Alt+O`)** — 复用同一框选器与浮窗，跳过 LLM，识别结果按原位置贴回显示。
-- 🔁 **重复输入 (`Ctrl+Alt+R`)** — 一键将上一次识别结果重新输入到当前光标窗口。
-- 🖥️ **主窗口工作台** — 应用自带主窗口：翻译与图片粘贴 OCR 主页、历史记录、手机局域网扫码语音页与模型/热键设置。
-- 🧩 **一个应用管全部** — 应用自己拉起并看护 Ollama、语音识别服务与本地服务端，崩溃自动重启；首次运行在设置页一键装齐运行环境与模型。
+### Voice Studio 双向翻译与 OCR 工作台（自动适配 GitHub 浅/深主题）
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/site/assets/workbench-dark.png" />
+  <source media="(prefers-color-scheme: light)" srcset="docs/site/assets/workbench-light.png" />
+  <img src="docs/site/assets/workbench-light.png" alt="Ollama Voice Input — Voice Studio 本地双向翻译与 OCR 工作台" width="100%" />
+</picture>
+
+### 截屏画笔标注（`Ctrl+Alt+A` · 309px 纯矢量图标主条 + 34px 纯圆点二级条）
+
+<img src="docs/site/assets/annotate-icons.png" alt="Ollama Voice Input — 截屏画笔标注 309px 纯矢量图标双条实机截图" width="100%" />
+
+---
+
+## ✨ 五大核心特性
+
+- 🗣️ **全局流式语音输入（`Ctrl+Alt+Z`）** — 任意应用中按住说话，屏幕底部居中一体字幕 HUD 实时呈现稳定字与流式尾字；松开后交由本地 `qwen3.5:4b` 只纠错不扩写并自动输入原焦点窗口，支持自定义热词与连按排队。
+- 📸 **截屏原位翻译（`Ctrl+Alt+X`）** — 全屏红色十字框选任意区域，按行识别原文位置与格式，本地整段翻译后以采样底色半透明贴片精准排回原位；框下迷你菜单一键复制译文或原文，支持简体、繁体与英文。
+- 🖍️ **截屏画笔标注（`Ctrl+Alt+A`）** — 框选冻结画面后直接进行**矩形、箭头、自由画笔、文字、马赛克** 5 种标注，提供 **6 色色板 × 3 档粗细**；采用 **309px 纯矢量图标主条** + **34px 纯圆点二级样式条**零抖动定位，按 `Enter` 自动复制原分辨率 PNG 到剪贴板并关闭。
+- 🔎 **纯 OCR 原位识别（`Ctrl+Alt+O`）& 重复输入（`Ctrl+Alt+R`）** — `Ctrl+Alt+O` 复用红十字框选与原位浮窗，跳过 LLM 秒级提取屏幕文字；`Ctrl+Alt+R` 将上一次识别结果立即重发到当前焦点窗口。
+- 🖥️ **双向自动翻译工作台 & 局域网手机语音** — 内置中⇄英自动判向、停止输入 **1 秒防抖自动翻译**、`⇄` 手动锁定方向与长文本分段翻译；同局域网手机扫码打开本地 HTTPS 录音页录入电脑；一个应用统一看护 Ollama、ASR 与本地服务端并在设置页一键装齐全部模型。
 
 ---
 
@@ -32,79 +54,116 @@
 
 | 快捷键 | 功能 | 说明 |
 |:---:|:---|:---|
-| `Ctrl+Alt+Z` | **语音输入** | 按住说话，松开纠错并自动输入（支持热词与连按排队） |
-| `Ctrl+Alt+X` | **截屏原位翻译** | 全屏红色十字框选，译文以半透明贴片按原行位置排回 |
-| `Ctrl+Alt+O` | **纯 OCR 识别** | 复用全屏红色十字框选，识别文字原位显示，迷你菜单复制 |
+| `Ctrl+Alt+Z` | **全局流式语音输入** | 按住说话，底部一体 HUD 实时流式出字，松开纠错并自动输入 |
+| `Ctrl+Alt+X` | **截屏原位翻译** | 全屏红十字框选，译文以半透明贴片按原行位置排回 |
+| `Ctrl+Alt+A` | **截屏画笔标注** | 5 工具 / 6 色 / 3 档 + 309px 图标双条，`Enter` 复制 PNG 并关闭 |
+| `Ctrl+Alt+O` | **纯 OCR 识别** | 跳过 LLM，复用红十字框选与原位浮窗快速提取屏幕文字 |
 | `Ctrl+Alt+R` | **重复输入** | 将上一次识别文本重发到当前焦点窗口 |
-| `Esc` | **关闭选区 / 浮窗** | 随时取消框选或关闭原位浮窗（点框外空白处也可关闭） |
+| `Esc` | **关闭选区 / 浮窗** | 取消框选或关闭原位浮窗（标注文字输入中先取消当前编辑） |
 
-快捷键在主窗口「模型与热键设置」中修改（保存在配置根的 `config.json`：`hotkey_voice` / `hotkey_screenshot` / `hotkey_ocr` / `hotkey_repeat`），修改后重启应用生效。
+全部快捷键可在主窗口「模型与热键设置」自定义（写入配置根 `config.json`：`hotkey_voice` / `hotkey_screenshot` / `hotkey_annotate` / `hotkey_ocr` / `hotkey_repeat`），修改后重启应用生效。
 
 ---
 
-## 🚀 安装与运行
+## ⬇️ 安装包免费下载（推荐）
 
-### 1. 准备
+官方安装包由 GitHub Actions 自动构建并发布于 [GitHub Releases](https://github.com/jackche8/voice-input/releases)（[打包与发布详情](packaging/README.md)）：
+
+| 平台 | 安装包（v3.4.0 直链） | 安装方式 / 状态说明 |
+|:---|:---|:---|
+| **Linux**（Ubuntu 24.04 amd64，Python 3.12） | [`ollama-voice-input_3.4.0_amd64.deb`](https://github.com/jackche8/voice-input/releases/download/v3.4.0/ollama-voice-input_3.4.0_amd64.deb) | `sudo apt install ./ollama-voice-input_3.4.0_amd64.deb`（独立 venv，内置 `uaccess` 规则免手动加 `input` 组，本地已验证） |
+| **Windows**（x64） | [`Ollama-Voice-Input-3.4.0-windows-x64-setup.exe`](https://github.com/jackche8/voice-input/releases/download/v3.4.0/Ollama-Voice-Input-3.4.0-windows-x64-setup.exe) | Per-user Inno Setup 安装器，**未签名且未经 Windows 真机验收** |
+| **macOS**（Apple Silicon arm64） | [`Ollama-Voice-Input-3.4.0-macos-arm64.dmg`](https://github.com/jackche8/voice-input/releases/download/v3.4.0/Ollama-Voice-Input-3.4.0-macos-arm64.dmg) | 拖入 `Applications`，**未公证且未经 macOS 真机验收** |
+| **完整性校验** | [`SHA256SUMS.txt`](https://github.com/jackche8/voice-input/releases/download/v3.4.0/SHA256SUMS.txt) | 下载后执行 `sha256sum -c SHA256SUMS.txt` 核对哈希 |
+
+<details>
+<summary>⚠️ Windows SmartScreen / macOS Gatekeeper 未签名安装包首次打开指引</summary>
+
+开源构建暂未购买商业代码签名证书与 Apple Developer ID 公证，请先使用 `SHA256SUMS.txt` 校验安装包完整性：
+
+- **Windows SmartScreen**：如提示「Windows 已保护你的电脑」，点击 **「更多信息」→「仍要运行」**（*More info → Run anyway*）。内嵌 WebView2 仅放行本机 `127.0.0.1` 自签证书，无全局 SSL 忽略。
+- **macOS Gatekeeper 与系统权限**：
+  1. 将 `Ollama Voice Input.app` 拖入 `Applications`（应用程序）。
+  2. 在终端执行解除隔离属性：
+     ```bash
+     xattr -cr "/Applications/Ollama Voice Input.app"
+     ```
+     或右键点击应用选择 **「打开」**（或在 **系统设置 → 隐私与安全性** 点击 **「仍要打开」**）。
+  3. 首次启动请授予 **麦克风**、**辅助功能** 与 **屏幕录制** 权限。
+
+</details>
+
+### 首次运行：一键装齐本地运行环境与模型
+
+启动后打开主窗口 **「模型与热键设置」**，点击 **「一键装齐」** 依次自动完成 5 步（失败停在当前步骤可重试，全部装在用户数据目录，无需管理员权限、不污染系统 Python）：
+
+1. 下载并校验官方 Ollama `0.40.16` 发行包
+2. 等待本应用自带 Ollama 启动（独立端口 `17947`，不与用户自装 Ollama 的 `11434` 冲突）
+3. 拉取本地纠错与翻译模型 `qwen3.5:4b`
+4. 安装独立 Python 语音识别运行环境（按硬件自动匹配 CUDA / Apple MPS / CPU，CUDA 版约 7 GB）
+5. 下载 `Qwen3-ASR-1.7B` 识别权重
+
+设置页自带 **「开机自启」** 开关（默认开启，后台托盘启动 `daemon.py --background`）：Linux 写入 `~/.config/autostart/ollama-voice-input.desktop`、Windows 写入 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`、macOS 写入 `~/Library/LaunchAgents`。
+
+---
+
+## 🛠️ 从源码安装与运行（开发者）
 
 ```bash
 git clone https://github.com/jackche8/voice-input.git
-cd ollama-voice-input
+cd voice-input
 python3 -m venv --system-site-packages .venv
 .venv/bin/pip install -r requirements.txt
+
+.venv/bin/python daemon.py              # 启动并打开主窗口
+.venv/bin/python daemon.py --background # 仅托盘后台运行
 ```
 
-**Linux** 另需系统包（Debian / Ubuntu 名称）：
+<details>
+<summary>🐧 Linux 系统依赖与快捷键权限说明（与 .deb 依赖保持一致）</summary>
 
-- 主窗口：`gir1.2-webkit2-4.1`、`python3-gi`
-- OCR：`tesseract-ocr`、`tesseract-ocr-chi-sim`、`tesseract-ocr-chi-tra`、`tesseract-ocr-eng`
-- 录音：`libportaudio2`；解压 Ollama 发行包：`zstd`
-- 剪贴板与输入：`xclip`、`xdotool`；Wayland 另需 `python3-dbus`、`wl-clipboard`、`wtype`
-- 全局快捷键（evdev）与内核级按键模拟（uinput）：把当前用户加入 `input` 组，并为 `/dev/uinput` 加 udev 规则 `KERNEL=="uinput", GROUP="input", MODE="0660"`，重新登录生效
-
-**Windows / macOS** 的主窗口用 `pywebview`（`pip install pywebview`）；macOS 首次使用请按系统提示授予「辅助功能」与「屏幕录制」权限。Windows / macOS 尚未经真机验收。
-
-### 2. 启动应用
+Debian / Ubuntu 源码运行需安装以下系统包（对齐 [`packaging/linux/control.in`](packaging/linux/control.in)）：
 
 ```bash
-.venv/bin/python daemon.py              # 启动并打开主窗口
-.venv/bin/python daemon.py --background # 只在托盘运行，不弹主窗口（开机自启用这个）
+sudo apt install -y \
+  python3-venv python3-gi python3-dbus gir1.2-webkit2-4.1 gir1.2-gtk-3.0 \
+  libxcb-cursor0 libxkbcommon-x11-0 \
+  tesseract-ocr tesseract-ocr-chi-sim tesseract-ocr-chi-tra tesseract-ocr-eng \
+  xclip xdotool libportaudio2 zstd
 ```
 
-应用启动后依次拉起并看护三个组件，组件退出会自动重启（退避 2/4/8/16 秒，连续失败 5 次停止并提示）：
+- **Wayland 桌面**另建议安装：`wl-clipboard`、`wtype`。
+- **全局快捷键（evdev）与键盘输入（uinput）权限**：
+  - 安装官方 `.deb` 包会**自动部署** `/usr/lib/udev/rules.d/70-ollama-voice-input.rules`（通过 `systemd-logind` `uaccess` 授予当前登录桌面会话权限，**无需**手动将用户加入 `input` 组）。
+  - 若从源码直接运行，可参考 [`packaging/linux/70-ollama-voice-input.rules`](packaging/linux/70-ollama-voice-input.rules) 配置 `uaccess` 规则，或将当前用户加入 `input` 组并配置 `/dev/uinput` 规则 `KERNEL=="uinput", GROUP="input", MODE="0660"` 后重新登录。
+- **Windows / macOS** 源码运行主窗口依赖 `pywebview`（`pip install pywebview`）；macOS 首次使用需授予「麦克风」「辅助功能」与「屏幕录制」权限。Windows / macOS 尚未经真机验收。
 
-| 组件 | 默认地址 | 作用 |
-|:---|:---|:---|
-| Ollama | `127.0.0.1:17947` | 应用自带的 Ollama（`qwen3.5:4b`），不占用户自装 Ollama 的 `11434` |
-| 语音识别服务 | `127.0.0.1:17946` | Qwen3-ASR 1.7B |
-| 本地服务端 | `0.0.0.0:17945`（HTTPS） | 主窗口页面与 API；同一局域网的手机可扫码打开语音页 |
-
-- 托盘菜单：打开主界面、模型与热键设置、截屏原位翻译、纯 OCR 识别、显示状态与字幕提示、重试启动本地服务（本地服务端停止时出现）、退出。
-- 再次运行 `daemon.py` 不会启动第二份，只会把已运行的主窗口唤到前面。
-- 托盘「退出」会结束全部组件。
-
-### 3. 首次运行：一键装齐
-
-打开主窗口的「模型与热键设置」，点「一键装齐」，依次完成五步（失败停在该步，可重试）：
-
-1. 安装 Ollama `0.40.16`（官方发行包，校验后解压到数据根）
-2. 等待 Ollama 启动
-3. 拉取 `qwen3.5:4b`
-4. 安装语音识别运行环境（按显卡自动选 CUDA / CPU / Apple MPS 版本；独立 Python 与带哈希锁定的依赖，CUDA 版约 7 GB）
-5. 下载 Qwen3-ASR-1.7B 模型
-
-全部在数据根内完成，不需要管理员权限，不改系统 Python。
-
-### 4. 开机自启
-
-设置页「开机自启」开关（默认开），改动即时生效，启动命令为 `daemon.py --background`：
-
-- Linux：`~/.config/autostart/ollama-voice-input.desktop`
-- Windows：当前用户注册表 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`
-- macOS：当前用户 LaunchAgent（`~/Library/LaunchAgents`）
+</details>
 
 ---
 
-## 📂 数据目录
+## 📚 进阶参考（托盘、端口、数据目录与项目结构）
+
+<details>
+<summary>🧩 组件看护、托盘菜单与环境变量端口覆盖（OVI_PORT_*）</summary>
+
+应用启动后依次拉起并看护 3 个组件，异常退出自动退避重启（2/4/8/16 秒，连续失败 5 次停止并提示）；再次运行会唤起已有主窗口而非双开：
+
+| 组件 | 默认地址 | 覆盖环境变量 | 作用 |
+|:---|:---|:---|:---|
+| 本地服务端 | `0.0.0.0:17945`（HTTPS） | `OVI_PORT_SERVER` | 主窗口页面、API 与局域网手机扫码语音页 |
+| 语音识别服务 | `127.0.0.1:17946` | `OVI_PORT_ASR` | Qwen3-ASR 1.7B 流式识别 sidecar |
+| 应用自带 Ollama | `127.0.0.1:17947` | `OVI_PORT_OLLAMA` | `qwen3.5:4b` 纠错与翻译（不占 `11434`） |
+
+- 环境变量取值 `1–65535`（非法值启动即报错），设置后自动同步全部派生地址与探针并透传给子进程；端口被占用时不抢占，提示占用者 PID 与进程名。
+- **托盘菜单**：打开主界面、截屏原位翻译、纯 OCR 识别、**截屏标注**、显示状态与字幕提示、模型与热键设置、重试启动本地服务（服务停止时出现）、退出。
+
+</details>
+
+<details>
+<summary>📂 数据目录与本地 HTTPS 证书</summary>
+
+程序目录只读，所有配置、历史与模型保存在用户目录：
 
 | 系统 | 配置根（配置、令牌、证书） | 数据根（历史、任务、日志、运行环境、模型） |
 |:---|:---|:---|
@@ -112,64 +171,49 @@ python3 -m venv --system-site-packages .venv
 | Windows | `%APPDATA%\Ollama Voice Input` | `%LOCALAPPDATA%\Ollama Voice Input` |
 | macOS | `~/Library/Application Support/Ollama Voice Input` | 同左 |
 
-- 配置根：`config.json`、`web_input_token`（手机局域网访问令牌）、`certs/`（本地 Root CA 与服务端证书）
-- 数据根：`history.jsonl`、`jobs.json`、`logs/`、`runtimes/`（Ollama、uv、Python、识别服务运行环境）、`models/`（Qwen3-ASR 权重与 Ollama 模型）
-- 程序目录只读，不存任何数据。
+- 配置根：`config.json`、`web_input_token`、`certs/`（本地 Root CA 与服务端证书，启动自动检查并在局域网 IP 变化时自动续签）。
+- 数据根：`history.jsonl`、`jobs.json`、`logs/`、`runtimes/`、`models/`。
+- 手动重签证书：`.venv/bin/python -m _platform.certs --cert-dir ~/.config/ollama-voice-input/certs`
 
-证书在每次启动时自动检查与续签（局域网 IP 变化会重签）。需要手动重签时：
+</details>
 
-```bash
-.venv/bin/python -m _platform.certs --cert-dir ~/.config/ollama-voice-input/certs
-```
-
----
-
-## 🔌 端口覆盖
-
-三个组件的端口可以用环境变量改（启动 `daemon.py` 前设置；取值 1–65535，非法值启动即报错）：
-
-| 环境变量 | 默认 | 组件 |
-|:---|:---|:---|
-| `OVI_PORT_SERVER` | `17945` | 本地服务端（主窗口与手机访问都走它） |
-| `OVI_PORT_ASR` | `17946` | 语音识别服务 |
-| `OVI_PORT_OLLAMA` | `17947` | 应用自带的 Ollama |
-
-设置 `OVI_PORT_*` 会同步改变全部派生地址——包括服务端地址（主窗口、桌面客户端与手机局域网入口 `https://127.0.0.1:<OVI_PORT_SERVER>`）、语音识别服务地址（`http://127.0.0.1:<OVI_PORT_ASR>`）、应用自带 Ollama 地址（`http://127.0.0.1:<OVI_PORT_OLLAMA>`）以及对应的本地健康探针地址；环境变量会由看护层自动透传给拉起的子进程。
-
-端口被其他程序占用时，应用不会抢占，会在托盘或底栏提示占用者的 PID 与进程名。
-
----
-
-## 📁 项目结构（`ui → biz → logic`）
+<details>
+<summary>📁 项目结构（ui → biz → logic）与 Web / API 入口</summary>
 
 ```text
 ollama-voice-input/
-├── daemon.py                # 应用入口：托盘、主窗口、组件看护、快捷键与投递的装配
-├── app.py                   # 本地服务端工厂（由应用以 uvicorn 拉起）
+├── daemon.py                # 应用入口：托盘、主窗口、组件看护、快捷键与投递装配
+├── app.py                   # 本地服务端工厂（uvicorn）
+├── _version.py              # 版本号唯一来源（应用、三端打包、CI 与主页共用）
 ├── _paths.py / _ports.py    # 路径表与端口表（唯一来源）
 ├── _contracts.py            # v1 契约唯一来源（OpenAPI 由代码导出）
 ├── _supervision/            # 组件规格、看护状态机、进程记录与端口占用查询
-├── _desktop/                # 应用业务编排：看护运行器、主窗口启动器、单实例、开机自启、语音/截屏流程
+├── _desktop/                # 桌面业务编排：看护运行器、主窗口启动器、单实例、开机自启、语音/截屏流
 ├── _window/                 # 主窗口进程（Linux WebKit2GTK；Windows/macOS pywebview）
-├── _ui_desktop/             # 原生纯 UI：红十字框选、原位浮窗、底栏字幕、托盘
+├── _ui_desktop/             # 原生纯 UI：红十字框选、原位译文浮窗、309px 图标截屏标注、底栏字幕、托盘
 ├── _v3/ + _v3_app.py        # 服务端路由、鉴权、生产装配、一键装齐任务
 ├── _platform/ + _linux/     # 三端平台适配与本地 Root CA 证书管理
-├── runtimes/asr/            # Qwen3-ASR sidecar 与各变体锁定依赖
-├── static/v3/               # 主页（/）、设置页（/setup）、手机录音页（/voice）
-└── scripts/gate.py          # 分层测试门禁
+├── runtimes/asr/            # Qwen3-ASR sidecar 与锁定依赖
+├── static/v3/               # Voice Studio 主页（/）、内置设置（/setup）、手机录音页（/voice）
+├── packaging/               # Linux .deb / Windows .exe / macOS .dmg 打包脚本与说明
+├── docs/site/               # GitHub Pages 零构建双语产品主页与单源实机截图
+└── scripts/gate.py          # 9 层统一测试门禁（--layer all）
 ```
 
----
+- 主窗口 / 浏览器入口：`https://127.0.0.1:17945/`（内置设置直达 `/setup`；局域网手机扫码语音页 `/voice`）
+- OpenAPI 契约快照：[`static/v3/openapi.json`](static/v3/openapi.json)
 
-## 🔌 界面入口与 API
-
-- 主窗口：托盘「打开主界面」；页面同样可在浏览器打开 `https://127.0.0.1:17945/`
-- 模型与热键设置：`/setup`
-- 手机局域网语音录入：`/voice`（设置页扫码，带访问令牌）
-- OpenAPI 契约快照：`static/v3/openapi.json`
+</details>
 
 ---
 
-## 📄 License
+## 📄 开源与商业双许可
 
-[AGPL-3.0-only](LICENSE) + [商业授权](COMMERCIAL.md) — 个人、研究、企业内部使用及遵循 AGPL-3.0 的开源分发免费；闭源二次封装或商用需商业授权。第三方依赖声明见 [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md)。
+本项目采用 **`AGPL-3.0-only` + 商业授权** 双许可模式，边界清晰：
+
+| 许可路径 | 费用 | 适用场景 | 完整条款 |
+|:---|:---:|:---|:---|
+| **开源许可（`AGPL-3.0-only`）** | **完全免费** | 个人下载与日常使用、学术研究与教学评估、**企业/组织内部部署自用**、遵守 `AGPL-3.0-only` 全部条款的开源修改与分发 | [`LICENSE`](LICENSE) |
+| **商业授权（Commercial License）** | 需商业许可 | 闭源二次封装 / 贴牌分发（OEM / White-label）、将核心代码集成至闭源商业产品分发、基于本软件提供闭源商业 SaaS / 托管服务 | [`COMMERCIAL.md`](COMMERCIAL.md) |
+
+第三方开源组件及 LGPL 动态链接可替换说明详见 [`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md)。商业授权咨询请通过 [GitHub Issues](https://github.com/jackche8/voice-input/issues) 或 [GitHub Discussions](https://github.com/jackche8/voice-input/discussions) 联系维护者。
