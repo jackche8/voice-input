@@ -1,15 +1,15 @@
 """系统剪贴板读写与 MIME 类型无损快照（xclip 优先）。失败返回明确原因，由调用方决定可见性。
 
-daemon 以 GDK_BACKEND=x11 (XWayland) 运行：
-- xclip 写入 X11 CLIPBOARD → Mutter 自动桥接到 Wayland 剪贴板
-- wl-copy 在 GNOME 上需要创建临时窗口抢焦点获取 serial，
-  导致开始菜单闪烁且可能因无法获取焦点而静默失败
+daemon 以 GDK_BACKEND=x11 (XWayland) 运行，全部剪贴板读写与 TARGETS 探测均统一为 `xclip` 优先：
+- xclip 经 X11 CLIPBOARD 读写 → Mutter 自动桥接到 Wayland 剪贴板
+- wl-paste / wl-copy 在 GNOME Wayland 上需要创建临时窗口抢焦点获取 serial，
+  会引发开始菜单/窗口闪烁且可能因无法获取焦点而失败；仅在无 `xclip` 或纯 Wayland 传输失败（如无 XWayland DISPLAY）时回退
 
 图片保护根因修复：
 当用户剪贴板里只有截图（如 `image/png`）而无纯文本时，盲调 `xclip -selection clipboard -o` 会因找不到
 `STRING` target 失败返回空串，随后粘贴完把空串写回剪贴板，导致用户刚复制的截图永久丢失。
-现先探测 `TARGETS`（X11 `xclip -t TARGETS -o` / Wayland `wl-paste --list-types`），若为纯图片则完整快照
-原始字节与 MIME 类型，粘贴后精确写回原图片剪贴板。
+现先探测 `TARGETS`（优先 `xclip -t TARGETS -o`，仅无 `xclip` 或纯 Wayland 传输失败时回退 `wl-paste --list-types`），
+若为纯图片则完整快照原始字节与 MIME 类型，粘贴后精确写回原图片剪贴板。
 """
 from __future__ import annotations
 
@@ -76,6 +76,13 @@ def _pick_image_mime(targets: list[str]) -> str | None:
     return None
 
 
+def _stderr_lower(result: object) -> str:
+    raw_err = getattr(result, "stderr", b"")
+    if isinstance(raw_err, (bytes, bytearray)):
+        return raw_err.decode("utf-8", errors="replace").lower()
+    return str(raw_err or "").lower()
+
+
 class SystemClipboard:
     def __init__(
         self,
@@ -94,16 +101,15 @@ class SystemClipboard:
         return self._env.get("XDG_SESSION_TYPE") == "wayland"
 
     def _probe_targets(self) -> tuple[Literal["ok", "empty", "failed"], list[str]]:
-        """探测当前剪贴板可用 MIME / TARGETS，区分 `ok`、`empty` 与 `failed`。"""
+        """探测当前剪贴板可用 MIME / TARGETS（xclip 优先），区分 `ok`、`empty` 与 `failed`。"""
         cmds: list[list[str]] = []
-        if self._wayland() and self._which("wl-paste"):
-            cmds.append(["wl-paste", "--list-types"])
         if self._which("xclip"):
             cmds.append(["xclip", "-selection", "clipboard", "-t", "TARGETS", "-o"])
+        if self._wayland() and self._which("wl-paste"):
+            cmds.append(["wl-paste", "--list-types"])
         if not cmds:
             return "failed", []
 
-        saw_empty = False
         for cmd in cmds:
             try:
                 result = self._run(cmd, capture_output=True, timeout=2)
@@ -118,17 +124,11 @@ class SystemClipboard:
                 lines = [line.strip() for line in raw.splitlines() if line.strip()]
                 if lines:
                     return "ok", lines
-                saw_empty = True
-            else:
-                raw_err = getattr(result, "stderr", b"")
-                err_text = (
-                    raw_err.decode("utf-8", errors="replace")
-                    if isinstance(raw_err, (bytes, bytearray))
-                    else str(raw_err or "")
-                ).lower()
-                if any(hint in err_text for hint in _EMPTY_CLIPBOARD_HINTS):
-                    saw_empty = True
-        return ("empty", []) if saw_empty else ("failed", [])
+                return "empty", []
+            err_text = _stderr_lower(result)
+            if any(hint in err_text for hint in _EMPTY_CLIPBOARD_HINTS):
+                return "empty", []
+        return "failed", []
 
     def list_targets(self) -> list[str]:
         """枚举当前剪贴板可用 MIME / TARGETS。"""
@@ -170,19 +170,32 @@ class SystemClipboard:
         return None
 
     def read_binary(self, mime: str) -> bytes:
-        """按指定 MIME 类型读取原始字节。读不到返回空字节。"""
+        """按指定 MIME 类型读取原始字节（xclip 优先）。读不到返回空字节。"""
         cmds: list[list[str]] = []
-        if self._wayland() and self._which("wl-paste"):
-            cmds.append(["wl-paste", "--type", mime])
         if self._which("xclip"):
             cmds.append(["xclip", "-selection", "clipboard", "-t", mime, "-o"])
+        if self._wayland() and self._which("wl-paste"):
+            cmds.append(["wl-paste", "--type", mime])
+        mime_low = mime.strip().lower()
+        missing_target_hint = f"target {mime_low} not available" if mime_low else ""
         for cmd in cmds:
             try:
                 result = self._run(cmd, capture_output=True, timeout=2)
-                if result.returncode == 0 and result.stdout:
-                    return bytes(result.stdout) if isinstance(result.stdout, (bytes, bytearray)) else result.stdout.encode("utf-8")
             except Exception:
                 continue
+            if result.returncode == 0:
+                if not result.stdout:
+                    return b""
+                return (
+                    bytes(result.stdout)
+                    if isinstance(result.stdout, (bytes, bytearray))
+                    else result.stdout.encode("utf-8")
+                )
+            err_text = _stderr_lower(result)
+            if (missing_target_hint and missing_target_hint in err_text) or any(
+                hint in err_text for hint in _EMPTY_CLIPBOARD_HINTS
+            ):
+                return b""
         return b""
 
     def _read_text_status(self) -> tuple[Literal["ok", "empty", "failed"], str]:
@@ -204,12 +217,7 @@ class SystemClipboard:
             else:
                 text = str(result.stdout or "")
             return ("ok", text) if text else ("empty", "")
-        raw_err = getattr(result, "stderr", b"")
-        err_text = (
-            raw_err.decode("utf-8", errors="replace")
-            if isinstance(raw_err, (bytes, bytearray))
-            else str(raw_err or "")
-        ).lower()
+        err_text = _stderr_lower(result)
         if any(hint in err_text for hint in _EMPTY_CLIPBOARD_HINTS):
             return "empty", ""
         return "failed", ""

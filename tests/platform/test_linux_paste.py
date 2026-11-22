@@ -390,6 +390,166 @@ def test_wayland_wl_paste_image_snapshot_and_restore():
     assert restored[-1] == (["wl-copy", "--type", "image/png"], raw_png)
 
 
+def _which_xclip_and_wl(name: str) -> str | None:
+    return f"/usr/bin/{name}" if name in {"xclip", "wl-paste", "wl-copy"} else None
+
+
+def test_wayland_text_snapshot_prefers_xclip_without_wl_paste():
+    """Wayland 共存 xclip/wl-paste 时，文本剪贴板 snapshot() 只调 xclip，零 wl-paste 调用。"""
+    run_cmds: list[list[str]] = []
+
+    def fake_run(cmd, **kw):
+        del kw
+        run_cmds.append(cmd)
+        if cmd == ["xclip", "-selection", "clipboard", "-t", "TARGETS", "-o"]:
+            return subprocess.CompletedProcess(cmd, 0, b"TARGETS\nUTF8_STRING\n", b"")
+        if cmd == ["xclip", "-selection", "clipboard", "-o"]:
+            return subprocess.CompletedProcess(cmd, 0, "Wayland 原文本".encode("utf-8"), b"")
+        if cmd == ["wl-paste", "--list-types"]:
+            return subprocess.CompletedProcess(cmd, 0, b"text/plain;charset=utf-8\n", b"")
+        return subprocess.CompletedProcess(cmd, 1, b"", b"")
+
+    clip = SystemClipboard(which=_which_xclip_and_wl, environ={"XDG_SESSION_TYPE": "wayland"}, run=fake_run)
+    snap = clip.snapshot()
+    assert snap.kind == "text" and snap.text == "Wayland 原文本"
+    assert run_cmds == [
+        ["xclip", "-selection", "clipboard", "-t", "TARGETS", "-o"],
+        ["xclip", "-selection", "clipboard", "-o"],
+    ]
+    assert all(cmd[0] != "wl-paste" for cmd in run_cmds)
+
+
+def test_wayland_image_snapshot_and_restore_prefer_xclip_without_wl_clipboard():
+    """Wayland 共存 xclip/wl-clipboard 时，图片剪贴板快照与恢复全走 xclip，零 wl-paste/wl-copy 调用。"""
+    raw_png = b"\x89PNG\r\n\x1a\nWAYLAND_XCLIP_IMAGE"
+    run_cmds: list[list[str]] = []
+    popen_cmds: list[tuple[list[str], bytes]] = []
+
+    def fake_run(cmd, **kw):
+        del kw
+        run_cmds.append(cmd)
+        if cmd == ["xclip", "-selection", "clipboard", "-t", "TARGETS", "-o"]:
+            return subprocess.CompletedProcess(cmd, 0, b"TARGETS\nimage/png\n", b"")
+        if cmd == ["xclip", "-selection", "clipboard", "-t", "image/png", "-o"]:
+            return subprocess.CompletedProcess(cmd, 0, raw_png, b"")
+        if cmd == ["wl-paste", "--list-types"]:
+            return subprocess.CompletedProcess(cmd, 0, b"image/png\n", b"")
+        if cmd == ["wl-paste", "--type", "image/png"]:
+            return subprocess.CompletedProcess(cmd, 0, raw_png, b"")
+        return subprocess.CompletedProcess(cmd, 1, b"", b"")
+
+    class Proc:
+        def __init__(self, cmd):
+            self.cmd = cmd
+            self.returncode = 0
+
+        def communicate(self, payload=b"", timeout=None):
+            del timeout
+            popen_cmds.append((self.cmd, bytes(payload)))
+            return b"", b""
+
+    clip = SystemClipboard(
+        which=_which_xclip_and_wl,
+        environ={"XDG_SESSION_TYPE": "wayland"},
+        popen=lambda cmd, **kw: Proc(cmd),
+        run=fake_run,
+    )
+    snap = clip.snapshot()
+    assert snap.kind == "binary" and snap.mime == "image/png" and snap.data == raw_png
+    assert clip.restore_snapshot(snap) is None
+    assert run_cmds == [
+        ["xclip", "-selection", "clipboard", "-t", "TARGETS", "-o"],
+        ["xclip", "-selection", "clipboard", "-t", "image/png", "-o"],
+    ]
+    assert popen_cmds == [(["xclip", "-selection", "clipboard", "-t", "image/png"], raw_png)]
+    assert all(cmd[0] != "wl-paste" for cmd in run_cmds)
+    assert all(cmd[0] != "wl-copy" for cmd, _ in popen_cmds)
+
+
+def test_wayland_empty_clipboard_stops_at_xclip_without_wl_paste():
+    """Wayland 共存时，xclip 返回空剪贴板提示或 rc=0 空输出均须立即返 empty，严禁跌落 wl-paste。"""
+    cases = [
+        subprocess.CompletedProcess(
+            ["xclip", "-selection", "clipboard", "-t", "TARGETS", "-o"],
+            1,
+            b"",
+            b"Error: target TARGETS not available\n",
+        ),
+        subprocess.CompletedProcess(
+            ["xclip", "-selection", "clipboard", "-t", "TARGETS", "-o"],
+            0,
+            b"\n",
+            b"",
+        ),
+    ]
+    for xclip_res in cases:
+        run_cmds: list[list[str]] = []
+
+        def fake_run(cmd, *, _res=xclip_res, _log=run_cmds, **kw):
+            del kw
+            _log.append(cmd)
+            if cmd[0] == "xclip":
+                return _res
+            return subprocess.CompletedProcess(cmd, 1, b"", b"Nothing is copied\n")
+
+        clip = SystemClipboard(which=_which_xclip_and_wl, environ={"XDG_SESSION_TYPE": "wayland"}, run=fake_run)
+        snap = clip.snapshot()
+        assert snap.kind == "empty"
+        assert run_cmds == [["xclip", "-selection", "clipboard", "-t", "TARGETS", "-o"]]
+        assert all(cmd[0] != "wl-paste" for cmd in run_cmds)
+
+
+def test_wayland_read_binary_empty_or_missing_target_stops_at_xclip_without_wl_paste():
+    """Wayland 共存时，read_binary 遇 xclip rc=0 空输出或目标不可用/空剪贴板提示必须立即返 b''，严禁跌落 wl-paste。"""
+    xclip_cmd = ["xclip", "-selection", "clipboard", "-t", "image/png", "-o"]
+    cases = [
+        subprocess.CompletedProcess(xclip_cmd, 0, b"", b""),
+        subprocess.CompletedProcess(xclip_cmd, 1, b"", b"Error: target image/png not available\n"),
+        subprocess.CompletedProcess(xclip_cmd, 1, b"", b"Nothing is copied\n"),
+    ]
+    for xclip_res in cases:
+        run_cmds: list[list[str]] = []
+
+        def fake_run(cmd, *, _res=xclip_res, _log=run_cmds, **kw):
+            del kw
+            _log.append(cmd)
+            if cmd[0] == "xclip":
+                return _res
+            return subprocess.CompletedProcess(cmd, 0, b"\x89PNG_SHOULD_NOT_FALLBACK", b"")
+
+        clip = SystemClipboard(which=_which_xclip_and_wl, environ={"XDG_SESSION_TYPE": "wayland"}, run=fake_run)
+        assert clip.read_binary("image/png") == b""
+        assert run_cmds == [xclip_cmd]
+        assert all(cmd[0] != "wl-paste" for cmd in run_cmds)
+
+
+def test_wayland_falls_back_to_wl_paste_when_xclip_cannot_open_display():
+    """纯 Wayland 无 XWayland（xclip 报 Can't open display）时回退 wl-paste --list-types 与 --type image/png。"""
+    raw_png = b"\x89PNG\r\n\x1a\nPURE_WAYLAND_FALLBACK"
+    run_cmds: list[list[str]] = []
+
+    def fake_run(cmd, **kw):
+        del kw
+        run_cmds.append(cmd)
+        if cmd[0] == "xclip":
+            return subprocess.CompletedProcess(cmd, 1, b"", b"Error: Can't open display: (null)\n")
+        if cmd == ["wl-paste", "--list-types"]:
+            return subprocess.CompletedProcess(cmd, 0, b"image/png\n", b"")
+        if cmd == ["wl-paste", "--type", "image/png"]:
+            return subprocess.CompletedProcess(cmd, 0, raw_png, b"")
+        return subprocess.CompletedProcess(cmd, 1, b"", b"")
+
+    clip = SystemClipboard(which=_which_xclip_and_wl, environ={"XDG_SESSION_TYPE": "wayland"}, run=fake_run)
+    snap = clip.snapshot()
+    assert snap.kind == "binary" and snap.mime == "image/png" and snap.data == raw_png
+    assert run_cmds == [
+        ["xclip", "-selection", "clipboard", "-t", "TARGETS", "-o"],
+        ["wl-paste", "--list-types"],
+        ["xclip", "-selection", "clipboard", "-t", "image/png", "-o"],
+        ["wl-paste", "--type", "image/png"],
+    ]
+
+
 def test_ibus_private_bus_probe_and_wayland_bus_file_fallback(tmp_path: Path):
     """根治验证：IBus 通过私有总线地址探测 CurrentInputContext，不调 gdbus introspect --session。"""
     sock_file = tmp_path / "ibus-wayland.sock"
