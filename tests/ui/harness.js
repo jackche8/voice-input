@@ -122,9 +122,19 @@
     assert(langPairChanges.length === 1 && langPairChanges[0] === "zh-en", "工作台切换语言对走 onChangeLangPair 回调");
     assert(autoHint.textContent.indexOf("1s 自动翻译") !== -1, "自动翻译开启时左盒头展示停顿 1s 提示");
 
-    /* 校验 studio.css 仅对翻译面板 .studio-box 设 max-height，不裁切 OCR 预览 */
-    const trBoxMaxH = window.getComputedStyle(homeRoot.querySelector('[data-panel-view="translate"] .studio-box')).maxHeight;
-    assert(trBoxMaxH !== "none", "翻译面板 .studio-box 存在 max-height 约束以支持长译文滚动：" + trBoxMaxH);
+    /* 校验 studio.css 仅对翻译面板 .studio-box 设视口级 max-height（不再硬顶 560px 留白），且不裁切 OCR 预览 */
+    const trBoxes = homeRoot.querySelectorAll('[data-panel-view="translate"] .studio-box');
+    const trBoxEl = trBoxes[0];
+    const trLastBoxEl = trBoxes[trBoxes.length - 1];
+    const trSplitEl = homeRoot.querySelector('[data-panel-view="translate"] .studio-split');
+    const trBoxMaxH = window.getComputedStyle(trBoxEl).maxHeight;
+    const expectedMaxH = Math.max(0, window.innerHeight - 114);
+    assert(
+      trBoxMaxH !== "none" && Math.abs(parseFloat(trBoxMaxH) - expectedMaxH) <= 4,
+      "翻译面板 .studio-box 随视口高度自适应 max-height（无 560px 硬上限）：" + trBoxMaxH + " vs " + expectedMaxH
+    );
+    const trGapBottom = Math.abs(trSplitEl.getBoundingClientRect().bottom - trLastBoxEl.getBoundingClientRect().bottom);
+    assert(trGapBottom <= 2, "翻译面板 .studio-box 填满父容器高度无底部大块留白：gap=" + trGapBottom.toFixed(1));
 
     srcInput.focus();
     home.setState({ asr: { message: "后台状态轮询" }, hotkeyFocus: "hotkey_voice" });
