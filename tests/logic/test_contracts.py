@@ -8,6 +8,9 @@ from _contracts import (
     AckResult,
     AppConfig,
     AppConfigUpdate,
+    AppConfigView,
+    AudioInputDevice,
+    AudioInputListResponse,
     ComponentName,
     ComponentReport,
     ComponentState,
@@ -343,8 +346,13 @@ def test_openapi_skeleton_includes_both_sse_families_and_no_fake_paths():
         "JobRecord",
         "HistoryRecord",
         "AppConfig",
+        "AppConfigView",
+        "AppConfigUpdate",
+        "AudioInputDevice",
+        "AudioInputListResponse",
     ):
         assert required in names, required
+    assert "error" not in spec["components"]["schemas"]["AudioInputListResponse"]["properties"]
     assert "ProductStatusEvent" not in names
     for model in contract_models():
         assert model.__name__ in names
@@ -398,3 +406,43 @@ def test_resend_request_requires_original_job_id():
         UtteranceResendRequest(job_id="n", text="t")
     with pytest.raises(ValidationError):
         UtteranceResendRequest.model_validate({"job_id": "n", "text": "t", "original_job_id": ""})
+
+
+def test_ui_theme_and_audio_input_contracts():
+    cfg = AppConfig()
+    assert cfg.ui_theme == "light"
+    assert cfg.audio_input_device == ""
+    with pytest.raises(ValidationError):
+        AppConfig(ui_theme="sepia")  # type: ignore[arg-type]
+
+    upd_clear = AppConfigUpdate(ui_theme="dark", audio_input_device="")
+    assert upd_clear.ui_theme == "dark"
+    assert upd_clear.audio_input_device == ""
+    with pytest.raises(ValidationError):
+        AppConfigUpdate(ui_theme="blue")  # type: ignore[arg-type]
+
+    view = AppConfigView(
+        polish_enabled=False,
+        custom_keywords=[],
+        translate_lang_pair="zh-en",
+        translate_auto_enabled=True,
+        hotkey_voice="ctrl+alt+z",
+        hotkey_screenshot="ctrl+alt+x",
+        hotkey_repeat="ctrl+alt+r",
+        hotkey_annotate="ctrl+alt+a",
+        autostart_enabled=True,
+        ollama_model="qwen3.5:4b",
+    )
+    assert view.ui_theme == "light" and view.audio_input_device == ""
+
+    dev = AudioInputDevice(name="USB Mic", hostapi="Windows DirectSound", is_default=True)
+    assert dev.model_dump() == {"name": "USB Mic", "hostapi": "Windows DirectSound", "is_default": True}
+    with pytest.raises(ValidationError):
+        AudioInputDevice(name="")
+    with pytest.raises(ValidationError):
+        AudioInputDevice.model_validate({"name": "USB Mic", "index": 0})
+
+    resp = AudioInputListResponse()
+    assert resp.ok is True and resp.default_device is None and resp.devices == []
+    with pytest.raises(ValidationError):
+        AudioInputListResponse.model_validate({"ok": True, "devices": [], "error": "boom"})

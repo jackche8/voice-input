@@ -17,7 +17,13 @@ import pytest
 from fastapi.testclient import TestClient
 
 from _asr_provider import SidecarStreamProvider
-from _contracts import OcrTextBlock, OcrTextLine, SetupTaskKind
+from _contracts import (
+    AudioInputDevice,
+    AudioInputListResponse,
+    OcrTextBlock,
+    OcrTextLine,
+    SetupTaskKind,
+)
 from _paths import INTERNAL_SETUP_WORKER_FLAG, PROGRAM_ROOT, STATIC_V3, AppPaths
 from _v3.production import (
     ProductionEndpoints,
@@ -141,6 +147,10 @@ def world(tmp_path: Path):
         ocr_languages=lambda: ["eng", "chi_sim", "chi_tra"],
         keyboard_devices=lambda: ["/dev/input/event5"],  # Wayland 环境：不碰真实输入设备
         list_ips=lambda: ["192.168.10.20"],
+        list_audio_inputs=lambda: AudioInputListResponse(
+            default_device="Fixture USB Mic",
+            devices=[AudioInputDevice(name="Fixture USB Mic", hostapi="PulseAudio", is_default=True)],
+        ),
         http_transport=httpx.MockTransport(services),
         spawn=runners.append,
     )
@@ -178,6 +188,7 @@ def test_config_migrated_keeps_user_fields_and_hides_secrets(world):
     assert "fixture-secret" not in json.dumps(view) and view["ollama_model"] == "qwen3.5:4b"
     assert "translate_target_lang" not in view
     assert view["translate_lang_pair"] == "zh-en" and view["translate_auto_enabled"] is True
+    assert view["ui_theme"] == "light" and view["audio_input_device"] == ""
 
 
 def test_real_adapters_drive_from_audio_polish_and_queue(world):
@@ -242,6 +253,54 @@ def test_lan_access_uses_explicit_token(world):
 
 def test_pages_served(world):
     assert world["client"].get("/setup").status_code == 200
+
+
+def test_production_audio_inputs_wired_and_lazy_default_binds_os_name(world, tmp_path, monkeypatch):
+    import _v3.production as prod_mod
+
+    # 1. 注入夹具走真实路由分发返回 200
+    resp = world["client"].get("/api/v1/audio-inputs")
+    assert resp.status_code == 200, resp.text
+    assert resp.json() == {
+        "ok": True,
+        "default_device": "Fixture USB Mic",
+        "devices": [{"name": "Fixture USB Mic", "hostapi": "PulseAudio", "is_default": True}],
+    }
+
+    # 2. 默认 SystemAdapters(list_audio_inputs=None) 构造期绝不触发枚举，请求时才延迟传 refresh=True 与 paths.os_name
+    seen: list[tuple[bool, str | None]] = []
+
+    def _spy_list(*, refresh: bool = True, os_name: str | None = None, **_kw) -> AudioInputListResponse:
+        seen.append((refresh, os_name))
+        return AudioInputListResponse(
+            default_device="Win Lazy Mic",
+            devices=[AudioInputDevice(name="Win Lazy Mic", hostapi="Windows DirectSound", is_default=True)],
+        )
+
+    monkeypatch.setattr(prod_mod, "list_audio_input_devices", _spy_list)
+    win_paths = AppPaths.for_roots(
+        config_root=tmp_path / "lazy-win" / "c",
+        data_root=tmp_path / "lazy-win" / "d",
+        runtime_dir=tmp_path / "lazy-win" / "r",
+        os_name="windows",
+        environ={"APPDATA": str(tmp_path / "a"), "LOCALAPPDATA": str(tmp_path / "l")},
+    )
+    lazy_rt = compose_production_runtime(
+        paths=win_paths,
+        token=FAKE_TOKEN,
+        adapters=SystemAdapters(environ={}, http_transport=httpx.MockTransport(FakeServices())),
+        endpoints=ENDPOINTS,
+    )
+    assert seen == [], "compose_production_runtime 构造期不得主动触发声卡枚举"
+    with TestClient(
+        create_app(lazy_rt, static_v3=STATIC_V3),
+        client=("127.0.0.1", 50000),
+        base_url="https://127.0.0.1:17945",
+    ) as client:
+        out = client.get("/api/v1/audio-inputs")
+        assert out.status_code == 200, out.text
+        assert out.json()["default_device"] == "Win Lazy Mic"
+    assert seen == [(True, "windows")]
 
 
 def test_real_translate_and_translate_blocks_adapters_wire_new_contract(world):

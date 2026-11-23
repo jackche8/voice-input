@@ -709,6 +709,8 @@ class AppConfig(BaseModel):
     hotkey_repeat: str = "ctrl+alt+r"
     hotkey_annotate: str = "ctrl+alt+a"
     autostart_enabled: bool = True
+    ui_theme: Literal["light", "dark"] = "light"
+    audio_input_device: str = ""
     vision_model: str | None = None
     voice_mode: str | None = None
     asr_sidecar_url: str | None = None
@@ -755,6 +757,8 @@ class AppConfigView(BaseModel):
     hotkey_repeat: str
     hotkey_annotate: str
     autostart_enabled: bool
+    ui_theme: Literal["light", "dark"] = "light"
+    audio_input_device: str = ""
     ollama_model: str = Field(description="产品固定纠错/翻译模型，只读")
 
 
@@ -772,6 +776,26 @@ class AppConfigUpdate(BaseModel):
     hotkey_repeat: str | None = Field(default=None, min_length=1)
     hotkey_annotate: str | None = Field(default=None, min_length=1)
     autostart_enabled: bool | None = None
+    ui_theme: Literal["light", "dark"] | None = None
+    audio_input_device: str | None = None
+
+
+class AudioInputDevice(BaseModel):
+    """单个可用麦克风输入设备（不暴露易随热插拔漂移的 PortAudio 整型 index）。"""
+
+    model_config = ConfigDict(extra="forbid")
+    name: str = Field(min_length=1)
+    hostapi: str = ""
+    is_default: bool = False
+
+
+class AudioInputListResponse(BaseModel):
+    """GET /api/v1/audio-inputs 成功响应；0 麦返空列表，枚举/音频库异常单轨抛 dependency_failed。"""
+
+    model_config = ConfigDict(extra="forbid")
+    ok: Literal[True] = True
+    default_device: str | None = None
+    devices: list[AudioInputDevice] = Field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -1069,6 +1093,8 @@ def contract_models() -> tuple[type[BaseModel], ...]:
         AppConfig,
         AppConfigView,
         AppConfigUpdate,
+        AudioInputDevice,
+        AudioInputListResponse,
         ApiStatusResponse,
         ComponentStatus,
         ComponentReport,
@@ -1126,6 +1152,8 @@ __all__ = [
     "ProductConfigChangedEvent",
     "AppConfigView",
     "AppConfigUpdate",
+    "AudioInputDevice",
+    "AudioInputListResponse",
     "AsrSetupStatus",
     "LanAccessEntry",
     "LanAccessResponse",

@@ -10,7 +10,13 @@ from pathlib import Path
 
 import pytest
 
-from _procfs import descendants_of, is_alive
+from _procfs import (
+    descendants_of,
+    is_alive,
+    iter_process_table,
+    iter_process_table_with_starttime,
+    session_members,
+)
 from runtimes.asr.process_guard import ChildProcessGuard
 
 ROOT = Path("/opt/ollama-voice-input")
@@ -246,3 +252,33 @@ def test_running_child_is_alive():
     finally:
         child.kill()
         child.wait(timeout=5)
+
+
+def test_procfs_and_child_process_guard_safe_without_proc(tmp_path: Path):
+    """Windows / macOS 无 /proc 目录时，惰性 iterdir()（Python 3.12 生成器语义）不可外泄 FileNotFoundError，看护器安全返回空集。"""
+    missing_proc = tmp_path / "nonexistent-proc"
+
+    class _LazyMissingProc:
+        """模拟 Python 3.12 Path.iterdir() 惰性生成器：调用 iterdir() 不报错，迭代首个元素才抛 FileNotFoundError。"""
+
+        def iterdir(self):
+            raise FileNotFoundError(r"\proc")
+            yield  # pragma: no cover
+
+        def exists(self) -> bool:
+            return False
+
+        def __truediv__(self, other: str) -> Path:
+            return missing_proc / other
+
+    for proc_root in (missing_proc, _LazyMissingProc()):
+        assert iter_process_table(proc_root=proc_root) == {}
+        assert iter_process_table_with_starttime(proc_root=proc_root) == {}
+        assert session_members(os.getpid(), proc_root=proc_root) == []
+
+        guard = ChildProcessGuard(proc_root=proc_root)
+        assert guard.owner_starttime is None
+        assert guard.remember() == set()
+        assert guard.reclaimable() == set()
+        assert guard.reap() == {"already": False, "term": [], "kill": [], "survived": []}
+        assert guard.reap() == {"already": True, "term": [], "kill": [], "survived": []}

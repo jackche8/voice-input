@@ -98,8 +98,9 @@ def main() -> None:
         api=api, status=status, invoke_ui=bridge.post, get_virtual_rect=lambda: query_virtual_screen_rect(app),
     )
     voice = VoiceFlow(
-        api=api, status=status, probe=probe, source_factory=SoundDeviceSource, beep=platform.play_beep,
-        context_provider=build_keywords_context_provider(api),
+        api=api, status=status, probe=probe,
+        source_factory=lambda: SoundDeviceSource(device_provider=lambda: config.load().audio_input_device),
+        beep=platform.play_beep, context_provider=build_keywords_context_provider(api),
     )
     repeat_action = RepeatAction(api=api, last=last, probe=probe, status=status, job_ids=new_job_id)
     actions = DesktopActions(voice=voice, capture=capture_flow, repeat=repeat_action)

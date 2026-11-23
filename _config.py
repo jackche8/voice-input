@@ -118,6 +118,8 @@ def config_view(config: AppConfig) -> AppConfigView:
         hotkey_repeat=config.hotkey_repeat,
         hotkey_annotate=config.hotkey_annotate,
         autostart_enabled=config.autostart_enabled,
+        ui_theme=config.ui_theme,
+        audio_input_device=config.audio_input_device,
         ollama_model=config.ollama_model,
     )
 
@@ -145,6 +147,8 @@ def _normalized_update(update: AppConfigUpdate) -> dict[str, object]:
                 ) from exc
     if "custom_keywords" in fields:
         fields["custom_keywords"] = [str(item).strip() for item in fields["custom_keywords"] if str(item).strip()]
+    if "audio_input_device" in fields:
+        fields["audio_input_device"] = str(fields["audio_input_device"]).strip()
     return fields
 
 

@@ -60,6 +60,7 @@ const requiredOps = [
   "setup_install_all_api_setup_install_all_post",
   "retry_component_api_v1_components__name__retry_post",
   "lan_access_api_v1_lan_access_get",
+  "list_audio_inputs_api_v1_audio_inputs_get",
   "get_config_api_v1_config_get",
   "post_config_api_v1_config_post",
   "history_api_v1_history_get",
@@ -91,7 +92,7 @@ if (!bootstrapJs.includes('"/openapi.snapshot.json"') || bootstrapJs.includes("j
 for (const file of businessFiles) {
   const text = fs.readFileSync(file, "utf8");
   const rel = path.relative(repo, file);
-  if (/localStorage|sessionStorage/.test(text)) fail(rel + " 使用了 Web Storage");
+  if (/localStorage|sessionStorage|indexedDB|document\.cookie/.test(text)) fail(rel + " 使用了 Web Storage 或 Cookie");
   if (/\/api\/v1\/|\/api\/setup\//.test(text)) fail(rel + " 手写了 /api/ 路径，应只从 OpenAPI 派生");
 }
 if (!failures.some((m) => m.includes("手写了") || m.includes("Web Storage"))) {
@@ -310,6 +311,10 @@ async function runUnit() {
   if (ocrOp.method !== "POST" || ocrOp.path !== "/api/v1/ocr-translate" || ocrOp.access !== "local") {
     fail("ocr-translate 派生错误 " + JSON.stringify(ocrOp));
   } else pass("ocr-translate POST /api/v1/ocr-translate 由 OpenAPI 派生且仅本机");
+  const audioInputsOp = catalog.operation("list_audio_inputs_api_v1_audio_inputs_get");
+  if (audioInputsOp.method !== "GET" || audioInputsOp.path !== "/api/v1/audio-inputs" || audioInputsOp.access !== "local") {
+    fail("audio-inputs 派生错误 " + JSON.stringify(audioInputsOp));
+  } else pass("audio-inputs GET /api/v1/audio-inputs 由 OpenAPI 派生且仅本机");
 
   const fileCtx = B.createContext({ protocol: "file:", hostname: "", origin: "file://", href: "file:///tmp/voice.html", search: "" });
   if (fileCtx.kind !== "file" || fileCtx.allowFetch) fail("file:// 上下文未关闭请求");
@@ -335,6 +340,13 @@ async function runUnit() {
   } catch (err) {
     if (err.blocked && world.calls.length === 0) pass("局域网调用仅本机接口在客户端被阻止，未发出 fetch");
     else fail("局域网阻止行为异常：" + (err && err.message) + " calls=" + world.calls.length);
+  }
+  try {
+    await httpLan.call("list_audio_inputs_api_v1_audio_inputs_get");
+    fail("局域网不应发出 audio-inputs 请求");
+  } catch (err) {
+    if (err.blocked && world.calls.length === 0) pass("局域网调用 audio-inputs 在客户端被阻止，未发出 fetch");
+    else fail("局域网 audio-inputs 阻止行为异常：" + (err && err.message) + " calls=" + world.calls.length);
   }
 
   world.calls.length = 0;
@@ -429,7 +441,7 @@ async function runUnit() {
       return jsonRes(200, setupWorld.check);
     } },
     { path: "/api/v1/config", method: "GET", handler: function () {
-      return jsonRes(200, { polish_enabled: false, custom_keywords: ["Alpha"], translate_lang_pair: "zh-en", translate_auto_enabled: true, hotkey_voice: "ctrl+alt+z", hotkey_screenshot: "ctrl+alt+x", hotkey_ocr: "ctrl+alt+o", hotkey_repeat: "ctrl+alt+r", hotkey_annotate: "ctrl+alt+a", autostart_enabled: true, ollama_model: "qwen3.5:4b" });
+      return jsonRes(200, { polish_enabled: false, custom_keywords: ["Alpha"], translate_lang_pair: "zh-en", translate_auto_enabled: true, hotkey_voice: "ctrl+alt+z", hotkey_screenshot: "ctrl+alt+x", hotkey_ocr: "ctrl+alt+o", hotkey_repeat: "ctrl+alt+r", hotkey_annotate: "ctrl+alt+a", autostart_enabled: true, ui_theme: "light", audio_input_device: "", ollama_model: "qwen3.5:4b" });
     } },
     { path: "/api/v1/config", method: "POST", handler: function (rec) {
       const body = JSON.parse(rec.body);
@@ -437,7 +449,17 @@ async function runUnit() {
       if (Object.prototype.hasOwnProperty.call(body, "baidu_appkey") || Object.prototype.hasOwnProperty.call(body, "ollama_model") || Object.prototype.hasOwnProperty.call(body, "translate_target_lang")) {
         return jsonRes(400, { ok: false, error: "invalid_request", message: "未知或只读字段" });
       }
-      return jsonRes(200, Object.assign({ polish_enabled: false, custom_keywords: [], translate_lang_pair: "zh-en", translate_auto_enabled: true, hotkey_voice: "ctrl+alt+z", hotkey_screenshot: "ctrl+alt+x", hotkey_ocr: "ctrl+alt+o", hotkey_repeat: "ctrl+alt+r", hotkey_annotate: "ctrl+alt+a", autostart_enabled: true, ollama_model: "qwen3.5:4b" }, body));
+      return jsonRes(200, Object.assign({ polish_enabled: false, custom_keywords: [], translate_lang_pair: "zh-en", translate_auto_enabled: true, hotkey_voice: "ctrl+alt+z", hotkey_screenshot: "ctrl+alt+x", hotkey_ocr: "ctrl+alt+o", hotkey_repeat: "ctrl+alt+r", hotkey_annotate: "ctrl+alt+a", autostart_enabled: true, ui_theme: "light", audio_input_device: "", ollama_model: "qwen3.5:4b" }, body));
+    } },
+    { path: "/api/v1/audio-inputs", method: "GET", handler: function () {
+      return jsonRes(200, {
+        ok: true,
+        default_device: "USB Mic",
+        devices: [
+          { name: "USB Mic", hostapi: "PulseAudio", is_default: true },
+          { name: "Headset Mic", hostapi: "PulseAudio", is_default: false }
+        ]
+      });
     } },
     { path: "/api/v1/history", method: "GET", handler: function () {
       return jsonRes(200, { records: [{ timestamp: "t", raw_text: "a", final_text: "a", job_id: "j1", source: "web", polish: "off" }], total: 1, skipped_malformed: 0 });
@@ -733,6 +755,8 @@ async function runUnit() {
         hotkey_repeat: "ctrl+alt+r",
         hotkey_annotate: "ctrl+alt+a",
         autostart_enabled: true,
+        ui_theme: "light",
+        audio_input_device: "",
         ollama_model: "qwen3.5:4b"
       });
     } },
@@ -753,8 +777,20 @@ async function runUnit() {
         hotkey_repeat: "ctrl+alt+r",
         hotkey_annotate: "ctrl+alt+a",
         autostart_enabled: true,
+        ui_theme: "light",
+        audio_input_device: "",
         ollama_model: "qwen3.5:4b"
       }, body));
+    } },
+    { path: "/api/v1/audio-inputs", method: "GET", handler: function () {
+      return jsonRes(200, {
+        ok: true,
+        default_device: "USB Mic",
+        devices: [
+          { name: "USB Mic", hostapi: "PulseAudio", is_default: true },
+          { name: "Headset Mic", hostapi: "PulseAudio", is_default: false }
+        ]
+      });
     } },
     { path: "/api/v1/history", method: "GET", handler: function (rec) {
       const q = new URLSearchParams(String(rec.url).split("?")[1] || "");
@@ -1854,7 +1890,8 @@ async function runUnit() {
       return jsonRes(200, Object.assign({ polish_enabled: false, custom_keywords: [], translate_target_lang: "zh", hotkey_voice: "ctrl+alt+z", hotkey_screenshot: "ctrl+alt+x", hotkey_repeat: "ctrl+alt+r", ollama_model: "qwen3.5:4b" }, body));
     } },
     { path: "/api/v1/history", method: "GET", handler: function () { return jsonRes(200, { records: [], total: 0, skipped_malformed: 0 }); } },
-    { path: "/api/v1/lan-access", method: "GET", handler: function () { return jsonRes(200, { port: 8443, token: "secret-lan-token-do-not-log", token_masked: "sec****log", entries: [], message: "" }); } }
+    { path: "/api/v1/lan-access", method: "GET", handler: function () { return jsonRes(200, { port: 8443, token: "secret-lan-token-do-not-log", token_masked: "sec****log", entries: [], message: "" }); } },
+    { path: "/api/v1/audio-inputs", method: "GET", handler: function () { return jsonRes(200, { ok: true, default_device: null, devices: [] }); } }
   ];
   const startReqCtl = B.createHomeController({
     client: B.createHttp({ catalog: catalog, context: localCtx, fetch: startReqWorld.fetch, origin: "https://127.0.0.1:17945" }),
@@ -1925,6 +1962,7 @@ async function runUnit() {
     if (String(url).indexOf("/api/v1/config") >= 0) return jsonRes(200, { polish_enabled: true, custom_keywords: [], translate_lang_pair: "zh-en", translate_auto_enabled: true, hotkey_voice: "ctrl+alt+z", hotkey_screenshot: "ctrl+alt+x", hotkey_ocr: "ctrl+alt+o", hotkey_repeat: "ctrl+alt+r" });
     if (String(url).indexOf("/api/v1/history") >= 0) return jsonRes(200, { records: [], total: 0, skipped_malformed: 0 });
     if (String(url).indexOf("/api/v1/lan-access") >= 0) return jsonRes(200, { port: 17945, token: "", token_masked: "", entries: [], message: "" });
+    if (String(url).indexOf("/api/v1/audio-inputs") >= 0) return jsonRes(200, { ok: true, default_device: null, devices: [] });
     return jsonRes(404, { ok: false, error: "not_found", message: "missing" });
   };
   const bootLoc = { protocol: "https:", hostname: "127.0.0.1", origin: "https://127.0.0.1:17945", pathname: "/", href: "https://127.0.0.1:17945/", search: "", hash: "" };
@@ -2079,6 +2117,7 @@ async function runUnit() {
     }
     if (u.indexOf("/api/v1/history") >= 0) return Promise.resolve(jsonRes(200, { records: [], total: 0, skipped_malformed: 0 }));
     if (u.indexOf("/api/v1/lan-access") >= 0) return Promise.resolve(jsonRes(200, { port: 17945, token: "", token_masked: "", entries: [], message: "" }));
+    if (u.indexOf("/api/v1/audio-inputs") >= 0) return Promise.resolve(jsonRes(200, { ok: true, default_device: null, devices: [] }));
     return Promise.resolve(jsonRes(404, { ok: false, error: "not_found", message: "missing" }));
   };
   const raceCtl = B.createHomeController({
@@ -2151,6 +2190,9 @@ async function runUnit() {
       lanFailWorld.installPosts += 1;
       lanFailWorld.check = setupCheckBody({ install_all: installAllBody("running", ["running"], { current: "ollama_install" }) });
       return jsonRes(202, lanFailWorld.check.install_all);
+    } },
+    { path: "/api/v1/audio-inputs", method: "GET", handler: function () {
+      return jsonRes(200, { ok: true, default_device: "USB Mic", devices: [{ name: "USB Mic", hostapi: "PulseAudio", is_default: true }] });
     } }
   ];
   const lanFailTimers = [];
@@ -2243,6 +2285,321 @@ async function runUnit() {
     pass("非 / 与 /setup 路径切换面板不误调用 replaceState");
   } else fail("非目标路径误改地址栏：" + JSON.stringify(otherHistCalls));
   otherCtl.destroy();
+
+  /* ---- ST4: map-setup 扩展 / 主题持久化与并发防闪回 / 麦克风 503 隔离与刷新保存 ---- */
+  const pickedNew = B.pickLegalConfig({ ui_theme: "dark", audio_input_device: "USB Mic", unknown_x: 1 });
+  if (
+    pickedNew.ui_theme === "dark"
+    && pickedNew.audio_input_device === "USB Mic"
+    && !Object.prototype.hasOwnProperty.call(pickedNew, "unknown_x")
+  ) {
+    pass("pickLegalConfig 放行 ui_theme 与 audio_input_device 并过滤未知键");
+  } else fail("pickLegalConfig 映射异常：" + JSON.stringify(pickedNew));
+
+  const defApplyState = { theme: "dark", audio_input_device: "KeepMic" };
+  B.applyConfig(defApplyState, { ui_theme: "sepia", audio_input_device: null });
+  const okApplyState = { theme: "light", audio_input_device: null };
+  B.applyConfig(okApplyState, { ui_theme: "dark", audio_input_device: "" });
+  if (
+    defApplyState.theme === "dark"
+    && defApplyState.audio_input_device === "KeepMic"
+    && okApplyState.theme === "dark"
+    && okApplyState.audio_input_device === ""
+  ) {
+    pass("applyConfig 对 ui_theme 仅接受 light/dark、对 audio_input_device 仅非 null 时更新（支持空串）");
+  } else fail("applyConfig 防御性映射异常：" + JSON.stringify({ defApplyState: defApplyState, okApplyState: okApplyState }));
+
+  const mappedAudio = B.mapAudioInputs({
+    ok: true,
+    default_device: "USB Mic",
+    devices: [
+      { name: "USB Mic", hostapi: "Windows DirectSound", is_default: true },
+      { name: "Line In", hostapi: "Windows DirectSound", is_default: false }
+    ]
+  });
+  const mappedAudioEmpty = B.mapAudioInputs({ ok: true, default_device: null, devices: [] });
+  if (
+    mappedAudio
+    && mappedAudio.defaultDevice === "USB Mic"
+    && mappedAudio.devices.length === 2
+    && mappedAudio.devices[0].name === "USB Mic"
+    && mappedAudio.devices[0].hostapi === "Windows DirectSound"
+    && mappedAudio.devices[0].isDefault === true
+    && mappedAudio.devices[1].isDefault === false
+    && mappedAudioEmpty && mappedAudioEmpty.defaultDevice === null && Array.isArray(mappedAudioEmpty.devices) && mappedAudioEmpty.devices.length === 0
+    && B.mapAudioInputs(null) === null
+  ) {
+    pass("mapAudioInputs 正确映射设备列表、空列表与 null");
+  } else fail("mapAudioInputs 映射异常：" + JSON.stringify({ mappedAudio: mappedAudio, mappedAudioEmpty: mappedAudioEmpty }));
+
+  /* 主题持久化、连点乱序、错误回滚、并发其他配置防旧 theme 闪回、503 隔离与麦克风刷新/保存 */
+  const audioThemeWorld = createWorld();
+  audioThemeWorld.serverConfig = {
+    polish_enabled: true,
+    custom_keywords: ["Qwen"],
+    translate_lang_pair: "zh-en",
+    translate_auto_enabled: true,
+    hotkey_voice: "ctrl+alt+z",
+    hotkey_screenshot: "ctrl+alt+x",
+    hotkey_ocr: "ctrl+alt+o",
+    hotkey_repeat: "ctrl+alt+r",
+    hotkey_annotate: "ctrl+alt+a",
+    autostart_enabled: true,
+    ui_theme: "dark",
+    audio_input_device: "USB Mic",
+    ollama_model: "qwen3.5:4b"
+  };
+  audioThemeWorld.failAudioInputs = true;
+  audioThemeWorld.pendingPosts = [];
+  audioThemeWorld.delayThemePosts = false;
+  audioThemeWorld.failNextPost = null;
+  audioThemeWorld.delayAudioRefresh = false;
+  audioThemeWorld.pendingAudioGets = [];
+  audioThemeWorld.routes = [
+    { path: "/api/setup/check", method: "GET", handler: function () { return jsonRes(200, setupCheckBody()); } },
+    { path: "/api/v1/config", method: "GET", handler: function () { return jsonRes(200, Object.assign({}, audioThemeWorld.serverConfig)); } },
+    { path: "/api/v1/config", method: "POST", handler: function (rec) {
+      const body = JSON.parse(rec.body || "{}");
+      audioThemeWorld.lastPostBody = body;
+      if (audioThemeWorld.delayThemePosts && Object.prototype.hasOwnProperty.call(body, "ui_theme")) {
+        return new Promise(function (resolve) {
+          audioThemeWorld.pendingPosts.push({
+            body: body,
+            resolveOk: function (overrideCfg) {
+              Object.assign(audioThemeWorld.serverConfig, body);
+              resolve(jsonRes(200, Object.assign({}, audioThemeWorld.serverConfig, overrideCfg || {})));
+            },
+            resolveErr: function (msg) {
+              resolve(jsonRes(500, { ok: false, error: "config_io", message: msg || "写入配置失败" }));
+            }
+          });
+        });
+      }
+      if (audioThemeWorld.failNextPost) {
+        const msg = audioThemeWorld.failNextPost;
+        audioThemeWorld.failNextPost = null;
+        return jsonRes(500, { ok: false, error: "config_io", message: msg });
+      }
+      const nextCfg = Object.assign({}, audioThemeWorld.serverConfig, body);
+      if (!audioThemeWorld.keepServerThemeOnNonThemePost) {
+        Object.assign(audioThemeWorld.serverConfig, body);
+      }
+      return jsonRes(200, nextCfg);
+    } },
+    { path: "/api/v1/history", method: "GET", handler: function () { return jsonRes(200, { records: [], total: 0, skipped_malformed: 0 }); } },
+    { path: "/api/v1/lan-access", method: "GET", handler: function () { return jsonRes(200, { port: 17945, token: "", token_masked: "", entries: [], message: "" }); } },
+    { path: "/api/v1/audio-inputs", method: "GET", handler: function () {
+      if (audioThemeWorld.delayAudioRefresh) {
+        return new Promise(function (resolve) {
+          audioThemeWorld.pendingAudioGets.push({
+            resolveOk: function (payload) {
+              resolve(jsonRes(200, payload || {
+                ok: true,
+                default_device: "USB Mic",
+                devices: [
+                  { name: "USB Mic", hostapi: "PulseAudio", is_default: true },
+                  { name: "Headset Mic", hostapi: "PulseAudio", is_default: false }
+                ]
+              }));
+            },
+            resolveErr: function (msg) {
+              resolve(jsonRes(503, { ok: false, error: "dependency_failed", message: msg || "PortAudio 枚举失败" }));
+            }
+          });
+        });
+      }
+      if (audioThemeWorld.failAudioInputs) {
+        return jsonRes(503, { ok: false, error: "dependency_failed", message: "PortAudio 初始化失败" });
+      }
+      return jsonRes(200, {
+        ok: true,
+        default_device: "USB Mic",
+        devices: [
+          { name: "USB Mic", hostapi: "PulseAudio", is_default: true },
+          { name: "Headset Mic", hostapi: "PulseAudio", is_default: false }
+        ]
+      });
+    } }
+  ];
+
+  const atCtl = B.createHomeController({
+    client: B.createHttp({ catalog: catalog, context: localCtx, fetch: audioThemeWorld.fetch, origin: "https://127.0.0.1:17945" }),
+    context: localCtx,
+    catalog: catalog
+  });
+  const atView = fakeView(catalogCtx.V3.defaults.homeState());
+  atCtl.bind(atView);
+  await atCtl.start();
+  const afterAudio503 = atView.getState();
+  if (
+    afterAudio503.connection === "connected"
+    && afterAudio503.theme === "dark"
+    && afterAudio503.audio_input_device === "USB Mic"
+    && afterAudio503.audioInputs === null
+    && afterAudio503.audioInputsLoading === false
+    && /依赖失败/.test(afterAudio503.audioInputError || "")
+    && /PortAudio 初始化失败/.test(afterAudio503.audioInputError || "")
+  ) {
+    pass("loadAll 隔离 audio-inputs 503：保持 connected 与 ui_theme/audio_input_device、置 audioInputs=null 并呈现错误");
+  } else fail("loadAll audio-inputs 503 隔离异常：" + JSON.stringify({
+    conn: afterAudio503.connection,
+    theme: afterAudio503.theme,
+    dev: afterAudio503.audio_input_device,
+    inputs: afterAudio503.audioInputs,
+    loading: afterAudio503.audioInputsLoading,
+    err: afterAudio503.audioInputError
+  }));
+
+  /* onRefreshAudioInputs 加载态 + 成功清错 + 503 重置 audioInputs=null */
+  audioThemeWorld.failAudioInputs = false;
+  audioThemeWorld.delayAudioRefresh = true;
+  const refreshP = atCtl.hooks.onRefreshAudioInputs();
+  const loadingFlagDuringRefresh = atView.getState().audioInputsLoading === true;
+  audioThemeWorld.pendingAudioGets.shift().resolveOk();
+  await refreshP;
+  const afterRefreshOk = atView.getState();
+  if (
+    loadingFlagDuringRefresh
+    && afterRefreshOk.audioInputsLoading === false
+    && afterRefreshOk.audioInputError === ""
+    && afterRefreshOk.audioInputs && afterRefreshOk.audioInputs.defaultDevice === "USB Mic"
+    && afterRefreshOk.audioInputs.devices.length === 2
+  ) {
+    pass("onRefreshAudioInputs 置加载态、拉取并映射最新麦克风列表并清空错误");
+  } else fail("onRefreshAudioInputs 成功态异常：" + JSON.stringify({ loadingFlagDuringRefresh: loadingFlagDuringRefresh, state: { loading: afterRefreshOk.audioInputsLoading, err: afterRefreshOk.audioInputError, inputs: afterRefreshOk.audioInputs } }));
+
+  const refreshFailP = atCtl.hooks.onRefreshAudioInputs();
+  audioThemeWorld.pendingAudioGets.shift().resolveErr("设备句柄忙");
+  await refreshFailP;
+  const afterRefreshFail = atView.getState();
+  if (
+    afterRefreshFail.audioInputs === null
+    && afterRefreshFail.audioInputsLoading === false
+    && /设备句柄忙/.test(afterRefreshFail.audioInputError || "")
+  ) {
+    pass("onRefreshAudioInputs 503 失败时置 audioInputs=null 并呈现错误");
+  } else fail("onRefreshAudioInputs 失败态异常：" + JSON.stringify({ inputs: afterRefreshFail.audioInputs, err: afterRefreshFail.audioInputError }));
+  audioThemeWorld.delayAudioRefresh = false;
+
+  /* onChangeAudioInput 保存指定设备、切回空串（跟随系统默认）及失败提示 */
+  await atCtl.hooks.onChangeAudioInput("Headset Mic");
+  const afterMicSave = atView.getState();
+  await atCtl.hooks.onChangeAudioInput("");
+  const afterMicDefault = atView.getState();
+  audioThemeWorld.failNextPost = "磁盘只读";
+  let micSaveThrew = false;
+  try {
+    await atCtl.hooks.onChangeAudioInput("USB Mic");
+  } catch (err) {
+    micSaveThrew = true;
+  }
+  const afterMicFail = atView.getState();
+  if (
+    afterMicSave.audio_input_device === "Headset Mic" && afterMicSave.audioInputSaved === true && afterMicSave.audioInputError === ""
+    && afterMicDefault.audio_input_device === "" && afterMicDefault.audioInputSaved === true
+    && micSaveThrew && afterMicFail.audioInputSaved === false && /磁盘只读/.test(afterMicFail.audioInputError || "")
+  ) {
+    pass("onChangeAudioInput 持久化指定麦克风与空串默认、置 audioInputSaved，失败显式写 audioInputError");
+  } else fail("onChangeAudioInput 行为异常：" + JSON.stringify({ afterMicSave: afterMicSave.audio_input_device, afterMicDefault: afterMicDefault.audio_input_device, micSaveThrew: micSaveThrew, err: afterMicFail.audioInputError }));
+
+  /* onToggleTheme：默认归一化 light、落盘、连点乱序（旧成功与旧失败均拦截）、当前失败回滚、并发非主题写不闪回 */
+  await atCtl.hooks.onToggleTheme({ theme: "invalid_value" });
+  if (atView.getState().theme === "light" && audioThemeWorld.serverConfig.ui_theme === "light") {
+    pass("onToggleTheme 对非法主题默认归一化 light 并经 /api/v1/config 持久化");
+  } else fail("onToggleTheme 归一化/持久化异常：" + JSON.stringify({ theme: atView.getState().theme, server: audioThemeWorld.serverConfig.ui_theme }));
+
+  /* 模拟 home.js 先行乐观翻转 view.theme=dark 后，本次持久化失败且仍 isCurrent → 回滚为 light */
+  audioThemeWorld.failNextPost = "配置保存失败";
+  atView.setState({ theme: "dark" });
+  await atCtl.hooks.onToggleTheme({ theme: "dark" });
+  if (atView.getState().theme === "light" && /配置保存失败/.test(atView.getState().statusNotice || "")) {
+    pass("onToggleTheme 持久化失败且仍为最新请求时回滚主题至已落盘值并提示错误");
+  } else fail("onToggleTheme 失败回滚异常：" + JSON.stringify({ theme: atView.getState().theme, notice: atView.getState().statusNotice }));
+
+  /* 主题连点乱序：Click1(dark) 晚于 Click2(light) 返回成功 → 不得闪回 dark */
+  audioThemeWorld.delayThemePosts = true;
+  const rapid1 = atCtl.hooks.onToggleTheme({ theme: "dark" });
+  const rapid2 = atCtl.hooks.onToggleTheme({ theme: "light" });
+  const p1 = audioThemeWorld.pendingPosts.shift();
+  const p2 = audioThemeWorld.pendingPosts.shift();
+  p2.resolveOk({ ui_theme: "light" });
+  await rapid2;
+  p1.resolveOk({ ui_theme: "dark" });
+  await rapid1;
+  if (atView.getState().theme === "light") {
+    pass("onToggleTheme 连点乱序时 themeReqId/isCurrent 丢弃旧慢成功响应，防止主题闪回");
+  } else fail("onToggleTheme 连点乱序成功防护失效：" + JSON.stringify({ theme: atView.getState().theme }));
+
+  /* 主题连点乱序：Click1(dark) 在 Click2(light) 之后失败 → 不得回滚也不得写旧错误 */
+  atView.setState({ statusNotice: null });
+  const rapidErr1 = atCtl.hooks.onToggleTheme({ theme: "dark" });
+  const rapidErr2 = atCtl.hooks.onToggleTheme({ theme: "light" });
+  const pe1 = audioThemeWorld.pendingPosts.shift();
+  const pe2 = audioThemeWorld.pendingPosts.shift();
+  pe1.resolveErr("过期的第一次点击错误");
+  await rapidErr1;
+  const afterStaleErrTheme = atView.getState().theme;
+  const afterStaleErrNotice = atView.getState().statusNotice;
+  pe2.resolveOk({ ui_theme: "light" });
+  await rapidErr2;
+  if (afterStaleErrTheme === "light" && afterStaleErrNotice === null && atView.getState().theme === "light") {
+    pass("onToggleTheme 失败分支受 isCurrent 守卫，过期的主题写失败不回滚且不污染 statusNotice");
+  } else fail("onToggleTheme 过期失败守卫失效：" + JSON.stringify({ theme: afterStaleErrTheme, notice: afterStaleErrNotice }));
+
+  /* 在途主题写计数 > 0 时，并发其他 saveConfig 返回旧 ui_theme=light 不得把乐观 dark 闪回 */
+  audioThemeWorld.serverConfig.ui_theme = "light";
+  audioThemeWorld.keepServerThemeOnNonThemePost = true;
+  const inflightDark = atCtl.hooks.onToggleTheme({ theme: "dark" });
+  const darkEntry = audioThemeWorld.pendingPosts.shift();
+  await atCtl.hooks.onTogglePolish(false);
+  const themeAfterConcurrentPolish = atView.getState().theme;
+  const polishAfterConcurrent = atView.getState().polish_enabled;
+  darkEntry.resolveOk({ ui_theme: "dark" });
+  await inflightDark;
+  audioThemeWorld.delayThemePosts = false;
+  audioThemeWorld.keepServerThemeOnNonThemePost = false;
+  if (themeAfterConcurrentPolish === "dark" && polishAfterConcurrent === false && atView.getState().theme === "dark") {
+    pass("在途主题写计数 > 0 时，并发其他 saveConfig 响应不回写旧 theme 防闪回");
+  } else fail("在途主题写防闪回失效：" + JSON.stringify({ themeAfterConcurrentPolish: themeAfterConcurrentPolish, polishAfterConcurrent: polishAfterConcurrent, finalTheme: atView.getState().theme }));
+
+  /* destroy 递增 audioInputsReqId 与 themeReqId：在途刷新与主题写返回不污染已销毁视图 */
+  audioThemeWorld.delayAudioRefresh = true;
+  const lateRefresh = atCtl.hooks.onRefreshAudioInputs();
+  const lateAudioEntry = audioThemeWorld.pendingAudioGets.shift();
+  atCtl.destroy();
+  lateAudioEntry.resolveOk({ ok: true, default_device: "Ghost Mic", devices: [{ name: "Ghost Mic", hostapi: "X", is_default: true }] });
+  await lateRefresh;
+  if (!(atView.getState().audioInputs && atView.getState().audioInputs.defaultDevice === "Ghost Mic")) {
+    pass("destroy() 递增 audioInputsReqId，丢弃在途迟到的麦克风刷新响应");
+  } else fail("destroy() 后迟到 audioInputs 响应污染了视图");
+
+  /* LAN 与未连接模式下 onToggleTheme 仅改内存、零 fetch */
+  const lanThemeWorld = createWorld();
+  const lanThemeCtl = B.createHomeController({
+    client: B.createHttp({ catalog: catalog, context: lanCtx, fetch: lanThemeWorld.fetch, origin: "https://192.168.1.8:17945" }),
+    context: lanCtx,
+    catalog: catalog
+  });
+  const lanThemeView = fakeView(catalogCtx.V3.defaults.homeState());
+  lanThemeCtl.bind(lanThemeView);
+  await lanThemeCtl.hooks.onToggleTheme({ theme: "dark" });
+  const discThemeWorld = createWorld();
+  const discThemeCtl = B.createHomeController({
+    client: B.createHttp({ catalog: catalog, context: localCtx, fetch: discThemeWorld.fetch, origin: "https://127.0.0.1:17945" }),
+    context: localCtx,
+    catalog: catalog
+  });
+  const discThemeView = fakeView(catalogCtx.V3.defaults.homeState());
+  discThemeCtl.bind(discThemeView);
+  await discThemeCtl.hooks.onToggleTheme({ theme: "dark" });
+  if (
+    lanThemeView.getState().theme === "dark" && lanThemeWorld.calls.length === 0
+    && discThemeView.getState().theme === "dark" && discThemeWorld.calls.length === 0
+  ) {
+    pass("LAN 与未连接模式下 onToggleTheme 仅更新内存主题，零 fetch 请求");
+  } else fail("非本机/未连接 onToggleTheme 误发请求：" + JSON.stringify({ lanCalls: lanThemeWorld.calls.length, discCalls: discThemeWorld.calls.length }));
+  lanThemeCtl.destroy();
+  discThemeCtl.destroy();
 }
 
 function runAsgi() {
@@ -2478,6 +2835,56 @@ function runAsgi() {
         const asgiImgRaw = setupView.getState().ocr;
         if (asgiImgRaw.phase !== "result" || asgiImgRaw.mode !== "raw" || asgiImgRaw.ocr_text !== "Hello ASGI OCR" || asgiImgRaw.text !== "" || asgiImgRaw.source_lang !== null) {
           throw new Error("隔离 ASGI 纯 OCR 契约异常：" + JSON.stringify(asgiImgRaw));
+        }
+        /* 真 HTTP 往返验证主题持久化与麦克风选择契约：/api/v1/audio-inputs + ui_theme / audio_input_device */
+        const initAsgiState = setupView.getState();
+        if (
+          initAsgiState.theme !== "light"
+          || initAsgiState.audio_input_device !== ""
+          || !initAsgiState.audioInputs
+          || initAsgiState.audioInputs.defaultDevice !== "Sandbox USB Mic"
+          || initAsgiState.audioInputs.devices.length !== 2
+          || initAsgiState.audioInputs.devices[0].isDefault !== true
+          || initAsgiState.audioInputError !== ""
+        ) {
+          throw new Error("隔离 ASGI 初始主题或音频输入列表未对齐：" + JSON.stringify({
+            theme: initAsgiState.theme,
+            dev: initAsgiState.audio_input_device,
+            inputs: initAsgiState.audioInputs,
+            err: initAsgiState.audioInputError
+          }));
+        }
+        await setupCtl.hooks.onToggleTheme({ theme: "dark" });
+        const cfgAfterDark = await client.call("get_config_api_v1_config_get");
+        if (setupView.getState().theme !== "dark" || cfgAfterDark.ui_theme !== "dark") {
+          throw new Error("隔离 ASGI 切换暗色未持久化：" + JSON.stringify({ state: setupView.getState().theme, cfg: cfgAfterDark.ui_theme }));
+        }
+        await setupCtl.hooks.onToggleTheme({ theme: "light" });
+        const cfgAfterLight = await client.call("get_config_api_v1_config_get");
+        if (setupView.getState().theme !== "light" || cfgAfterLight.ui_theme !== "light") {
+          throw new Error("隔离 ASGI 切回亮色未持久化：" + JSON.stringify({ state: setupView.getState().theme, cfg: cfgAfterLight.ui_theme }));
+        }
+        const badThemeRes = await fetch(origin + "/api/v1/config", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ ui_theme: "sepia" })
+        });
+        if (badThemeRes.status !== 400) {
+          throw new Error("隔离 ASGI 非法 ui_theme 应返回 400，实际 " + badThemeRes.status);
+        }
+        await setupCtl.hooks.onRefreshAudioInputs();
+        if (!setupView.getState().audioInputs || setupView.getState().audioInputs.devices.length !== 2 || setupView.getState().audioInputError !== "") {
+          throw new Error("隔离 ASGI 刷新音频输入列表异常：" + JSON.stringify(setupView.getState().audioInputs));
+        }
+        await setupCtl.hooks.onChangeAudioInput("Sandbox Headset Mic");
+        const cfgAfterMic = await client.call("get_config_api_v1_config_get");
+        if (setupView.getState().audio_input_device !== "Sandbox Headset Mic" || setupView.getState().audioInputSaved !== true || cfgAfterMic.audio_input_device !== "Sandbox Headset Mic") {
+          throw new Error("隔离 ASGI 保存指定麦克风未回读：" + JSON.stringify({ state: setupView.getState().audio_input_device, saved: setupView.getState().audioInputSaved, cfg: cfgAfterMic.audio_input_device }));
+        }
+        await setupCtl.hooks.onChangeAudioInput("");
+        const cfgAfterMicDefault = await client.call("get_config_api_v1_config_get");
+        if (setupView.getState().audio_input_device !== "" || cfgAfterMicDefault.audio_input_device !== "") {
+          throw new Error("隔离 ASGI 切回跟随系统默认（空串）未持久化：" + JSON.stringify({ state: setupView.getState().audio_input_device, cfg: cfgAfterMicDefault.audio_input_device }));
         }
         setupCtl.destroy();
         const lan = await client.call("lan_access_api_v1_lan_access_get");

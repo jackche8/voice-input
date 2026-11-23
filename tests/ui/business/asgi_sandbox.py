@@ -21,6 +21,8 @@ sys.path.insert(0, str(REPO))
 
 from _contracts import (  # noqa: E402  仓库根目录需先加入 sys.path
     AsrSetupStatus,
+    AudioInputDevice,
+    AudioInputListResponse,
     ComponentName,
     ComponentState,
     ErrorCode,
@@ -229,6 +231,18 @@ def main() -> int:
                 pass
         return "Sandbox OCR text"
 
+    def list_audio_inputs() -> AudioInputListResponse:
+        err = os.environ.get("OVI_SANDBOX_AUDIO_INPUTS_ERROR")
+        if err:
+            raise LogicError(ErrorCode.dependency_failed, err)
+        return AudioInputListResponse(
+            default_device="Sandbox USB Mic",
+            devices=[
+                AudioInputDevice(name="Sandbox USB Mic", hostapi="Sandbox", is_default=True),
+                AudioInputDevice(name="Sandbox Headset Mic", hostapi="Sandbox", is_default=False),
+            ],
+        )
+
     token = "ui-business-sandbox-token"
     runtime = build_sandbox_runtime(
         root=sandbox_root,
@@ -237,6 +251,7 @@ def main() -> int:
         transcribe=transcribe,
         translate=translate,
         ocr=ocr,
+        list_audio_inputs=list_audio_inputs,
     )
     runtime.setup = SandboxSetup(runtime.components, sandbox_root / "install_all.json")
     runtime.lan = SandboxLan(port, token)

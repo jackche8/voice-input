@@ -57,6 +57,7 @@
     var pollInterval = opts.pollInterval != null ? opts.pollInterval : DEFAULT_POLL_MS;
     var pollTimer = null;
     var pollGeneration = 0;
+    var inFlightThemeWrites = 0;
 
     function stopPoll() {
       unschedule(pollTimer, opts);
@@ -123,15 +124,30 @@
       });
     }
 
-    function saveConfig(patch, flags) {
+    function saveConfig(patch, flags, saveOpts) {
       var body = root.pickLegalConfig(patch);
-      return client.call(OP.configPost, { body: body }).then(function (config) {
+      var isThemeWrite = Object.prototype.hasOwnProperty.call(body, "ui_theme");
+      var checkCurrent = (saveOpts && typeof saveOpts.isCurrent === "function") ? saveOpts.isCurrent : null;
+      if (isThemeWrite) inFlightThemeWrites += 1;
+      var callPromise;
+      try {
+        callPromise = client.call(OP.configPost, { body: body });
+      } catch (syncErr) {
+        if (isThemeWrite) inFlightThemeWrites = Math.max(0, inFlightThemeWrites - 1);
+        return Promise.reject(syncErr);
+      }
+      return callPromise.then(function (config) {
+        if (isThemeWrite) inFlightThemeWrites = Math.max(0, inFlightThemeWrites - 1);
         if (isDestroyed()) return config;
+        if (checkCurrent && !checkCurrent()) return config;
         var next = Object.assign({
           connection: "connected",
           statusNotice: null
         }, flags || {});
         root.applyConfig(next, config);
+        if (!isThemeWrite && inFlightThemeWrites > 0) {
+          delete next.theme;
+        }
         if (next.translate_lang_pair) {
           next.translate = Object.assign({}, next.translate || {}, { lang_pair: next.translate_lang_pair });
           next.ocr = Object.assign({}, next.ocr || {}, { lang_pair: next.translate_lang_pair });
@@ -139,11 +155,19 @@
         setState(next);
         return config;
       }, function (err) {
-        if (!isDestroyed()) {
+        if (isThemeWrite) inFlightThemeWrites = Math.max(0, inFlightThemeWrites - 1);
+        if (!isDestroyed() && (!checkCurrent || checkCurrent())) {
           var notice = formatErr(err);
           var errPatch = { statusNotice: notice, connection: "connected" };
           if (flags && Object.prototype.hasOwnProperty.call(flags, "hotkeysSaved")) {
             errPatch.hotkeySaveError = notice;
+          }
+          if (flags && Object.prototype.hasOwnProperty.call(flags, "audioInputSaved")) {
+            errPatch.audioInputError = notice;
+            errPatch.audioInputSaved = false;
+          }
+          if (saveOpts && typeof saveOpts.onError === "function") {
+            saveOpts.onError(errPatch, err, notice);
           }
           setState(errPatch);
         }
@@ -159,6 +183,13 @@
       },
       onTogglePolish: function (enabled) {
         return saveConfig({ polish_enabled: !!enabled }, {});
+      },
+      onChangeAudioInput: function (deviceName) {
+        var val = deviceName != null ? String(deviceName) : "";
+        return saveConfig(
+          { audio_input_device: val },
+          { audioInputSaved: true, audioInputError: "" }
+        );
       },
       onSaveKeywords: function (value) {
         return saveConfig({ custom_keywords: root.parseKeywords(value) }, { keywordsSaved: true, keywordsDraft: null });
@@ -214,6 +245,7 @@
       refreshCheck: refreshCheck,
       stopPoll: stopPoll,
       isPolling: isPolling,
+      hasInFlightThemeWrites: function () { return inFlightThemeWrites > 0; },
       saveConfig: saveConfig,
       hooks: hooks
     };

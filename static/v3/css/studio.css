@@ -655,6 +655,32 @@ body.v3-studio {
   color: var(--c-text);
 }
 
+.setup-pane .audio-input-row {
+  flex-direction: column;
+  align-items: stretch;
+  flex-wrap: nowrap;
+  gap: var(--sp-2);
+}
+.audio-input-controls {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+  min-width: 0;
+  max-width: 100%;
+}
+select.field[data-role="setup-audio-input"] {
+  flex: 1 1 240px;
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.audio-input-controls .btn {
+  flex: none;
+  white-space: nowrap;
+}
+
 .setup-about {
   margin: var(--sp-2) 0 0;
   font-size: var(--fs-xs);

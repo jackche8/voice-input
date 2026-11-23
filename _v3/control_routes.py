@@ -10,8 +10,10 @@ from _contracts import (
     ApiStatusResponse,
     AppConfigUpdate,
     AppConfigView,
+    AudioInputListResponse,
     ErrorCode,
     HistoryListResponse,
+    LogicError,
     PlatformEventAccepted,
     PlatformEventCreate,
     ProductConfigChangedEvent,
@@ -40,6 +42,17 @@ def build_control_router(runtime: Runtime) -> APIRouter:
         view = apply_config_update(runtime.config, body)
         runtime.events.publish(ProductConfigChangedEvent())  # 应用主进程据此重读配置（自启开关即时生效）
         return view
+
+    @router.get("/api/v1/audio-inputs", response_model=AudioInputListResponse)
+    def list_audio_inputs() -> AudioInputListResponse:
+        if runtime.list_audio_inputs is None:
+            raise LogicError(ErrorCode.dependency_failed, "音频输入设备列表能力未注入")
+        try:
+            return runtime.list_audio_inputs()
+        except LogicError:
+            raise
+        except Exception as exc:
+            raise LogicError(ErrorCode.dependency_failed, f"枚举音频输入设备失败: {exc}") from exc
 
     @router.get("/api/v1/status", response_model=ApiStatusResponse)
     def status() -> ApiStatusResponse:

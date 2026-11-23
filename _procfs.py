@@ -61,7 +61,7 @@ def proc_starttime(pid: int, *, proc_root: Path = _PROC) -> int | None:
 def iter_process_table(*, proc_root: Path = _PROC) -> dict[int, tuple[int, int, int]]:
     table: dict[int, tuple[int, int, int]] = {}
     try:
-        entries = proc_root.iterdir()
+        entries = list(proc_root.iterdir())
     except OSError:
         return table
     for entry in entries:
@@ -80,7 +80,7 @@ def iter_process_table_with_starttime(
 ) -> dict[int, tuple[int, int, int, int]]:
     table: dict[int, tuple[int, int, int, int]] = {}
     try:
-        entries = proc_root.iterdir()
+        entries = list(proc_root.iterdir())
     except OSError:
         return table
     for entry in entries:

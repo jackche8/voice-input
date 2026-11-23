@@ -1,7 +1,7 @@
 /* 纯 UI 默认视图状态：未连接、无数据。不把缺省值写成用户已选或已成功。
  *
  * 配置字段与 AppConfig 对齐：
- *   polish_enabled, custom_keywords, translate_lang_pair, translate_auto_enabled,
+ *   ui_theme, audio_input_device, polish_enabled, custom_keywords, translate_lang_pair, translate_auto_enabled,
  *   hotkey_voice, hotkey_screenshot, hotkey_ocr, hotkey_repeat, hotkey_annotate, autostart_enabled
  * 历史记录字段与 HistoryRecord / HistoryListResponse 对齐：
  *   timestamp, raw_text, final_text, language, mode, source, polish, job_id,
@@ -24,7 +24,7 @@
       message: "",
       statusNotice: null,
       aboutText: "",
-      theme: "dark",
+      theme: "light",
       activePanel: "translate",
       setupTab: "models",
       asr: {
@@ -49,6 +49,11 @@
       installAll: null,
       components: null,
       autostart_enabled: null,
+      audio_input_device: null,
+      audioInputs: null,
+      audioInputsLoading: false,
+      audioInputError: "",
+      audioInputSaved: false,
       polish_enabled: null,
       custom_keywords: [],
       keywordsDraft: null,

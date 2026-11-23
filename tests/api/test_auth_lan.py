@@ -165,3 +165,24 @@ def test_loopback_ipv6_can_read_status(app):
     )
     assert result["status"] == 200, result
     assert result["body"]["ok"] is True
+
+
+def test_audio_inputs_is_strictly_local_only(app):
+    assert access_mode("GET", "/api/v1/audio-inputs") == "local"
+    assert access_mode("GET", "/api/v1/audio-inputs/") == "local"
+    lan = lan_client(app)
+    denied = lan.get("/api/v1/audio-inputs", headers=lan_headers(), follow_redirects=False)
+    assert denied.status_code == 403, denied.text
+    assert "仅本机" in denied.json()["message"]
+    denied_slash = lan.get("/api/v1/audio-inputs/", headers=lan_headers(), follow_redirects=False)
+    assert denied_slash.status_code == 403, denied_slash.text
+    public = asyncio.run(
+        call_asgi(
+            app,
+            method="GET",
+            path="/api/v1/audio-inputs",
+            client=("8.8.8.8", 50000),
+            headers={"host": "8.8.8.8:17945", "x-voice-token": TEST_TOKEN},
+        )
+    )
+    assert public["status"] == 403, public

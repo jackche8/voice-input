@@ -7,7 +7,15 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from _contracts import ComponentReport, ComponentStatus, SetupTaskKind
+from _contracts import (
+    AudioInputDevice,
+    AudioInputListResponse,
+    ComponentReport,
+    ComponentStatus,
+    ErrorCode,
+    LogicError,
+    SetupTaskKind,
+)
 from _paths import RESOURCES_DIR
 from _v3.component_routes import ComponentRegistry
 from _v3.pages import install_pages
@@ -42,12 +50,22 @@ LEGACY_PATHS = (
 )
 
 
-def _app(tmp_path: Path, *, world: FakeWorld | None = None, tasks=None, components=None, lan=True, static=True):
+def _app(
+    tmp_path: Path,
+    *,
+    world: FakeWorld | None = None,
+    tasks=None,
+    components=None,
+    lan=True,
+    static=True,
+    list_audio_inputs=None,
+):
     runtime = build_sandbox_runtime(
         root=tmp_path / "sb",
         token=TEST_TOKEN,
         setup=None if world is None else build_setup(world, tasks, components=components),
         lan_ips=(lambda: list(FAKE_LAN_IPS)) if lan else None,
+        list_audio_inputs=list_audio_inputs,
     )
     return runtime, create_app(runtime, static_v3=STATIC_V3 if static else None)
 
@@ -190,6 +208,7 @@ def test_config_api_never_returns_legacy_secrets(tmp_path):
     assert "fixture-secret" not in json.dumps(got) and "baidu_appkey" not in got and "whisper_model" not in got
     assert "translate_target_lang" not in got
     assert got["translate_lang_pair"] == "zh-en" and got["translate_auto_enabled"] is True
+    assert got["ui_theme"] == "light" and got["audio_input_device"] == ""
     saved = client.post(
         "/api/v1/config",
         json={
@@ -198,6 +217,8 @@ def test_config_api_never_returns_legacy_secrets(tmp_path):
             "polish_enabled": True,
             "translate_lang_pair": " ZH-EN ",
             "translate_auto_enabled": False,
+            "ui_theme": "dark",
+            "audio_input_device": "  USB Studio Mic  ",
         },
         headers=local_headers(),
     )
@@ -206,7 +227,12 @@ def test_config_api_never_returns_legacy_secrets(tmp_path):
     assert out["custom_keywords"] == ["Alpha", "Beta"] and out["hotkey_voice"] == "ctrl+alt+z"
     assert out["polish_enabled"] is True and "baidu_appkey" not in out
     assert out["translate_lang_pair"] == "zh-en" and out["translate_auto_enabled"] is False
+    assert out["ui_theme"] == "dark" and out["audio_input_device"] == "USB Studio Mic"
     assert "translate_target_lang" not in out
+    reset_mic = client.post("/api/v1/config", json={"audio_input_device": ""}, headers=local_headers())
+    assert reset_mic.status_code == 200 and reset_mic.json()["audio_input_device"] == ""
+    bad_theme = client.post("/api/v1/config", json={"ui_theme": "sepia"}, headers=local_headers())
+    assert bad_theme.status_code == 400 and bad_theme.json()["error"] == "invalid_request"
     disk = json.loads(cfg_path.read_text(encoding="utf-8"))
     assert disk["baidu_appkey"] == "fixture-secret", "旧键在磁盘保留，不丢数据"
     assert disk["translate_target_lang"] == "en"
@@ -219,6 +245,68 @@ def test_config_api_never_returns_legacy_secrets(tmp_path):
     assert bad_pair.status_code == 400 and bad_pair.json()["error"] == "invalid_request"
     bad_key = client.post("/api/v1/config", json={"hotkey_voice": "z"}, headers=local_headers())
     assert bad_key.status_code == 400
+
+
+# ---------------------------------------------------------------- audio inputs
+
+
+def test_audio_inputs_route_mount_success_empty_and_single_track_503(tmp_path):
+    # 1. 未注入 -> 单轨 HTTP 503 ErrorBody（绝不返 200+error）
+    _rt_none, app_none = _app(tmp_path / "none")
+    res_none = local_client(app_none).get("/api/v1/audio-inputs")
+    assert res_none.status_code == 503
+    body_none = res_none.json()
+    assert body_none["ok"] is False and body_none["error"] == "dependency_failed"
+
+    # 2. 正常返回多台设备 & 0 麦空列表 -> HTTP 200 AudioInputListResponse（无 error 字段）
+    mode = {"state": "ok"}
+
+    def _provider() -> AudioInputListResponse:
+        if mode["state"] == "empty":
+            return AudioInputListResponse(default_device=None, devices=[])
+        if mode["state"] == "logic_err":
+            raise LogicError(ErrorCode.dependency_failed, "PortAudio init failed")
+        if mode["state"] == "raw_err":
+            raise RuntimeError("sounddevice boom")
+        return AudioInputListResponse(
+            default_device="USB Mic",
+            devices=[
+                AudioInputDevice(name="USB Mic", hostapi="Windows DirectSound", is_default=True),
+                AudioInputDevice(name="Headset", hostapi="Windows DirectSound", is_default=False),
+            ],
+        )
+
+    _rt, app = _app(tmp_path / "ok", list_audio_inputs=_provider)
+    client = local_client(app)
+    res_ok = client.get("/api/v1/audio-inputs")
+    assert res_ok.status_code == 200, res_ok.text
+    payload = res_ok.json()
+    assert payload == {
+        "ok": True,
+        "default_device": "USB Mic",
+        "devices": [
+            {"name": "USB Mic", "hostapi": "Windows DirectSound", "is_default": True},
+            {"name": "Headset", "hostapi": "Windows DirectSound", "is_default": False},
+        ],
+    }
+    assert "error" not in payload
+
+    mode["state"] = "empty"
+    res_empty = client.get("/api/v1/audio-inputs")
+    assert res_empty.status_code == 200
+    assert res_empty.json() == {"ok": True, "default_device": None, "devices": []}
+
+    # 3. 底层抛 LogicError 或普通异常 -> 统一转 HTTP 503 dependency_failed
+    for err_state, expected_text in (("logic_err", "PortAudio init failed"), ("raw_err", "sounddevice boom")):
+        mode["state"] = err_state
+        res_err = client.get("/api/v1/audio-inputs")
+        assert res_err.status_code == 503, (err_state, res_err.text)
+        err_body = res_err.json()
+        assert err_body["ok"] is False and err_body["error"] == "dependency_failed"
+        assert expected_text in err_body["message"]
+
+    # 4. LAN 带合法 token 依然被 403 拒绝
+    assert lan_client(app).get("/api/v1/audio-inputs", headers=lan_headers()).status_code == 403
 
 
 # ---------------------------------------------------------------- pages
@@ -306,7 +394,16 @@ def test_openapi_snapshot_is_the_generated_document(tmp_path):
     snapshot = json.loads((STATIC_V3 / "openapi.json").read_text(encoding="utf-8"))
     assert snapshot == generated, "static/v3/openapi.json 必须由 scripts/gate.py --write-openapi-snapshot 生成"
     assert "/api/v1/lan-access" in snapshot["paths"]
+    assert "/api/v1/audio-inputs" in snapshot["paths"]
     assert "/api/setup/install-all" in snapshot["paths"] and "/api/setup/tasks" not in snapshot["paths"]
-    for schema in ("SetupCheckResponse", "InstallAllStatus", "LanAccessResponse", "AppConfigView", "AppConfigUpdate"):
+    for schema in (
+        "SetupCheckResponse",
+        "InstallAllStatus",
+        "LanAccessResponse",
+        "AppConfigView",
+        "AppConfigUpdate",
+        "AudioInputDevice",
+        "AudioInputListResponse",
+    ):
         assert schema in snapshot["components"]["schemas"]
     assert TEST_TOKEN not in json.dumps(snapshot)

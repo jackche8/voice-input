@@ -144,3 +144,37 @@ def test_translate_lang_pair_and_auto_enabled_replace_legacy_target_lang(tmp_pat
     with pytest.raises(LogicError) as bad_disk:
         ConfigStore(bad_path).load()
     assert bad_disk.value.code == ErrorCode.config_io
+
+
+def test_ui_theme_and_audio_input_device_roundtrip_and_validation(tmp_path: Path):
+    path = tmp_path / "config.json"
+    store = ConfigStore(path)
+
+    # 缺省默认亮色与跟随系统麦克风，且未创建磁盘文件
+    initial = config_view(store.load())
+    assert initial.ui_theme == "light"
+    assert initial.audio_input_device == ""
+    assert not path.exists()
+
+    # 切暗色 + 指定麦克风（自动去首尾空白），并落盘可读
+    updated = apply_config_update(
+        store,
+        AppConfigUpdate(ui_theme="dark", audio_input_device="  USB Condenser Mic  "),
+    )
+    assert updated.ui_theme == "dark"
+    assert updated.audio_input_device == "USB Condenser Mic"
+    disk = json.loads(path.read_text(encoding="utf-8"))
+    assert disk["ui_theme"] == "dark" and disk["audio_input_device"] == "USB Condenser Mic"
+
+    # 允许传空串或纯空白切回「跟随系统默认」，不影响已保存的主题
+    reset = apply_config_update(store, AppConfigUpdate(audio_input_device=""))
+    assert reset.audio_input_device == "" and reset.ui_theme == "dark"
+    reset_ws = apply_config_update(store, AppConfigUpdate(audio_input_device="   "))
+    assert reset_ws.audio_input_device == ""
+
+    # 磁盘写入非法主题显式抛 config_io
+    bad_theme = tmp_path / "bad_theme.json"
+    bad_theme.write_text(json.dumps({"ui_theme": "blue"}), encoding="utf-8")
+    with pytest.raises(LogicError) as err:
+        ConfigStore(bad_theme).load()
+    assert err.value.code == ErrorCode.config_io

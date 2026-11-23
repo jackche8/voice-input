@@ -11,7 +11,8 @@
     configGet: "get_config_api_v1_config_get",
     check: "setup_check_api_setup_check_get",
     history: "history_api_v1_history_get",
-    lanAccess: "lan_access_api_v1_lan_access_get"
+    lanAccess: "lan_access_api_v1_lan_access_get",
+    audioInputs: "list_audio_inputs_api_v1_audio_inputs_get"
   };
 
   var HISTORY_PAGE_SIZE = 20;
@@ -82,6 +83,10 @@
     var loadReqId = 0;
     var translateReqId = 0;
     var ocrReqId = 0;
+    var themeReqId = 0;
+    var audioInputsReqId = 0;
+    var persistedTheme = "light";
+    var persistedThemeKnown = false;
     var debounceTimer = null;
     var debounceMs = opts.debounceMs != null ? opts.debounceMs : DEFAULT_TRANSLATE_DEBOUNCE_MS;
 
@@ -142,6 +147,9 @@
         statusNotice: msg,
         lanEntries: null,
         lanMessage: msg,
+        audioInputs: null,
+        audioInputsLoading: false,
+        audioInputError: msg,
         tokenMasked: "",
         tokenPresent: false,
         capabilities: null,
@@ -153,6 +161,7 @@
     function loadAll() {
       if (destroyed) return Promise.resolve();
       var reqId = ++loadReqId;
+      var audioReqId = ++audioInputsReqId;
       setupActions.stopPoll();
       if (!context || !context.canCallLocal()) {
         rejectNonLocal();
@@ -163,9 +172,15 @@
         connectionError: null,
         error: null,
         message: "",
+        audioInputsLoading: true,
         history: { loading: true, message: null }
       });
       var lanPromise = client.call(OP.lanAccess).then(function (data) {
+        return { ok: true, data: data };
+      }, function (err) {
+        return { ok: false, error: err };
+      });
+      var audioInputsPromise = client.call(OP.audioInputs).then(function (data) {
         return { ok: true, data: data };
       }, function (err) {
         return { ok: false, error: err };
@@ -174,7 +189,8 @@
         client.call(OP.check),
         client.call(OP.configGet),
         client.call(OP.history, { query: { limit: HISTORY_PAGE_SIZE, offset: 0 } }),
-        lanPromise
+        lanPromise,
+        audioInputsPromise
       ]).then(function (results) {
         if (destroyed || reqId !== loadReqId) return;
         var mapped = root.mapReadiness(results[0]);
@@ -188,10 +204,17 @@
           history: root.applyHistory(results[2]),
           keywordsSaved: false,
           translateSettingsSaved: false,
-          hotkeysSaved: false
+          hotkeysSaved: false,
+          audioInputSaved: false
         }, root.readinessPatch(mapped));
         if (opts.pageOrigin) patch.serviceUrl = String(opts.pageOrigin);
         root.applyConfig(patch, results[1]);
+        if (setupActions.hasInFlightThemeWrites && setupActions.hasInFlightThemeWrites()) {
+          delete patch.theme;
+        } else if (patch.theme === "light" || patch.theme === "dark") {
+          persistedTheme = patch.theme;
+          persistedThemeKnown = true;
+        }
         if (patch.translate_lang_pair) {
           patch.translate = { lang_pair: patch.translate_lang_pair };
           patch.ocr = { lang_pair: patch.translate_lang_pair };
@@ -213,6 +236,17 @@
           patch.tokenMasked = "";
           patch.tokenPresent = false;
         }
+        var audioResult = results[4];
+        if (audioReqId === audioInputsReqId) {
+          patch.audioInputsLoading = false;
+          if (audioResult && audioResult.ok) {
+            patch.audioInputs = root.mapAudioInputs(audioResult.data);
+            patch.audioInputError = "";
+          } else if (audioResult) {
+            patch.audioInputs = null;
+            patch.audioInputError = formatErr(audioResult.error);
+          }
+        }
         setState(patch);
         setupActions.maybeResumePoll(mapped);
       }, function (err) {
@@ -224,6 +258,7 @@
           error: (err && err.error) ? err.error : null,
           message: (err && err.message) || "",
           statusNotice: msg,
+          audioInputsLoading: false,
           history: {
             records: [],
             total: null,
@@ -839,12 +874,81 @@
       } catch (err) {}
     }
 
+    function refreshAudioInputs() {
+      if (destroyed) return Promise.resolve(null);
+      if (!context || !context.canCallLocal()) {
+        rejectNonLocal();
+        return Promise.resolve(null);
+      }
+      var reqId = ++audioInputsReqId;
+      setState({
+        audioInputsLoading: true,
+        audioInputError: "",
+        audioInputSaved: false
+      });
+      return client.call(OP.audioInputs).then(function (data) {
+        if (destroyed || reqId !== audioInputsReqId) return null;
+        var mapped = root.mapAudioInputs(data);
+        setState({
+          audioInputs: mapped,
+          audioInputsLoading: false,
+          audioInputError: ""
+        });
+        return mapped;
+      }, function (err) {
+        if (destroyed || reqId !== audioInputsReqId) return null;
+        setState({
+          audioInputs: null,
+          audioInputsLoading: false,
+          audioInputError: formatErr(err)
+        });
+        return null;
+      });
+    }
+
+    function toggleTheme(payload) {
+      if (destroyed) return Promise.resolve(null);
+      var curState = getState();
+      var next = payload && payload.theme === "dark" ? "dark" : "light";
+      var fallbackPrev = (curState.theme === "light" || curState.theme === "dark") && curState.theme !== next
+        ? curState.theme
+        : (next === "dark" ? "light" : "dark");
+      var reqId = ++themeReqId;
+      if (curState.theme !== next) {
+        setState({ theme: next });
+      }
+      if (!context || !context.canCallLocal() || curState.connection !== "connected") {
+        return Promise.resolve(null);
+      }
+      var isCurrent = function () { return !destroyed && reqId === themeReqId; };
+      return setupActions.saveConfig(
+        { ui_theme: next },
+        {},
+        {
+          isCurrent: isCurrent,
+          onError: function (errPatch) {
+            errPatch.theme = persistedThemeKnown ? persistedTheme : fallbackPrev;
+          }
+        }
+      ).then(function (config) {
+        if (isCurrent() && config && (config.ui_theme === "light" || config.ui_theme === "dark")) {
+          persistedTheme = config.ui_theme;
+          persistedThemeKnown = true;
+        }
+        return config;
+      }, function () {
+        return null;
+      });
+    }
+
     function destroy() {
       destroyed = true;
       cancelDebounce();
       loadReqId += 1;
       translateReqId += 1;
       ocrReqId += 1;
+      themeReqId += 1;
+      audioInputsReqId += 1;
       setupActions.stopPoll();
     }
 
@@ -858,11 +962,9 @@
       onRefreshHistory: function () { return refreshHistory(); },
       onLoadMoreHistory: function () { return loadMoreHistory(); },
       onRefreshLan: function () { return refreshLan(); },
+      onRefreshAudioInputs: function () { return refreshAudioInputs(); },
       onRefreshStatus: function () { return loadAll(); },
-      onToggleTheme: function (payload) {
-        var next = payload && payload.theme === "light" ? "light" : "dark";
-        if (getState().theme !== next) setState({ theme: next });
-      },
+      onToggleTheme: function (payload) { return toggleTheme(payload); },
       onSelectPanel: function (payload) {
         var panel = payload && payload.panel;
         if (!panel) return;

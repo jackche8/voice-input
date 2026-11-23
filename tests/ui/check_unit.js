@@ -136,11 +136,17 @@ if (homeNavIds.length !== 5 || homeNavIds.join(",") !== "translate,ocr,history,l
 const home = V3.defaults.homeState();
 if (
   home.connection !== "disconnected" ||
+  home.theme !== "light" ||
   home.activePanel !== "translate" ||
   home.setupTab !== "models" ||
   home.asr.status !== "unknown" ||
   home.asr.sidecarRunning === true ||
   home.ollama.modelStatus !== "unknown" ||
+  home.audio_input_device !== null ||
+  home.audioInputs !== null ||
+  home.audioInputsLoading !== false ||
+  home.audioInputError !== "" ||
+  home.audioInputSaved !== false ||
   home.polish_enabled !== null ||
   home.keywordsDraft !== null ||
   home.translate_lang_pair !== null ||
@@ -177,7 +183,7 @@ if (
   home.tokenPresent !== false
 ) {
   fail("homeState 默认状态不合法：" + JSON.stringify(home));
-} else pass("homeState 统一桌面默认状态合法（未连接、含语言对/自动开关契约字段且无旧键/成功示例/明文令牌）");
+} else pass("homeState 统一桌面默认状态合法（默认亮色、含音频输入与语言对/自动开关契约字段且无旧键/成功示例/明文令牌）");
 
 function ev(init) {
   return Object.assign({ ctrlKey: false, altKey: false, shiftKey: false, metaKey: false, key: "", code: "" }, init || {});

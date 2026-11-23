@@ -71,6 +71,17 @@
         { name: "server", state: "running", reason: "", failures: 0 }
       ],
       autostart_enabled: true,
+      audio_input_device: "",
+      audioInputs: {
+        defaultDevice: "Built-in Microphone",
+        devices: [
+          { name: "Built-in Microphone", hostapi: "PulseAudio", isDefault: true },
+          { name: "USB Condenser Mic", hostapi: "PulseAudio", isDefault: false }
+        ]
+      },
+      audioInputsLoading: false,
+      audioInputError: "",
+      audioInputSaved: false,
       polish_enabled: true,
       custom_keywords: ["Qwen", "Ollama"],
       translate_lang_pair: "zh-en",
@@ -138,7 +149,7 @@
     },
     homeConnected: {
       connection: "connected",
-      theme: "dark",
+      theme: "light",
       activePanel: "translate",
       asr: {
         name: "Qwen3-ASR-1.7B",

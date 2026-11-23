@@ -23,6 +23,8 @@
     const keywordSaves = [];
     const langPairChanges = [];
     const autoTranslateToggles = [];
+    const audioInputChanges = [];
+    let audioInputRefreshes = 0;
     const setupActions = [];
     const hooks = {
       onCopy: function (payload) { copies.push(payload); },
@@ -42,6 +44,8 @@
       onSaveKeywords: function (val) { keywordSaves.push(val); },
       onChangeLangPair: function (val) { langPairChanges.push(val); },
       onToggleAutoTranslate: function (enabled) { autoTranslateToggles.push(enabled); },
+      onChangeAudioInput: function (val) { audioInputChanges.push(val); },
+      onRefreshAudioInputs: function () { audioInputRefreshes += 1; },
       onInstallAll: function () { setupActions.push("install-all"); },
       onRetryComponent: function (name) { setupActions.push("retry:" + name); },
       onToggleAutostart: function (enabled) { setupActions.push("autostart:" + enabled); }
@@ -51,6 +55,20 @@
     const homeRoot = document.getElementById("home-root");
     const home = V3.home.mount(homeRoot, {}, hooks);
     const homeInitText = homeRoot.innerText;
+    const initThemeBadge = homeRoot.querySelector('button[data-action="toggle-theme"] .badge');
+    assert(
+      document.documentElement.dataset.theme === "light" && home.getState().theme === "light",
+      "主页首次挂载默认亮色主题（data-theme=light）"
+    );
+    assert(
+      !!initThemeBadge && initThemeBadge.textContent === "浅色",
+      "主页首次挂载主题徽章默认显示浅色"
+    );
+    home.setState({ theme: "unknown" });
+    assert(
+      document.documentElement.dataset.theme === "light" && home.getState().theme === "light" && initThemeBadge.textContent === "浅色",
+      "未知 theme 值归一化回默认亮色（light / 浅色）"
+    );
     assert(homeInitText.indexOf("Voice Studio") !== -1, "主页展示 Voice Studio 品牌栏");
     assert(homeInitText.indexOf("未连接") !== -1, "主页默认显示未连接");
     assert(homeInitText.indexOf("Qwen3-ASR-1.7B") !== -1 && homeInitText.indexOf("qwen3.5:4b") !== -1, "主页侧栏展示两个固定模型");
@@ -80,8 +98,19 @@
     assert(apiOffText.indexOf("/api/") === -1, "离线接口子标签没有冒充 /api/ 路径");
 
     homeRoot.querySelector('.setup-tabs button[data-tab="voice"]').click();
-    const voiceSwOff = homeRoot.querySelector('[data-panel-view="setup"] button[role="switch"]');
+    const voiceOffPane = homeRoot.querySelector('[data-panel-view="setup"]');
+    const voiceSwOff = voiceOffPane.querySelector('button[role="switch"]');
+    const audioOffSelect = voiceOffPane.querySelector('select[data-role="setup-audio-input"]');
+    const audioOffRefresh = voiceOffPane.querySelector('button[data-role="setup-audio-input-refresh"]');
     assert(!!voiceSwOff && voiceSwOff.getAttribute("aria-checked") === "mixed" && voiceSwOff.disabled, "未连接时润色开关为 mixed 且禁用");
+    assert(
+      !!audioOffSelect && audioOffSelect.disabled && audioOffSelect.options.length === 1 && audioOffSelect.options[0].textContent === "尚未读取",
+      "未连接时麦克风下拉显示尚未读取且禁用"
+    );
+    assert(
+      !!audioOffRefresh && audioOffRefresh.disabled && !audioOffRefresh.classList.contains("primary"),
+      "未连接时刷新设备按钮禁用且非 primary 样式"
+    );
 
     homeRoot.querySelector('.setup-tabs button[data-tab="shot"]').click();
     const shotOffPane = homeRoot.querySelector('[data-panel-view="setup"]');
@@ -280,11 +309,19 @@
     assert(lanDom.innerText.indexOf("sec••••ui") !== -1, "主页扫码面板显示脱敏网址");
     assert(lanDom.innerHTML.indexOf("secret-should-be-stripped-by-ui") === -1, "主页扫码面板绝不暴露明文令牌");
     const qrBox = lanDom.querySelector(".qr");
-    const qrBg = qrBox ? window.getComputedStyle(qrBox).backgroundColor : "";
+    const qrBgLight = qrBox ? window.getComputedStyle(qrBox).backgroundColor : "";
     assert(
-      document.documentElement.dataset.theme === "dark" && qrBg === "rgb(255, 255, 255)",
+      document.documentElement.dataset.theme === "light" && qrBgLight === "rgb(255, 255, 255)",
+      "亮色主题下二维码容器 .qr 背景保持纯白高对比静区（rgb(255, 255, 255)）"
+    );
+    homeRoot.querySelector('button[data-action="toggle-theme"]').click();
+    const qrBgDark = qrBox ? window.getComputedStyle(qrBox).backgroundColor : "";
+    assert(
+      document.documentElement.dataset.theme === "dark" && qrBgDark === "rgb(255, 255, 255)",
       "暗色主题下二维码容器 .qr 背景保持纯白高对比静区（rgb(255, 255, 255)）"
     );
+    homeRoot.querySelector('button[data-action="toggle-theme"]').click();
+    assert(document.documentElement.dataset.theme === "light", "二维码双主题对比校验后切回亮色主题");
     const lanCopyBtn = lanDom.querySelector("button.btn");
     assert(!!lanCopyBtn && !lanCopyBtn.disabled, "脱敏网址存在时可点击复制网址");
     lanCopyBtn.click();
@@ -354,8 +391,18 @@
     assert(!!autostart && autostart.getAttribute("aria-checked") === "true", "开机自启开关显示配置值");
     autostart.click();
     assert(setupActions[2] === "autostart:false", "开机自启开关走 onToggleAutostart 回调");
-    const primaryBtnDark = setupPane.querySelector("button.btn.primary");
-    assert(!!primaryBtnDark && wcagRatio(primaryBtnDark) >= 4.5, "暗色主题主按钮 .btn.primary 运行时 WCAG 对比度 ≥ 4.5:1");
+    const primaryBtn = setupPane.querySelector("button.btn.primary");
+    assert(
+      document.documentElement.dataset.theme === "light" && !!primaryBtn && wcagRatio(primaryBtn) >= 4.5,
+      "亮色主题主按钮 .btn.primary 运行时 WCAG 对比度 ≥ 4.5:1"
+    );
+    homeRoot.querySelector('button[data-action="toggle-theme"]').click();
+    assert(
+      document.documentElement.dataset.theme === "dark" && wcagRatio(primaryBtn) >= 4.5,
+      "暗色主题主按钮 .btn.primary 运行时 WCAG 对比度 ≥ 4.5:1"
+    );
+    homeRoot.querySelector('button[data-action="toggle-theme"]').click();
+    assert(document.documentElement.dataset.theme === "light", "主按钮双主题 WCAG 校验后切回亮色主题");
 
     home.setState(V3Fixtures.setupDownloading);
     const dlText = setupPane.innerText;
@@ -392,7 +439,7 @@
       "切换主题保留关键词未保存草稿与 DOM 节点"
     );
     homeRoot.querySelector('button[data-action="toggle-theme"]').click();
-    home.setState({ theme: "dark" });
+    home.setState({ theme: document.documentElement.dataset.theme });
 
     setupPane.querySelector('button[role="switch"]').click();
     home.setState({ polish_enabled: false });
@@ -408,6 +455,122 @@
       home.getState().keywordsDraft === null && kwArea0.value === "Qwen、Studio" && setupPane.innerText.indexOf("已保存") !== -1,
       "关键词保存成功后清空草稿并同步回读值"
     );
+
+    /* 语音与润色顶部「输入设备」卡片全态验收：持久 DOM / 选项签名防重绘 / 切换与刷新回调 / 加载态 / 503 错误 / 空列表 / 未连接设备 */
+    const voiceSections = setupPane.querySelectorAll(".setup-section");
+    const audioSelect = setupPane.querySelector('select[data-role="setup-audio-input"]');
+    const audioRefreshBtn = setupPane.querySelector('button[data-role="setup-audio-input-refresh"]');
+    const audioSavedEl = setupPane.querySelector('span[data-role="setup-audio-input-saved"]');
+    const audioErrEl = setupPane.querySelector('[data-role="setup-audio-input-error"]');
+    assert(
+      voiceSections.length >= 2 && voiceSections[0].contains(audioSelect) && voiceSections[0].innerText.indexOf("输入设备") !== -1,
+      "「输入设备」卡片位于语音与润色子标签顶部"
+    );
+    assert(
+      voiceSections[0].innerText.indexOf("切换后下次录音立即生效，无需重启") !== -1 && voiceSections[0].innerText.indexOf("已生效") === -1,
+      "输入设备提示文案使用「切换后下次录音立即生效，无需重启」且不含禁止子串"
+    );
+    assert(
+      !!audioSelect && !audioSelect.disabled && audioSelect.options.length === 3
+        && audioSelect.options[0].value === "" && audioSelect.options[0].textContent === "跟随系统默认（Built-in Microphone）"
+        && audioSelect.options[1].value === "Built-in Microphone" && audioSelect.options[1].textContent === "Built-in Microphone（系统默认）"
+        && audioSelect.options[2].value === "USB Condenser Mic" && audioSelect.value === "",
+      "已连接且读取设备后展示跟随系统默认及设备列表，默认选中跟随系统"
+    );
+    assert(
+      !!audioRefreshBtn && !audioRefreshBtn.disabled && audioRefreshBtn.classList.contains("btn") && !audioRefreshBtn.classList.contains("primary"),
+      "刷新设备按钮启用且使用普通 .btn 样式不抢占 .btn.primary"
+    );
+    assert(!!audioSavedEl && audioSavedEl.hidden && !!audioErrEl && audioErrEl.hidden, "输入设备初始不显示已保存或错误提示");
+
+    /* 轮询刷新时选项签名不变，严禁清空重建 <option> 防收起原生下拉 */
+    const audioOpt0BeforePoll = audioSelect.options[0];
+    home.setState({ asr: { message: "后台状态轮询-麦克风列表不变" } });
+    assert(
+      setupPane.querySelector('select[data-role="setup-audio-input"]') === audioSelect
+        && audioSelect.options[0] === audioOpt0BeforePoll
+        && setupPane.querySelector('button[data-role="setup-audio-input-refresh"]') === audioRefreshBtn,
+      "轮询状态刷新时输入设备下拉与 <option> 节点不重建（防收起原生下拉）"
+    );
+
+    audioSelect.value = "USB Condenser Mic";
+    audioSelect.dispatchEvent(new Event("change", { bubbles: true }));
+    assert(
+      audioInputChanges.length === 1 && audioInputChanges[0] === "USB Condenser Mic",
+      "选择指定麦克风经 onChangeAudioInput(deviceName) 通知业务层"
+    );
+    home.setState({ audio_input_device: "USB Condenser Mic", audioInputSaved: true, audioInputError: "" });
+    assert(
+      audioSelect.value === "USB Condenser Mic" && !audioSavedEl.hidden && audioSavedEl.textContent === "已保存",
+      "回读保存配置后选中目标麦克风并显示已保存徽标"
+    );
+    audioSelect.value = "";
+    audioSelect.dispatchEvent(new Event("change", { bubbles: true }));
+    assert(
+      audioInputChanges.length === 2 && audioInputChanges[1] === "",
+      "切回「跟随系统默认」传空串给 onChangeAudioInput"
+    );
+
+    audioRefreshBtn.click();
+    assert(audioInputRefreshes === 1, "点击刷新设备按钮触发 onRefreshAudioInputs");
+    home.setState({ audioInputsLoading: true, audioInputSaved: false });
+    assert(
+      audioRefreshBtn.disabled && audioRefreshBtn.innerText.indexOf("刷新中") !== -1 && audioSelect.disabled && audioSavedEl.hidden,
+      "刷新设备加载态禁用下拉与刷新按钮并显示刷新中"
+    );
+    audioRefreshBtn.click();
+    assert(audioInputRefreshes === 1, "刷新进行中重复点击不重复触发 onRefreshAudioInputs");
+
+    /* 枚举失败（audioInputs=null + audioInputError）：如实呈现错误，严禁把已存设备误标为「当前未连接」 */
+    home.setState({
+      audioInputs: null,
+      audioInputsLoading: false,
+      audio_input_device: "USB Condenser Mic",
+      audioInputError: "依赖失败：PortAudio 初始化异常"
+    });
+    assert(
+      !audioErrEl.hidden && audioErrEl.textContent.indexOf("PortAudio 初始化异常") !== -1,
+      "麦克风列表加载失败时显示后端错误原因"
+    );
+    assert(
+      audioSelect.value === "USB Condenser Mic"
+        && Array.prototype.slice.call(audioSelect.options).every(function (o) { return o.textContent.indexOf("当前未连接") === -1; }),
+      "audioInputs 为 null 时不误判已保存设备为当前未连接"
+    );
+    assert(!audioRefreshBtn.disabled, "加载失败后刷新设备按钮恢复可点以便重试");
+
+    /* 枚举成功但 0 麦克风（devices=[]） */
+    home.setState({
+      audioInputs: { defaultDevice: null, devices: [] },
+      audio_input_device: "",
+      audioInputError: ""
+    });
+    assert(
+      audioErrEl.hidden && audioSelect.options.length === 1 && audioSelect.options[0].value === ""
+        && audioSelect.options[0].textContent.indexOf("未检测到") !== -1,
+      "枚举成功但 0 麦克风时提示未检测到可用麦克风且无错误行"
+    );
+
+    /* 仅当枚举成功（audioInputs.devices 为数组）且已存设备非空不在列时显示「<名>（当前未连接）」 */
+    home.setState({
+      audioInputs: V3Fixtures.setupConnected.audioInputs,
+      audio_input_device: "Blue Yeti Nano",
+      audioInputError: ""
+    });
+    const unpluggedOpt = Array.prototype.slice.call(audioSelect.options).find(function (o) { return o.value === "Blue Yeti Nano"; });
+    assert(
+      !!unpluggedOpt && unpluggedOpt.textContent === "Blue Yeti Nano（当前未连接）" && audioSelect.value === "Blue Yeti Nano",
+      "枚举成功且已选麦克风不在列表时显示「<名>（当前未连接）」并保持选中"
+    );
+
+    /* 恢复正常已选默认设备态供后续双态 select 校验 */
+    home.setState({
+      audio_input_device: "",
+      audioInputs: V3Fixtures.setupConnected.audioInputs,
+      audioInputsLoading: false,
+      audioInputError: "",
+      audioInputSaved: false
+    });
 
     home.setSetupTab("shot");
     const shotSelect = setupPane.querySelector('select[data-role="setup-lang-pair"]');
@@ -428,7 +591,7 @@
       "回读配置后自动翻译开关更新为 false 并展示 translateSettingsSaved 已保存提示"
     );
 
-    /* 暗/亮双主题下校验全站 3 处 <select> 与 <option> 的 colorScheme 及主题对比度 */
+    /* 亮/暗双主题下校验全站 4 处 <select> 与 <option> 的 colorScheme 及主题对比度 */
     function readSelectMetrics(el) {
       if (!el || !el.options || !el.options.length) return null;
       const cs = window.getComputedStyle(el);
@@ -455,20 +618,23 @@
       homeRoot.querySelector('button[data-panel="ocr"]').click();
       const ocr = readSelectMetrics(homeRoot.querySelector('select[data-role="ocr-mode"]'));
       homeRoot.querySelector('button[data-panel="setup"]').click();
+      home.setSetupTab("voice");
+      const audio = readSelectMetrics(setupPane.querySelector('select[data-role="setup-audio-input"]'));
       home.setSetupTab("shot");
       const shot = readSelectMetrics(setupPane.querySelector('select[data-role="setup-lang-pair"]'));
       return [
         { name: "工作台翻译语言对", m: tr },
         { name: "工作台 OCR 模式", m: ocr },
+        { name: "设置页输入设备", m: audio },
         { name: "设置页翻译语言对", m: shot }
       ];
     }
-    assert(document.documentElement.dataset.theme === "dark", "双态 select 校验前处于暗色主题");
-    const darkSelects = snapshotAllSelects();
+    assert(document.documentElement.dataset.theme === "light", "双态 select 校验前处于默认亮色主题");
+    const lightSelects = snapshotAllSelects();
     homeRoot.querySelector('button[data-action="toggle-theme"]').click();
     home.setState({ theme: document.documentElement.dataset.theme });
-    assert(document.documentElement.dataset.theme === "light", "双态 select 校验已切换至亮色主题");
-    const lightSelects = snapshotAllSelects();
+    assert(document.documentElement.dataset.theme === "dark", "双态 select 校验已切换至暗色主题");
+    const darkSelects = snapshotAllSelects();
     for (let si = 0; si < darkSelects.length; si += 1) {
       const label = darkSelects[si].name;
       const dm = darkSelects[si].m;
@@ -496,7 +662,7 @@
     }
     homeRoot.querySelector('button[data-action="toggle-theme"]').click();
     home.setState({ theme: document.documentElement.dataset.theme });
-    assert(document.documentElement.dataset.theme === "dark", "双态 select 校验后恢复暗色主题");
+    assert(document.documentElement.dataset.theme === "light", "双态 select 校验后恢复默认亮色主题");
 
     home.setSetupTab("api");
     const apiOnText = setupPane.innerText;
@@ -523,14 +689,24 @@
     voice.setState({ connection: "connected", tokenValid: true, phase: "idle", micEnabled: true, useFileUpload: false });
     const mic1 = document.getElementById("voice-root").querySelector(".mic");
     assert(mic1 === mic0 && !mic1.disabled, "连接且支持录音时麦克风按钮可按且保持固定 DOM 节点");
-    assert(wcagRatio(mic1) >= 4.5, "暗色主题下 /voice 麦克风按钮 .mic WCAG 对比度 ≥ 4.5:1");
+    assert(document.documentElement.dataset.theme === "light" && wcagRatio(mic1) >= 4.5, "亮色主题下 /voice 麦克风按钮 .mic WCAG 对比度 ≥ 4.5:1");
 
     voice.setState({ phase: "recording" });
-    assert(wcagRatio(mic1) >= 4.5, "暗色主题下 /voice 录音中按钮 .mic.rec WCAG 对比度 ≥ 4.5:1");
+    assert(wcagRatio(mic1) >= 4.5, "亮色主题下 /voice 录音中按钮 .mic.rec WCAG 对比度 ≥ 4.5:1");
 
     voice.setState({ phase: "idle", useFileUpload: true });
     const uploadLbl = document.getElementById("voice-root").querySelector(".upload");
-    assert(!!uploadLbl && wcagRatio(uploadLbl) >= 4.5, "暗色主题下 /voice 上传按钮 .upload WCAG 对比度 ≥ 4.5:1");
+    assert(!!uploadLbl && wcagRatio(uploadLbl) >= 4.5, "亮色主题下 /voice 上传按钮 .upload WCAG 对比度 ≥ 4.5:1");
+
+    /* 显式切至暗色保留暗色 /voice WCAG 覆盖，再切回亮色 */
+    document.documentElement.dataset.theme = "dark";
+    voice.setState({ phase: "idle", useFileUpload: false });
+    assert(wcagRatio(mic1) >= 4.5, "暗色主题下 /voice 麦克风按钮 .mic WCAG 对比度 ≥ 4.5:1");
+    voice.setState({ phase: "recording" });
+    assert(wcagRatio(mic1) >= 4.5, "暗色主题下 /voice 录音中按钮 .mic.rec WCAG 对比度 ≥ 4.5:1");
+    voice.setState({ phase: "idle", useFileUpload: true });
+    assert(wcagRatio(uploadLbl) >= 4.5, "暗色主题下 /voice 上传按钮 .upload WCAG 对比度 ≥ 4.5:1");
+    document.documentElement.dataset.theme = "light";
     voice.setState({ useFileUpload: false });
 
     voice.setState(V3Fixtures.voicePolishFail);
@@ -860,6 +1036,18 @@
       capabilities: [
         { name: "xclip（剪贴板）", available: false, message: longUnspacedErr, installCommand: longUnspacedErr }
       ],
+      audio_input_device: "USB-Audio-Conference-Microphone-" + "LongDeviceModelName".repeat(10),
+      audioInputs: {
+        defaultDevice: "USB-Audio-Conference-Microphone-" + "LongDeviceModelName".repeat(10),
+        devices: [
+          {
+            name: "USB-Audio-Conference-Microphone-" + "LongDeviceModelName".repeat(10),
+            hostapi: "Windows DirectSound",
+            isDefault: true
+          }
+        ]
+      },
+      audioInputError: longUnspacedErr,
       lanEntries: [],
       lanMessage: longUnspacedErr
     }, hooks);
@@ -927,6 +1115,30 @@
     assert(
       ovSysCmdRow.scrollWidth <= ovSysCmdRow.clientWidth + 1 && ovSysCmdMainRect.width > 20,
       "系统检测安装命令长串不横向溢出且左侧标签不被压塌"
+    );
+
+    /* 设置页「语音与润色」子标签：超长麦克风名称与长错误防横向溢出 */
+    overflowHome.setSetupTab("voice");
+    const ovAudioSelect = ovSetupPane.querySelector('select[data-role="setup-audio-input"]');
+    const ovAudioRow = ovAudioSelect.closest(".row");
+    const ovAudioErr = ovSetupPane.querySelector('[data-role="setup-audio-input-error"]');
+    const ovAudioSelectCs = window.getComputedStyle(ovAudioSelect);
+    const ovAudioSelectRect = ovAudioSelect.getBoundingClientRect();
+    const ovAudioRowRect = ovAudioRow.getBoundingClientRect();
+    assert(
+      ovAudioSelectCs.minWidth === "0px" && ovAudioSelectCs.maxWidth === "100%",
+      "麦克风下拉计算样式具备 minWidth=0px 与 maxWidth=100%"
+    );
+    assert(
+      ovAudioSelectRect.right <= ovAudioRowRect.right + 1
+        && ovAudioRow.scrollWidth <= ovAudioRow.clientWidth + 1
+        && ovSetupPane.scrollWidth <= ovSetupPane.clientWidth + 1
+        && document.documentElement.scrollWidth <= document.documentElement.clientWidth + 1,
+      "超长无空格麦克风设备名不撑破设置页输入设备行与页面视口（select.right=" + ovAudioSelectRect.right.toFixed(1) + " vs row.right=" + ovAudioRowRect.right.toFixed(1) + "）"
+    );
+    assert(
+      !!ovAudioErr && !ovAudioErr.hidden && ovAudioErr.scrollWidth <= ovAudioErr.clientWidth + 1,
+      "输入设备 260 字无空格长错正常折行无横向溢出"
     );
 
     /* 工作台翻译区 .box-error 与扫码区 .empty 260 字无空格长错防溢出 */

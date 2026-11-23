@@ -189,6 +189,7 @@ REQUIRED_API_PATHS = (
     "/api/v1/events",
     "/api/v1/events/platform",
     "/api/v1/config",
+    "/api/v1/audio-inputs",
     "/api/v1/status",
     "/api/setup/check",
     "/api/setup/install-all",
@@ -266,6 +267,8 @@ def export_api_openapi(python: Path, gate_dir: Path, *, write_snapshot: bool = F
         "SetupTask",
         "LanAccessResponse",
         "AppConfigView",
+        "AudioInputDevice",
+        "AudioInputListResponse",
         "OcrInplaceResponse",
         "OcrTextBlock",
     ):

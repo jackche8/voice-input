@@ -186,7 +186,148 @@
       invoke: function (name, payload) { return call(hooks, name, payload); }
     });
 
-    /* ---------- 持久「语音与润色」视图（保护未保存关键词草稿与焦点） ---------- */
+    /* ---------- 持久「语音与润色」视图（顶部输入设备选择 + 润色与关键词，保护下拉状态与未保存草稿） ---------- */
+    var lastAudioOptionSig = "";
+    var audioInputSelect = V3.dom.el("select", {
+      className: "field",
+      "aria-label": "语音输入麦克风",
+      dataset: { role: "setup-audio-input" },
+      disabled: true,
+      onChange: function (ev) {
+        var cur = getState();
+        if (!isConnected(cur)) return;
+        call(hooks, "onChangeAudioInput", ev.target.value);
+      }
+    });
+    var audioInputRefreshLabel = V3.dom.el("span", { text: "刷新设备" });
+    var audioInputRefreshBtn = V3.dom.el("button", {
+      type: "button",
+      className: "btn",
+      dataset: { role: "setup-audio-input-refresh" },
+      disabled: true,
+      onClick: function () {
+        var cur = getState();
+        if (!isConnected(cur) || cur.audioInputsLoading === true) return;
+        call(hooks, "onRefreshAudioInputs");
+      }
+    }, [V3.dom.icon("refresh"), audioInputRefreshLabel]);
+    var audioInputSavedEl = V3.dom.el("span", {
+      className: "saved",
+      dataset: { role: "setup-audio-input-saved" },
+      text: "已保存",
+      hidden: true
+    });
+    var audioInputErrorEl = V3.dom.el("div", {
+      className: "row-sub err",
+      dataset: { role: "setup-audio-input-error" },
+      role: "alert",
+      hidden: true
+    });
+    var audioInputSection = V3.dom.el("div", {
+      className: "setup-section",
+      dataset: { section: "audio-input" }
+    }, [
+      V3.dom.el("h2", { text: "输入设备" }),
+      V3.dom.el("div", { className: "rows" }, [
+        V3.dom.el("div", { className: "row audio-input-row" }, [
+          V3.dom.el("div", { className: "row-main" }, [
+            V3.dom.el("div", { className: "row-title", text: "麦克风" }),
+            V3.dom.el("div", {
+              className: "row-sub",
+              text: "切换后下次录音立即生效，无需重启"
+            })
+          ]),
+          V3.dom.el("div", { className: "audio-input-controls" }, [
+            audioInputSelect,
+            audioInputRefreshBtn,
+            audioInputSavedEl
+          ]),
+          audioInputErrorEl
+        ])
+      ])
+    ]);
+
+    function buildAudioInputOptions(state, connected) {
+      if (!connected) {
+        return {
+          options: [{ value: "", label: "尚未读取" }],
+          selected: ""
+        };
+      }
+      var audioInputs = state.audioInputs;
+      var hasList = !!(audioInputs && Array.isArray(audioInputs.devices));
+      var devices = hasList ? audioInputs.devices : [];
+      var defaultDevice = hasList && audioInputs.defaultDevice ? String(audioInputs.defaultDevice) : "";
+      var savedDevice = state.audio_input_device != null ? String(state.audio_input_device).trim() : "";
+
+      var defaultLabel = "跟随系统默认";
+      if (hasList) {
+        if (defaultDevice) {
+          defaultLabel = "跟随系统默认（" + defaultDevice + "）";
+        } else if (!devices.length) {
+          defaultLabel = "跟随系统默认（未检测到可用麦克风）";
+        }
+      }
+
+      var options = [{ value: "", label: defaultLabel }];
+      if (hasList) {
+        var matched = !savedDevice;
+        var deviceOpts = [];
+        devices.forEach(function (item) {
+          if (!item || !item.name) return;
+          var name = String(item.name);
+          if (name === savedDevice) matched = true;
+          deviceOpts.push({
+            value: name,
+            label: item.isDefault === true ? (name + "（系统默认）") : name
+          });
+        });
+        if (savedDevice && !matched) {
+          options.push({
+            value: savedDevice,
+            label: savedDevice + "（当前未连接）"
+          });
+        }
+        options = options.concat(deviceOpts);
+      } else if (savedDevice) {
+        options.push({
+          value: savedDevice,
+          label: savedDevice
+        });
+      }
+
+      return {
+        options: options,
+        selected: savedDevice
+      };
+    }
+
+    function updateAudioInput(state) {
+      var connected = isConnected(state);
+      var loading = state.audioInputsLoading === true;
+      var spec = buildAudioInputOptions(state, connected);
+      var sig = JSON.stringify(spec.options);
+      if (sig !== lastAudioOptionSig) {
+        V3.dom.empty(audioInputSelect);
+        spec.options.forEach(function (item) {
+          var opt = V3.dom.el("option", { value: item.value, text: item.label });
+          if (item.value === spec.selected) opt.selected = true;
+          audioInputSelect.appendChild(opt);
+        });
+        lastAudioOptionSig = sig;
+      }
+      if (audioInputSelect.value !== spec.selected) {
+        audioInputSelect.value = spec.selected;
+      }
+      audioInputSelect.disabled = !connected || loading;
+      audioInputRefreshBtn.disabled = !connected || loading;
+      audioInputRefreshLabel.textContent = loading ? "刷新中…" : "刷新设备";
+      audioInputSavedEl.hidden = !state.audioInputSaved;
+      var errText = state.audioInputError ? String(state.audioInputError) : "";
+      audioInputErrorEl.textContent = errText;
+      audioInputErrorEl.hidden = !errText;
+    }
+
     var polishSwitch = V3.dom.el("button", {
       type: "button",
       className: "switch",
@@ -242,6 +383,7 @@
     ]);
 
     function updateVoice(state) {
+      updateAudioInput(state);
       var connected = isConnected(state);
       var enabled = state.polish_enabled;
       var known = enabled === true || enabled === false;
@@ -653,6 +795,7 @@
       if (tab === "voice") {
         if (mountedTab !== "voice") {
           V3.dom.empty(paneEl);
+          paneEl.appendChild(audioInputSection);
           paneEl.appendChild(voiceSection);
           mountedTab = "voice";
         }

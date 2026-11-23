@@ -186,14 +186,14 @@
     }
 
     function applyThemeAttr(themeName) {
-      var normalized = themeName === "light" ? "light" : "dark";
+      var normalized = themeName === "dark" ? "dark" : "light";
       if (typeof document !== "undefined" && document.documentElement) {
         document.documentElement.dataset.theme = normalized;
       }
       return normalized;
     }
 
-    applyThemeAttr(state.theme);
+    state.theme = applyThemeAttr(state.theme);
     V3.ensureIcons();
     V3.dom.empty(root);
 
@@ -239,7 +239,7 @@
     });
 
     var themeIconWrap = V3.dom.el("span", { className: "nav-item-label" });
-    var themeBadge = V3.dom.el("span", { className: "badge", text: "深色" });
+    var themeBadge = V3.dom.el("span", { className: "badge", text: "浅色" });
     var themeBtn = V3.dom.el("button", {
       type: "button",
       className: "nav-item",
@@ -799,7 +799,7 @@
         setupNavDot.className = "dot";
       }
 
-      var isDark = state.theme !== "light";
+      var isDark = state.theme === "dark";
       V3.dom.empty(themeIconWrap);
       themeIconWrap.appendChild(V3.dom.icon(isDark ? "moon" : "sun"));
       themeIconWrap.appendChild(document.createTextNode("外观主题"));

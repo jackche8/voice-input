@@ -199,7 +199,13 @@ def access_mode(method: str, path: str) -> str:
         return "lan_public"
     if path.startswith("/api/setup/"):
         return "local"
-    if path in {"/api/v1/status", "/api/v1/config", "/api/v1/events", "/api/v1/events/platform"}:
+    if path in {
+        "/api/v1/status",
+        "/api/v1/config",
+        "/api/v1/audio-inputs",
+        "/api/v1/events",
+        "/api/v1/events/platform",
+    }:
         return "local"
     if path.startswith("/api/v1/recognize/"):
         return "local"

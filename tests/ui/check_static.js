@@ -74,6 +74,8 @@ const forbidden = [
   [/\bwindow\.confirm\s*\(/, "window.confirm("],
   [/\blocalStorage\b/, "localStorage"],
   [/\bsessionStorage\b/, "sessionStorage"],
+  [/\bindexedDB\b/, "indexedDB"],
+  [/document\.cookie\b/, "document.cookie"],
   [/\beval\s*\(/, "eval("],
   [/new\s+Function\s*\(/, "new Function"]
 ];
@@ -91,8 +93,8 @@ const businessJs = jsFiles.filter((f) => isBusinessFile(f));
 for (const file of businessJs) {
   const text = fs.readFileSync(file, "utf8");
   const rel = path.relative(repo, file);
-  if (/\blocalStorage\b/.test(text) || /\bsessionStorage\b/.test(text)) {
-    fail(rel + " 不得使用 Web Storage（避免保存令牌）");
+  if (/\blocalStorage\b/.test(text) || /\bsessionStorage\b/.test(text) || /\bindexedDB\b/.test(text) || /document\.cookie\b/.test(text)) {
+    fail(rel + " 不得使用 Web Storage 或 Cookie（避免保存令牌与偏离后端配置源）");
   }
   if (/\/api\/v1\/|\/api\/setup\//.test(text)) {
     fail(rel + " 不得手写 /api/v1/ 或 /api/setup/ 路径");
@@ -127,9 +129,9 @@ for (const name of expectedHtml) {
   if (!/css\/theme\.css/.test(text)) fail(name + " 未引用共享 theme.css");
   if (!/js\/defaults\.js/.test(text)) fail(name + " 未引用共享 defaults.js");
   if (!/__V3_HOOKS__/.test(text)) fail(name + " 未提供 hooks 注入点");
-  if (!/<html[^>]*data-theme=["']dark["']/.test(text)) fail(name + ' 未声明统一 Studio C 默认 data-theme="dark"');
+  if (!/<html[^>]*data-theme=["']light["']/.test(text)) fail(name + ' 未声明统一 Studio C 默认 data-theme="light"');
 }
-pass("两页（index / voice）均引用共享主题与默认状态、声明 data-theme=dark 并预留 hooks 注入");
+pass("两页（index / voice）均引用共享主题与默认状态、声明 data-theme=light 并预留 hooks 注入");
 
 const faviconFailures = [];
 for (const name of expectedHtml) {
@@ -449,10 +451,10 @@ hasAll("UtteranceSource", sourceEnums);
 hasAll("HistoryPolish", polishEnums);
 hasAll("ProductEventType", eventEnums);
 
-for (const field of ["stable_text", "tail_text", "raw_text", "final_text", "ocr_text", "polish_enabled", "custom_keywords", "translate_lang_pair", "translate_auto_enabled", "lang_pair", "source_lang", "direction_mode", "hotkey_voice", "hotkey_screenshot", "hotkey_ocr", "hotkey_repeat", "hotkey_annotate", "job_id", "delivery_unknown"]) {
+for (const field of ["stable_text", "tail_text", "raw_text", "final_text", "ocr_text", "polish_enabled", "custom_keywords", "translate_lang_pair", "translate_auto_enabled", "lang_pair", "source_lang", "direction_mode", "hotkey_voice", "hotkey_screenshot", "hotkey_ocr", "hotkey_repeat", "hotkey_annotate", "ui_theme", "audio_input_device", "job_id", "delivery_unknown"]) {
   if (!prodText.includes(field)) fail("生产代码未使用契约字段 " + field);
 }
-pass("关键契约字段（含 translate_lang_pair / translate_auto_enabled / 方向字段与五热键）已在界面层出现");
+pass("关键契约字段（含 ui_theme / audio_input_device / translate_lang_pair / translate_auto_enabled / 方向字段与五热键）已在界面层出现");
 
 /* 反向守卫：static/v3/ 全量生产源码与生成快照严禁残留已删除旧字段 translate_target_lang */
 function stripSourceComments(filePath, raw) {

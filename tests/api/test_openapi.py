@@ -37,6 +37,7 @@ REQUIRED_PATHS = {
     "/api/v1/history",
     "/api/v1/events",
     "/api/v1/config",
+    "/api/v1/audio-inputs",
     "/api/v1/status",
     "/api/setup/check",
     "/api/setup/install-all",
@@ -63,6 +64,8 @@ def test_generated_openapi_has_real_paths_and_sse_schemas(tmp_path: Path):
         "ProductSSEEventEnvelope",
         "ErrorBody",
         "ApiStatusResponse",
+        "AudioInputDevice",
+        "AudioInputListResponse",
         "UtteranceResendNeedsConfirmation",
         "OcrInplaceResponse",
         "OcrTextBlock",
@@ -107,10 +110,14 @@ def test_openapi_security_and_errors_are_derived(tmp_path: Path):
     assert "只表示本接口响应成功" in matrix["status_ok"]
     lan = spec["paths"]["/api/v1/stt"]["post"]
     local = spec["paths"]["/api/v1/status"]["get"]
+    audio_inputs = spec["paths"]["/api/v1/audio-inputs"]["get"]
     claim = spec["paths"]["/api/v1/jobs/claim"]["post"]
     ocr_inplace = spec["paths"]["/api/v1/ocr-inplace"]["post"]
     assert lan["security"] == [{"VoiceToken": []}]
     assert local.get("security") == []
+    assert audio_inputs.get("security") == []
+    assert audio_inputs.get("operationId") == "list_audio_inputs_api_v1_audio_inputs_get"
+    assert "403" in audio_inputs["responses"] and "413" not in audio_inputs["responses"]
     assert claim.get("security") == []
     assert ocr_inplace.get("security") == []
     assert "403" in ocr_inplace["responses"] and "413" in ocr_inplace["responses"]

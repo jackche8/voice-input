@@ -25,6 +25,7 @@ from _contracts import (
     OLLAMA_VERSION,
     PRODUCT_ASR_MODEL,
     SIDECAR_DEFAULT_BASE_URL,
+    AudioInputListResponse,
     OcrTextBlock,
     PolishRequest,
     PolishResponse,
@@ -45,6 +46,7 @@ from _ocr import image_to_text, list_tesseract_languages
 from _ocr_layout import extract_ocr_layout
 from _ollama import OllamaClient
 from _paths import INTERNAL_SETUP_WORKER_FLAG, PROGRAM_ROOT, STATIC_V3, AppPaths, default_app_paths, internal_subcommand
+from _platform._common import list_audio_input_devices
 from _polish import polish_text
 from _ports import DEFAULT_SERVER_PORT, local_ports
 from _session_finals import SessionFinalIndex
@@ -97,6 +99,7 @@ class SystemAdapters:
     ocr_languages: Callable[[], list[str]] | None = None
     keyboard_devices: Callable[[], list[str]] = readable_keyboard_paths
     list_ips: Callable[[], list[str]] | None = None
+    list_audio_inputs: Callable[[], AudioInputListResponse] | None = None
     http_transport: httpx.BaseTransport | None = None
     spawn: Spawn = thread_spawn
 
@@ -332,6 +335,9 @@ def compose_production_runtime(
         transcribe=transcribe,
     )
     list_ips = adapters.list_ips or (lambda: list_physical_lan_ipv4(run=adapters.run, os_name=paths.os_name))
+    list_audio_inputs = adapters.list_audio_inputs or (
+        lambda: list_audio_input_devices(refresh=True, os_name=paths.os_name)
+    )
     return Runtime(
         config=config,
         history=history,
@@ -351,6 +357,7 @@ def compose_production_runtime(
         setup=_setup_service(paths, endpoints, adapters, config, components),
         components=components,
         lan=LanAccessService(token=token, list_ips=list_ips, port=endpoints.port),
+        list_audio_inputs=list_audio_inputs,
         upload_tmp=paths.upload_tmp,
     )
 

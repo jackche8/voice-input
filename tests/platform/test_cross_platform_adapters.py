@@ -1647,3 +1647,435 @@ def test_set_windows_app_user_model_id_ctypes_signature_and_guards(monkeypatch):
 
     rc["value"] = -2147467259  # E_FAIL
     assert set_windows_app_user_model_id("io.github.jackche8.ollama-voice-input", shell32=shell32) is False
+
+
+# ---------------------------------------------------------------------------
+# 音频输入设备热插拔刷新、跨平台 Host API 择优列举与 3 级解析（_platform._common）
+# ---------------------------------------------------------------------------
+class _FakeInputOutputPair:
+    """模拟 sounddevice._InputOutputPair：非 list/tuple，仅支持索引 [0]/[1]。"""
+
+    def __init__(self, inp: int | None, out: int | None) -> None:
+        self._pair = (inp, out)
+
+    def __getitem__(self, idx: int):
+        return self._pair[idx]
+
+
+def test_audio_device_refresh_lock_counter_and_active_stream_guard():
+    import _platform._common as common_mod
+
+    events: list[str] = []
+
+    class _CounterSd:
+        def __init__(self, *, initialized: int = 1, fail_terminate: bool = False) -> None:
+            self._initialized = initialized
+            self._fail_terminate = fail_terminate
+
+        def stop(self) -> None:
+            events.append("stop")
+
+        def _terminate(self) -> None:
+            events.append("terminate")
+            if self._fail_terminate:
+                raise RuntimeError("pa terminate failed")
+            self._initialized -= 1
+
+        def _initialize(self) -> None:
+            events.append("initialize")
+            self._initialized += 1
+
+    # 1. 带 _initialized=1 正常刷新：stop -> terminate -> initialize，引用计数守恒为 1
+    sd_ok = _CounterSd(initialized=1)
+    assert common_mod.refresh_audio_devices(sd_ok) is True
+    assert sd_ok._initialized == 1
+    assert events == ["stop", "terminate", "initialize"]
+
+    # 2. _terminate 失败时绝不补调 _initialize，防引用计数泄漏成 2
+    events.clear()
+    sd_fail = _CounterSd(initialized=1, fail_terminate=True)
+    with pytest.raises(RuntimeError, match="pa terminate failed"):
+        common_mod.refresh_audio_devices(sd_fail)
+    assert sd_fail._initialized == 1
+    assert events == ["stop", "terminate"]
+
+    # 3. 先前 _initialized=0 时跳过 _terminate 直接恢复 _initialize
+    events.clear()
+    sd_zero = _CounterSd(initialized=0)
+    assert common_mod.refresh_audio_devices(sd_zero) is True
+    assert sd_zero._initialized == 1
+    assert events == ["stop", "initialize"]
+
+    # 4. 无 _initialized 的替身：正常先 term 再 init；_terminate 失败时不补调 init
+    events.clear()
+
+    class _NoCounterSd:
+        def __init__(self, *, fail_terminate: bool = False) -> None:
+            self._fail_terminate = fail_terminate
+
+        def _terminate(self) -> None:
+            events.append("nc_term")
+            if self._fail_terminate:
+                raise RuntimeError("nc term boom")
+
+        def _initialize(self) -> None:
+            events.append("nc_init")
+
+    assert common_mod.refresh_audio_devices(_NoCounterSd()) is True
+    assert events == ["nc_term", "nc_init"]
+    events.clear()
+    with pytest.raises(RuntimeError, match="nc term boom"):
+        common_mod.refresh_audio_devices(_NoCounterSd(fail_terminate=True))
+    assert events == ["nc_term"]
+
+    # 5. 录音进行中跳过 terminate；stop() 内部抛错仍必须 close() 且归还计数不外抛、重复 stop 不下溢
+    stream_events: list[str] = []
+
+    class _FlakyStopStream:
+        def start(self) -> None:
+            stream_events.append("stream_start")
+
+        def stop(self) -> None:
+            stream_events.append("stream_stop")
+            raise RuntimeError("device unplugged during stop")
+
+        def close(self) -> None:
+            stream_events.append("stream_close")
+
+    class _RecordingSd(_CounterSd):
+        def RawInputStream(self, **kw):
+            del kw
+            return _FlakyStopStream()
+
+    rec_sd = _RecordingSd(initialized=1)
+    src = common_mod.SoundDeviceSource(sounddevice_mod=rec_sd)
+    events.clear()
+    src.start(lambda _b: None)
+    assert common_mod._ACTIVE_INPUT_STREAMS == 1
+    assert events == ["stop", "terminate", "initialize"]
+
+    events.clear()
+    assert common_mod.refresh_audio_devices(rec_sd) is False
+    assert events == []
+
+    src.stop()  # stream.stop() 抛错不可外泄，且 close() 与计数归还必须完成
+    assert stream_events == ["stream_start", "stream_stop", "stream_close"]
+    assert common_mod._ACTIVE_INPUT_STREAMS == 0
+    src.stop()  # 二次 stop 幂等不下溢
+    assert common_mod._ACTIVE_INPUT_STREAMS == 0
+    assert common_mod.refresh_audio_devices(rec_sd) is True
+    assert events == ["stop", "terminate", "initialize"]
+
+
+def test_list_audio_input_devices_cross_platform_filtering_and_errors(monkeypatch):
+    import sys
+    from types import SimpleNamespace
+
+    from _contracts import ErrorCode, LogicError
+    from _platform._common import list_audio_input_devices
+
+    def _make_sd(devices, hostapis, *, default_in=-1, default_ha=0, query_error=None):
+        class _FakeSd:
+            default = SimpleNamespace(device=_FakeInputOutputPair(default_in, 0), hostapi=default_ha)
+
+            def __init__(self) -> None:
+                self._initialized = 1
+                self.refreshes = 0
+
+            def stop(self) -> None:
+                pass
+
+            def _terminate(self) -> None:
+                self._initialized -= 1
+
+            def _initialize(self) -> None:
+                self._initialized += 1
+                self.refreshes += 1
+
+            def query_devices(self):
+                if query_error is not None:
+                    raise query_error
+                return list(devices)
+
+            def query_hostapis(self):
+                return list(hostapis)
+
+        return _FakeSd()
+
+    # 1. Windows：DirectSound 优先于 MME/WASAPI，排除 WDM-KS，过滤伪默认别名，同名去重保 default，
+    #    且 DirectSound/全局 default 为伪别名时反查 WASAPI 真默认名并标 is_default=True
+    win_hostapis = [
+        {"name": "MME", "default_input_device": 0, "devices": [0, 1]},
+        {"name": "Windows DirectSound", "default_input_device": 2, "devices": [2, 3, 4, 5]},
+        {"name": "Windows WASAPI", "default_input_device": 7, "devices": [6, 7]},
+        {"name": "Windows WDM-KS", "default_input_device": 8, "devices": [8]},
+    ]
+    win_devices = [
+        {"name": "Microsoft Sound Mapper - Input", "hostapi": 0, "max_input_channels": 2},
+        {"name": "MME Mic", "hostapi": 0, "max_input_channels": 2},
+        {"name": "Primary Sound Capture Driver", "hostapi": 1, "max_input_channels": 2},
+        {"name": "USB Mic A", "hostapi": 1, "max_input_channels": 2},
+        {"name": "USB Mic B ", "hostapi": 1, "max_input_channels": 2},
+        {"name": "USB Mic B", "hostapi": 1, "max_input_channels": 2},  # 同名重复项
+        {"name": "USB Mic A", "hostapi": 2, "max_input_channels": 2},
+        {"name": "USB Mic B", "hostapi": 2, "max_input_channels": 2},  # WASAPI 系统默认
+        {"name": "WDM-KS Mic", "hostapi": 3, "max_input_channels": 2},
+    ]
+    win_sd = _make_sd(win_devices, win_hostapis, default_in=0, default_ha=3)
+    res_win = list_audio_input_devices(refresh=True, sounddevice_mod=win_sd, os_name="windows")
+    assert win_sd.refreshes == 1
+    assert res_win.default_device == "USB Mic B"
+    assert [(d.name, d.hostapi, d.is_default) for d in res_win.devices] == [
+        ("USB Mic A", "Windows DirectSound", False),
+        ("USB Mic B", "Windows DirectSound", True),
+    ]
+
+    # 1b. Windows DirectSound 无真实麦时回退 MME，且通过 31 字前缀反标 WASAPI 默认
+    long_wasapi = "Microphone (USB Audio Device Pro Studio 9000)"
+    long_mme = long_wasapi[:31]
+    win_mme_sd = _make_sd(
+        [
+            {"name": "Primary Sound Capture Driver", "hostapi": 0, "max_input_channels": 2},
+            {"name": long_mme, "hostapi": 1, "max_input_channels": 2},
+            {"name": long_wasapi, "hostapi": 2, "max_input_channels": 2},
+        ],
+        [
+            {"name": "Windows DirectSound", "default_input_device": 0, "devices": [0]},
+            {"name": "MME", "default_input_device": -1, "devices": [1]},
+            {"name": "Windows WASAPI", "default_input_device": 2, "devices": [2]},
+        ],
+        default_in=-1,
+        default_ha=0,
+    )
+    res_mme = list_audio_input_devices(refresh=False, sounddevice_mod=win_mme_sd, os_name="windows")
+    assert win_mme_sd.refreshes == 0
+    assert res_mme.default_device == long_wasapi
+    assert [(d.name, d.hostapi, d.is_default) for d in res_mme.devices] == [(long_mme, "MME", True)]
+
+    # 2. macOS：优先 Core Audio
+    mac_sd = _make_sd(
+        [{"name": "MacBook Pro Microphone", "hostapi": 0, "max_input_channels": 1}],
+        [{"name": "Core Audio", "default_input_device": 0, "devices": [0]}],
+        default_in=0,
+        default_ha=0,
+    )
+    res_mac = list_audio_input_devices(refresh=False, sounddevice_mod=mac_sd, os_name="macos")
+    assert res_mac.default_device == "MacBook Pro Microphone"
+    assert [(d.name, d.hostapi, d.is_default) for d in res_mac.devices] == [
+        ("MacBook Pro Microphone", "Core Audio", True)
+    ]
+
+    # 3. Linux：PulseAudio 原始 devices 非空时固定用 PulseAudio（即使只有 Default Source + .monitor，也绝不回退 ALSA 虚拟插件）
+    linux_pa_empty_real = _make_sd(
+        [
+            {"name": "default", "hostapi": 0, "max_input_channels": 32},
+            {"name": "lavrate", "hostapi": 0, "max_input_channels": 32},
+            {"name": "HDA Analog (hw:0,0)", "hostapi": 0, "max_input_channels": 2},
+            {"name": "Default Source", "hostapi": 1, "max_input_channels": 2},
+            {"name": "alsa_output.pci.analog-stereo.monitor", "hostapi": 1, "max_input_channels": 2},
+        ],
+        [
+            {"name": "ALSA", "default_input_device": 0, "devices": [0, 1, 2]},
+            {"name": "PulseAudio", "default_input_device": 3, "devices": [3, 4]},
+        ],
+        default_in=0,
+        default_ha=0,
+    )
+    res_linux_pa = list_audio_input_devices(refresh=False, sounddevice_mod=linux_pa_empty_real, os_name="linux")
+    assert res_linux_pa.devices == [] and res_linux_pa.default_device is None
+
+    # 4. Linux：PulseAudio 原始 devices=[] 时回退 ALSA 并过滤虚拟插件（lavrate/speex/upmix/dmix/null 等）
+    linux_alsa_sd = _make_sd(
+        [
+            {"name": "default", "hostapi": 0, "max_input_channels": 32},
+            {"name": "lavrate", "hostapi": 0, "max_input_channels": 32},
+            {"name": "samplerate", "hostapi": 0, "max_input_channels": 32},
+            {"name": "speexrate", "hostapi": 0, "max_input_channels": 32},
+            {"name": "speex", "hostapi": 0, "max_input_channels": 32},
+            {"name": "upmix", "hostapi": 0, "max_input_channels": 32},
+            {"name": "vdownmix", "hostapi": 0, "max_input_channels": 32},
+            {"name": "dmix", "hostapi": 0, "max_input_channels": 32},
+            {"name": "dsnoop", "hostapi": 0, "max_input_channels": 32},
+            {"name": "null", "hostapi": 0, "max_input_channels": 32},
+            {"name": "HDA Intel Analog (hw:0,0)", "hostapi": 0, "max_input_channels": 2},
+        ],
+        [
+            {"name": "ALSA", "default_input_device": 0, "devices": list(range(11))},
+            {"name": "PulseAudio", "default_input_device": -1, "devices": []},
+        ],
+        default_in=0,
+        default_ha=0,
+    )
+    res_linux_alsa = list_audio_input_devices(refresh=False, sounddevice_mod=linux_alsa_sd, os_name="linux")
+    assert [(d.name, d.hostapi) for d in res_linux_alsa.devices] == [("HDA Intel Analog (hw:0,0)", "ALSA")]
+
+    # 5. 单轨失败：枚举异常或缺少 sounddevice 均显式抛 LogicError(dependency_failed)
+    broken_sd = _make_sd([], [], query_error=RuntimeError("PortAudio broken"))
+    with pytest.raises(LogicError) as ei_query:
+        list_audio_input_devices(refresh=False, sounddevice_mod=broken_sd, os_name="windows")
+    assert ei_query.value.code == ErrorCode.dependency_failed
+
+    monkeypatch.setitem(sys.modules, "sounddevice", None)
+    with pytest.raises(LogicError) as ei_imp:
+        list_audio_input_devices(refresh=False, sounddevice_mod=None, os_name="windows")
+    assert ei_imp.value.code == ErrorCode.dependency_failed
+
+
+def test_resolve_audio_input_device_and_sound_device_source_hotplug():
+    from types import SimpleNamespace
+
+    from _platform._common import SoundDeviceSource, resolve_audio_input_device
+
+    # 1. 热插拔端到端：启动时 0 麦报错 -> 插上 USB 麦后无需重启自动刷新识别并开流，且支持动态切换 device_provider
+    state = {
+        "plugged": False,
+        "selected": "",
+        "opened_devices": [],
+        "refreshes": 0,
+    }
+
+    class _HotplugStream:
+        def start(self) -> None:
+            pass
+
+        def stop(self) -> None:
+            pass
+
+        def close(self) -> None:
+            pass
+
+    class _HotplugSd:
+        def __init__(self) -> None:
+            self._initialized = 1
+            self._visible_plugged = False
+            self.default = SimpleNamespace(device=_FakeInputOutputPair(-1, 0), hostapi=0)
+
+        def stop(self) -> None:
+            pass
+
+        def _terminate(self) -> None:
+            self._initialized -= 1
+
+        def _initialize(self) -> None:
+            self._initialized += 1
+            state["refreshes"] += 1
+            self._visible_plugged = state["plugged"]
+            self.default = SimpleNamespace(
+                device=_FakeInputOutputPair(1 if self._visible_plugged else -1, 0),
+                hostapi=0,
+            )
+
+        def query_hostapis(self):
+            return [
+                {"name": "Windows DirectSound", "default_input_device": 1 if self._visible_plugged else -1, "devices": [0, 1] if self._visible_plugged else [0]},
+            ]
+
+        def query_devices(self):
+            devs = [{"name": "Speakers", "hostapi": 0, "max_input_channels": 0}]
+            if self._visible_plugged:
+                devs.append({"name": "USB Hotplug Mic", "hostapi": 0, "max_input_channels": 2})
+            return devs
+
+        def RawInputStream(self, **kw):
+            state["opened_devices"].append(kw["device"])
+            return _HotplugStream()
+
+    hp_sd = _HotplugSd()
+    src = SoundDeviceSource(
+        sounddevice_mod=hp_sd,
+        device_provider=lambda: state["selected"],
+        os_name="windows",
+    )
+    with pytest.raises(RuntimeError, match="未检测到可用麦克风"):
+        src.start(lambda _b: None)
+
+    # 插上 USB 麦后再按说话键 -> 自动重扫 PortAudio 并走系统默认（device=None）
+    state["plugged"] = True
+    src.start(lambda _b: None)
+    src.stop()
+    assert state["opened_devices"] == [None]
+    assert state["refreshes"] == 2
+
+    # 动态改配置指定具体麦克风 -> 下次 start() 直接解析为设备索引 1
+    state["selected"] = "USB Hotplug Mic"
+    src.start(lambda _b: None)
+    src.stop()
+    assert state["opened_devices"] == [None, 1]
+
+    # 2. 3 级解析、默认回退、逐 Host API 31 字前缀独立唯一与歧义 fail-loud、短名不前缀匹配、WDM-KS 排除
+    long_a = "Microphone (USB Studio Interface Channel One)"
+    long_b = "Microphone (USB Studio Interface Channel Two)"
+    prefix_31 = long_a[:31]
+    assert len(prefix_31) == 31 and long_b[:31] == prefix_31
+
+    class _ResolveSd:
+        def __init__(self, devices, hostapis, *, default_in=-1, default_ha=0) -> None:
+            self._devices = devices
+            self._hostapis = hostapis
+            self.default = SimpleNamespace(device=_FakeInputOutputPair(default_in, 0), hostapi=default_ha)
+
+        def query_devices(self):
+            return list(self._devices)
+
+        def query_hostapis(self):
+            return list(self._hostapis)
+
+    # 2a. 空串跟随默认：default_in<0 -> 回退偏好 Host API default_input_device -> 再回退首个真实麦
+    sd_fb_ha = _ResolveSd(
+        [
+            {"name": "Primary Sound Capture Driver", "hostapi": 0, "max_input_channels": 2},
+            {"name": "Mic 1", "hostapi": 0, "max_input_channels": 2},
+            {"name": "Mic 2", "hostapi": 0, "max_input_channels": 2},
+        ],
+        [{"name": "Windows DirectSound", "default_input_device": 2, "devices": [0, 1, 2]}],
+        default_in=-1,
+    )
+    assert resolve_audio_input_device("", sounddevice_mod=sd_fb_ha, os_name="windows") == 2
+
+    sd_fb_first = _ResolveSd(
+        [
+            {"name": "Primary Sound Capture Driver", "hostapi": 0, "max_input_channels": 2},
+            {"name": "Mic 1", "hostapi": 0, "max_input_channels": 2},
+        ],
+        [{"name": "Windows DirectSound", "default_input_device": -1, "devices": [0, 1]}],
+        default_in=-1,
+    )
+    assert resolve_audio_input_device("", sounddevice_mod=sd_fb_first, os_name="windows") == 1
+
+    # 2b. ① 偏好精确 -> ② 其余非 WDM-KS 精确 -> ③ 逐 Host API 独立唯一 31 字前缀（跨 Host API 同麦不误报歧义）
+    sd_tiers = _ResolveSd(
+        [
+            {"name": long_a, "hostapi": 0, "max_input_channels": 2},  # DirectSound
+            {"name": "Only In WASAPI", "hostapi": 1, "max_input_channels": 2},
+            {"name": long_a, "hostapi": 1, "max_input_channels": 2},  # WASAPI 也有同麦
+            {"name": "Only In WDM-KS", "hostapi": 2, "max_input_channels": 2},
+            {"name": "USB Mic Pro", "hostapi": 0, "max_input_channels": 2},
+        ],
+        [
+            {"name": "Windows DirectSound", "default_input_device": 0, "devices": [0, 4]},
+            {"name": "Windows WASAPI", "default_input_device": 1, "devices": [1, 2]},
+            {"name": "Windows WDM-KS", "default_input_device": 3, "devices": [3]},
+        ],
+    )
+    assert resolve_audio_input_device(long_a, sounddevice_mod=sd_tiers, os_name="windows") == 0
+    assert resolve_audio_input_device("Only In WASAPI", sounddevice_mod=sd_tiers, os_name="windows") == 1
+    assert resolve_audio_input_device(prefix_31, sounddevice_mod=sd_tiers, os_name="windows") == 0
+
+    # WDM-KS 必须排除；短名（<31字）严禁前缀匹配 "USB Mic Pro"；报错长度适配 VoiceFlow [:80]
+    for missing_name in ("Only In WDM-KS", "USB Mic", "Disconnected Long Name " + "X" * 40):
+        with pytest.raises(RuntimeError) as ei_miss:
+            resolve_audio_input_device(missing_name, sounddevice_mod=sd_tiers, os_name="windows")
+        msg = str(ei_miss.value)
+        assert "已选麦克风未连接" in msg and "跟随系统默认" in msg and len(msg) <= 80
+
+    # 2c. 同 Host API 内 >=2 设备共享前 31 字时显式歧义报错（fail-loud）
+    sd_ambig = _ResolveSd(
+        [
+            {"name": long_a, "hostapi": 0, "max_input_channels": 2},
+            {"name": long_b, "hostapi": 0, "max_input_channels": 2},
+        ],
+        [{"name": "Windows DirectSound", "default_input_device": 0, "devices": [0, 1]}],
+    )
+    with pytest.raises(RuntimeError) as ei_ambig:
+        resolve_audio_input_device(prefix_31, sounddevice_mod=sd_ambig, os_name="windows")
+    assert "歧义" in str(ei_ambig.value) and len(str(ei_ambig.value)) <= 80

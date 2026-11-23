@@ -15,7 +15,9 @@
     "hotkey_ocr",
     "hotkey_repeat",
     "hotkey_annotate",
-    "autostart_enabled"
+    "autostart_enabled",
+    "ui_theme",
+    "audio_input_device"
   ];
 
   function pickLegalConfig(patch) {
@@ -46,7 +48,31 @@
     state.hotkey_repeat = config.hotkey_repeat || "";
     state.hotkey_annotate = config.hotkey_annotate || "";
     state.autostart_enabled = config.autostart_enabled;
+    if (config.ui_theme === "light" || config.ui_theme === "dark") {
+      state.theme = config.ui_theme;
+    }
+    if (config.audio_input_device != null) {
+      state.audio_input_device = String(config.audio_input_device);
+    }
     return state;
+  }
+
+  function mapAudioInputs(raw) {
+    if (!raw || typeof raw !== "object") return null;
+    var list = Array.isArray(raw.devices) ? raw.devices : [];
+    var devices = [];
+    list.forEach(function (item) {
+      if (!item || !item.name) return;
+      devices.push({
+        name: String(item.name),
+        hostapi: item.hostapi != null ? String(item.hostapi) : "",
+        isDefault: item.is_default === true
+      });
+    });
+    return {
+      defaultDevice: (raw.default_device != null && raw.default_device !== "") ? String(raw.default_device) : null,
+      devices: devices
+    };
   }
 
   function formatBytes(n) {
@@ -238,6 +264,7 @@
   root.pickLegalConfig = pickLegalConfig;
   root.parseKeywords = parseKeywords;
   root.applyConfig = applyConfig;
+  root.mapAudioInputs = mapAudioInputs;
   root.formatBytes = formatBytes;
   root.mapProgress = mapProgress;
   root.mapAsr = mapAsr;

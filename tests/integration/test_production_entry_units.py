@@ -102,6 +102,7 @@ def test_daemon_entry_is_thin():
         "on_connected=status.resend_on_connect",
         "set_windows_app_user_model_id(APP_USER_MODEL_ID)",
         "apply_qt_app_icon(app, paths)",
+        "source_factory=lambda: SoundDeviceSource(device_provider=lambda: config.load().audio_input_device)",
     ):
         assert needed in src
     assert src.index("set_windows_app_user_model_id(APP_USER_MODEL_ID)") < src.index("QApplication(")

@@ -1226,6 +1226,38 @@
         "security": []
       }
     },
+    "/api/v1/audio-inputs": {
+      "get": {
+        "tags": [
+          "control"
+        ],
+        "summary": "List Audio Inputs",
+        "operationId": "list_audio_inputs_api_v1_audio_inputs_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AudioInputListResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "鉴权失败：非本机、对端不是允许的局域网、token 无效、Host/Origin 不可信。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": []
+      }
+    },
     "/api/v1/status": {
       "get": {
         "tags": [
@@ -1747,6 +1779,32 @@
               }
             ],
             "title": "Autostart Enabled"
+          },
+          "ui_theme": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "light",
+                  "dark"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ui Theme"
+          },
+          "audio_input_device": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Audio Input Device"
           }
         },
         "additionalProperties": false,
@@ -1799,6 +1857,20 @@
           "autostart_enabled": {
             "type": "boolean",
             "title": "Autostart Enabled"
+          },
+          "ui_theme": {
+            "type": "string",
+            "enum": [
+              "light",
+              "dark"
+            ],
+            "title": "Ui Theme",
+            "default": "light"
+          },
+          "audio_input_device": {
+            "type": "string",
+            "title": "Audio Input Device",
+            "default": ""
           },
           "ollama_model": {
             "type": "string",
@@ -1887,6 +1959,64 @@
           "sidecar_running"
         ],
         "title": "AsrSetupStatus"
+      },
+      "AudioInputDevice": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Name"
+          },
+          "hostapi": {
+            "type": "string",
+            "title": "Hostapi",
+            "default": ""
+          },
+          "is_default": {
+            "type": "boolean",
+            "title": "Is Default",
+            "default": false
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "name"
+        ],
+        "title": "AudioInputDevice",
+        "description": "单个可用麦克风输入设备（不暴露易随热插拔漂移的 PortAudio 整型 index）。"
+      },
+      "AudioInputListResponse": {
+        "properties": {
+          "ok": {
+            "type": "boolean",
+            "const": true,
+            "title": "Ok",
+            "default": true
+          },
+          "default_device": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Default Device"
+          },
+          "devices": {
+            "items": {
+              "$ref": "#/components/schemas/AudioInputDevice"
+            },
+            "type": "array",
+            "title": "Devices"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "AudioInputListResponse",
+        "description": "GET /api/v1/audio-inputs 成功响应；0 麦返空列表，枚举/音频库异常单轨抛 dependency_failed。"
       },
       "Body_from_audio_api_v1_utterances_from_audio_post": {
         "properties": {
@@ -3998,6 +4128,20 @@
             "default": true,
             "title": "Autostart Enabled",
             "type": "boolean"
+          },
+          "ui_theme": {
+            "default": "light",
+            "enum": [
+              "light",
+              "dark"
+            ],
+            "title": "Ui Theme",
+            "type": "string"
+          },
+          "audio_input_device": {
+            "default": "",
+            "title": "Audio Input Device",
+            "type": "string"
           },
           "vision_model": {
             "anyOf": [

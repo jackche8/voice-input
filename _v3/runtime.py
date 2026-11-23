@@ -15,6 +15,7 @@ from _config import ConfigStore
 from _contracts import (
     DEFAULT_TRANSLATE_LANG_PAIR,
     AppConfig,
+    AudioInputListResponse,
     ErrorCode,
     LogicError,
     OcrTextBlock,
@@ -49,6 +50,7 @@ TranslateBlocksFn = Callable[..., list[OcrTextBlock]]
 OcrFn = Callable[..., str]
 OcrLayoutFn = Callable[..., tuple[int, int, str, list[OcrTextBlock]]]
 DecodeAudioFn = Callable[..., bytes]
+ListAudioInputsFn = Callable[[], AudioInputListResponse]
 
 
 def _default_translate_blocks(translate: TranslateFn) -> TranslateBlocksFn:
@@ -143,6 +145,7 @@ class Runtime:
     stream_provider: StreamingAsrProvider | None = None
     setup: SetupService | None = None
     lan: LanAccessService | None = None
+    list_audio_inputs: ListAudioInputsFn | None = None
     components: ComponentRegistry = field(default_factory=ComponentRegistry)
     max_upload_bytes: int = 15 * 1024 * 1024
     max_chunk_bytes: int = 160_000
@@ -168,6 +171,7 @@ def build_sandbox_runtime(
     stream_provider: StreamingAsrProvider | None = None,
     setup: SetupService | None = None,
     lan_ips: Callable[[], list[str]] | None = None,
+    list_audio_inputs: ListAudioInputsFn | None = None,
     port: int = DEFAULT_SERVER_PORT,
     polish_enabled: bool = False,
     max_upload_bytes: int | None = None,
@@ -225,6 +229,7 @@ def build_sandbox_runtime(
         stream_provider=stream_provider,
         setup=setup,
         lan=None if lan_ips is None else LanAccessService(token=token, list_ips=lan_ips, port=port),
+        list_audio_inputs=list_audio_inputs,
         max_upload_bytes=15 * 1024 * 1024 if max_upload_bytes is None else max_upload_bytes,
         max_chunk_bytes=160_000 if max_chunk_bytes is None else max_chunk_bytes,
         upload_tmp=upload_tmp,
