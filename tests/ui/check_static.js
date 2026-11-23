@@ -353,6 +353,38 @@ if ("background" in boxHeadSelectDecls || "background-color" in boxHeadSelectDec
   pass("studio.css .box-head select 仅保留盒头局部布局，背景/文字色统一由 theme.css 单源提供");
 }
 
+/* 设置页与工作台长报错防溢出 CSS 规则核验（复用顶层 CSS 规则解析器） */
+const overflowGuardChecks = [
+  { file: "theme.css", rules: themeRules, selector: ".row-sub", expect: { "overflow-wrap": "anywhere" } },
+  { file: "theme.css", rules: themeRules, selector: ".banner", expect: { "overflow-wrap": "anywhere" } },
+  { file: "theme.css", rules: themeRules, selector: ".badge", expect: { "flex-shrink": "0" } },
+  { file: "studio.css", rules: studioRules, selector: ".box-error", expect: { "overflow-wrap": "anywhere" } },
+  { file: "studio.css", rules: studioRules, selector: ".box-error > span", expect: { "min-width": "0", flex: "1" } },
+  { file: "studio.css", rules: studioRules, selector: ".empty", expect: { "overflow-wrap": "anywhere" } },
+  { file: "studio.css", rules: studioRules, selector: ".studio-panel", expect: { "min-width": "0" } },
+  { file: "studio.css", rules: studioRules, selector: ".setup-section", expect: { "min-width": "0" } },
+  {
+    file: "studio.css",
+    rules: studioRules,
+    selector: ".setup-pane .row > span:not(.badge):not(.dot):not(.saved)",
+    expect: { "min-width": "0", "max-width": "65%", "overflow-wrap": "anywhere", "text-align": "right" }
+  }
+];
+const overflowGuardErrors = [];
+for (const item of overflowGuardChecks) {
+  const decls = mergedDeclsForSelector(item.rules, item.selector);
+  for (const [prop, expected] of Object.entries(item.expect)) {
+    if (decls[prop] !== expected) {
+      overflowGuardErrors.push(item.file + " " + item.selector + " 缺少 " + prop + ": " + expected + "（实际：" + (decls[prop] || "未声明") + "）");
+    }
+  }
+}
+if (overflowGuardErrors.length) {
+  for (const msg of overflowGuardErrors) fail(msg);
+} else {
+  pass("theme.css / studio.css 长报错防溢出规则齐全（overflow-wrap / min-width / flex-shrink / max-width）");
+}
+
 for (const css of cssFiles) {
   const rel = path.relative(repo, css);
   if (path.basename(css) === "theme.css") continue;

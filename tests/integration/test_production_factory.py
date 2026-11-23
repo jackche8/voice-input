@@ -375,3 +375,154 @@ def test_production_setup_and_lan_dispatch_for_windows_and_macos(tmp_path):
         assert lan.status_code == 200
         assert [e["ip"] for e in lan.json()["entries"]] == ["192.168.50.7"]
         assert mac_cmds == [["ifconfig"]]
+
+
+def test_setup_worker_real_loopback_ollama_pull_fakeip_chain(tmp_path: Path):
+    """真链路（无 MockTransport）：真实 loopback HTTPServer + OVI_PORT_OLLAMA + 真实 setup_worker 子进程。"""
+    import threading
+    import time
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    from _v3.production import build_production_app
+
+    presigned = (
+        "https://dd20bb891979d25aebc8bec07b2b3bbc.r2.cloudflarestorage.com/blobs/sha256/abc?"
+        "X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Signature=" + ("f" * 500)
+    )
+    fakeip_err = (
+        f'max retries exceeded: Get "{presigned}": redirect target not allowed: '
+        'host "dd20bb.r2.cloudflarestorage.com" resolves to non-public 198.18.75.191'
+    )
+    state: dict[str, object] = {"mode": "recover", "models": [], "pulls": []}
+
+    class OllamaLoopbackHandler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            if self.path == "/api/version":
+                payload = {"version": "0.40.16"}
+            elif self.path == "/api/tags":
+                payload = {"models": [{"name": m, "model": m, "size": 3_300_000_000} for m in state["models"]]}
+            else:
+                self.send_response(404)
+                self.end_headers()
+                return
+            raw = json.dumps(payload).encode("utf-8")
+            self.send_response(200)
+            self.send_header("content-type", "application/json")
+            self.send_header("content-length", str(len(raw)))
+            self.end_headers()
+            self.wfile.write(raw)
+
+        def do_POST(self):
+            if self.path != "/api/pull":
+                self.send_response(404)
+                self.end_headers()
+                return
+            length = int(self.headers.get("content-length") or "0")
+            body = json.loads(self.rfile.read(length) or b"{}")
+            pulls = state["pulls"]
+            assert isinstance(pulls, list)
+            pulls.append(body)
+            if not body.get("insecure"):
+                lines = [
+                    {"status": "pulling manifest"},
+                    {"error": fakeip_err},
+                ]
+            elif state["mode"] == "recover":
+                models = state["models"]
+                assert isinstance(models, list)
+                models.append(body["model"])
+                lines = [
+                    {"status": "pulling layer", "digest": "sha256:l1", "total": 100, "completed": 100},
+                    {"status": "success"},
+                ]
+            else:
+                lines = [{"error": f'max retries exceeded: Get "{presigned}": context deadline exceeded'}]
+            raw = ("\n".join(json.dumps(item) for item in lines) + "\n").encode("utf-8")
+            self.send_response(200)
+            self.send_header("content-type", "application/x-ndjson")
+            self.send_header("content-length", str(len(raw)))
+            self.end_headers()
+            self.wfile.write(raw)
+
+        def log_message(self, *args):
+            return None
+
+    def _run_install_all(root: Path, ollama_port: int) -> tuple[dict, Path]:
+        env = {
+            **{k: v for k, v in os.environ.items() if not k.startswith(("XDG_", "OVI_"))},
+            "HOME": str(root / "home"),
+            "XDG_CONFIG_HOME": str(root / "config"),
+            "XDG_DATA_HOME": str(root / "data"),
+            "XDG_RUNTIME_DIR": str(root / "run"),
+            "APPDATA": str(root / "appdata"),
+            "LOCALAPPDATA": str(root / "localappdata"),
+            "OVI_PORT_OLLAMA": str(ollama_port),
+            "PYTHONPATH": str(PROGRAM_ROOT),
+            "PYTHONDONTWRITEBYTECODE": "1",
+        }
+        app, paths = build_production_app(environ=env)
+        # 仅演练第 3 步 ollama_pull：预置已安装的二进制与 ASR 权重使其他步骤跳过
+        paths.ollama_binary.parent.mkdir(parents=True, exist_ok=True)
+        paths.ollama_binary.write_text("#!/bin/sh\n", encoding="utf-8")
+        paths.ollama_binary.chmod(0o755)
+        paths.asr_manifest.parent.mkdir(parents=True, exist_ok=True)
+        paths.asr_manifest.write_text(json.dumps({"variant": "cpu"}), encoding="utf-8")
+        paths.asr_model_dir.mkdir(parents=True, exist_ok=True)
+        (paths.asr_model_dir / "config.json").write_text("{}", encoding="utf-8")
+        (paths.asr_model_dir / "model.safetensors").write_bytes(b"w")
+
+        with TestClient(app, client=("127.0.0.1", 50000), base_url="https://127.0.0.1:17945") as client:
+            report = {
+                "components": [
+                    {"name": n, "state": "running", "since": "2026-11-23T00:00:00+00:00"}
+                    for n in ("ollama", "asr", "server")
+                ]
+            }
+            assert client.post("/api/v1/components", json=report, headers=H).status_code == 202
+            started = client.post("/api/setup/install-all", headers=H)
+            assert started.status_code == 202
+            deadline = time.monotonic() + 25.0
+            check: dict = {}
+            while time.monotonic() < deadline:
+                check = client.get("/api/setup/check").json()
+                if check["install_all"]["state"] in ("done", "failed"):
+                    return check, paths
+                time.sleep(0.1)
+            pytest.fail(f"等待一键装齐终态超时：{check}")
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), OllamaLoopbackHandler)
+    port = server.server_address[1]
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        # 路径 1：首次 Fake-IP 拦截 → 真实 setup_worker 经 OVI_PORT_OLLAMA 自动 insecure 重试成功
+        ok_check, ok_paths = _run_install_all(tmp_path / "loopback-ok", port)
+        assert ok_check["install_all"]["state"] == "done"
+        assert ok_check["install_all"]["steps"][2]["state"] == "done"
+        assert ok_check["ollama"]["model_status"] == "ready"
+        assert state["pulls"] == [
+            {"model": "qwen3.5:4b", "stream": True},
+            {"model": "qwen3.5:4b", "stream": True, "insecure": True},
+        ]
+        ok_log = (ok_paths.logs / "setup-ollama_pull.log").read_text(encoding="utf-8")
+        assert "X-Amz-Signature=" in ok_log and "198.18.75.191" in ok_log
+
+        # 路径 2：insecure 重试仍超时 → UI 返回简短中文与实际 OVI_PORT_OLLAMA 手动指引，日志完整留痕
+        state["mode"] = "fail_retry"
+        state["models"] = []
+        state["pulls"] = []
+        fail_check, fail_paths = _run_install_all(tmp_path / "loopback-fail", port)
+        assert fail_check["install_all"]["state"] == "failed"
+        assert fail_check["install_all"]["steps"][2]["state"] == "failed"
+        assert fail_check["ollama"]["model_status"] == "failed"
+        err_msg = fail_check["ollama"]["message"]
+        assert err_msg == fail_check["install_all"]["steps"][2]["message"]
+        assert "Fake-IP" in err_msg and "超时" in err_msg
+        assert f"OLLAMA_HOST=127.0.0.1:{port} ollama pull --insecure qwen3.5:4b" in err_msg
+        assert "X-Amz-" not in err_msg and "https://" not in err_msg
+        fail_log = (fail_paths.logs / "setup-ollama_pull.log").read_text(encoding="utf-8")
+        assert "attempt=1" in fail_log and "attempt=2" in fail_log and "X-Amz-Signature=" in fail_log
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)

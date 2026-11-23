@@ -16,7 +16,10 @@ from _contracts import LogicError, SetupProgress
 from _platform import child_process as cp_mod
 from _v3.lan_access import list_physical_lan_ipv4, load_or_create_token
 from _v3.setup_actions import (
+    FAKEIP_RETRY_STAGE,
     asr_download_action,
+    format_ollama_pull_error,
+    is_ollama_fakeip_redirect_error,
     ollama_asset,
     ollama_install_action,
     ollama_pull_action,
@@ -82,6 +85,169 @@ def test_ollama_pull_connection_error():
     with pytest.raises(LogicError) as ei:
         ollama_pull_action(client_factory=lambda: _client(handler), model="qwen3.5:4b")(lambda _p: None)
     assert "无法连接" in ei.value.message
+
+
+def _long_presigned_url() -> str:
+    return (
+        "https://dd20bb891979d25aebc8bec07b2b3bbc.r2.cloudflarestorage.com/"
+        "ollama/docker/registry/v2/blobs/sha256/abcdef?"
+        "X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=cred/20261123/auto/s3/aws4_request&"
+        "X-Amz-Date=20261123T010000Z&X-Amz-Expires=1200&X-Amz-SignedHeaders=host&"
+        "X-Amz-Signature=" + ("a" * 600)
+    )
+
+
+def test_ollama_pull_fakeip_retries_insecure_once_and_succeeds(capsys):
+    url = _long_presigned_url()
+    # 1. 流式 item["error"] 命中 resolves to non-public：清空首轮 layers，上报兼容重试 stage，insecure:true 重试成功并复查 /api/tags
+    stream_payloads: list[dict] = []
+    stream_raw_err = (
+        f'max retries exceeded: Get "{url}": redirect target not allowed: '
+        'host "dd20bb.r2.cloudflarestorage.com" resolves to non-public 198.18.75.191'
+    )
+
+    def stream_handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/pull":
+            body = json.loads(request.content)
+            stream_payloads.append(body)
+            if len(stream_payloads) == 1:
+                lines = [
+                    {"status": "pulling stale", "digest": "sha256:stale", "total": 1000, "completed": 500},
+                    {"error": stream_raw_err},
+                ]
+            else:
+                lines = [
+                    {"status": "pulling fresh", "digest": "sha256:fresh", "total": 200, "completed": 100},
+                    {"status": "pulling fresh", "digest": "sha256:fresh", "total": 200, "completed": 200},
+                    {"status": "success"},
+                ]
+            return httpx.Response(200, content=("\n".join(json.dumps(x) for x in lines) + "\n").encode())
+        if request.url.path == "/api/tags":
+            return httpx.Response(200, json={"models": [{"name": "qwen3.5:4b", "model": "qwen3.5:4b"}]})
+        return httpx.Response(404)
+
+    seen: list[SetupProgress] = []
+    res = ollama_pull_action(client_factory=lambda: _client(stream_handler), model="qwen3.5:4b")(seen.append)
+    assert res == "qwen3.5:4b 已下载"
+    assert stream_payloads == [
+        {"model": "qwen3.5:4b", "stream": True},
+        {"model": "qwen3.5:4b", "stream": True, "insecure": True},
+    ]
+    retry_prog = SetupProgress(completed_bytes=None, total_bytes=None, percent=None, stage=FAKEIP_RETRY_STAGE)
+    assert retry_prog in seen
+    after_retry = seen[seen.index(retry_prog) + 1]
+    assert after_retry.completed_bytes == 100 and after_retry.total_bytes == 200 and after_retry.percent == 50.0
+    assert "X-Amz-Signature=" in capsys.readouterr().err
+
+    # 2. HTTP>=400 且长预签名 URL 在前、is not a public address 在后（完整读体不得被旧 [:300] 截断）
+    http_payloads: list[dict] = []
+    http_raw_err = f'Get "{url}": redirect target not allowed: 198.18.0.9 is not a public address'
+
+    def http_handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/pull":
+            body = json.loads(request.content)
+            http_payloads.append(body)
+            if len(http_payloads) == 1:
+                return httpx.Response(500, json={"error": http_raw_err})
+            return httpx.Response(200, content=(json.dumps({"status": "success"}) + "\n").encode())
+        if request.url.path == "/api/tags":
+            return httpx.Response(200, json={"models": [{"name": "qwen3.5:4b"}]})
+        return httpx.Response(404)
+
+    assert is_ollama_fakeip_redirect_error(http_raw_err)
+    assert ollama_pull_action(client_factory=lambda: _client(http_handler), model="qwen3.5:4b")(lambda _p: None) == "qwen3.5:4b 已下载"
+    assert http_payloads == [
+        {"model": "qwen3.5:4b", "stream": True},
+        {"model": "qwen3.5:4b", "stream": True, "insecure": True},
+    ]
+    assert "is not a public address" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    "retry_mode,expected_brief",
+    [
+        ("still_fakeip", "Fake-IP"),
+        ("stream_timeout", "超时"),
+        ("http_502", "HTTP 502"),
+        ("incomplete", "未完成"),
+        ("connect_error", "无法连接"),
+    ],
+)
+def test_ollama_pull_fakeip_retry_failure_is_concise_and_logged(capsys, retry_mode, expected_brief):
+    url = _long_presigned_url()
+    first_err = f'max retries exceeded: Get "{url}": redirect target not allowed: host "r2" resolves to non-public 198.18.75.191'
+    pull_calls: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path != "/api/pull":
+            return httpx.Response(404)
+        body = json.loads(request.content)
+        pull_calls.append(body)
+        if len(pull_calls) == 1:
+            return httpx.Response(200, content=(json.dumps({"error": first_err}) + "\n").encode())
+        if retry_mode == "still_fakeip":
+            return httpx.Response(200, content=(json.dumps({"error": first_err}) + "\n").encode())
+        if retry_mode == "stream_timeout":
+            err2 = f'max retries exceeded: Get "{url}": context deadline exceeded'
+            return httpx.Response(200, content=(json.dumps({"error": err2}) + "\n").encode())
+        if retry_mode == "http_502":
+            err2 = f'Get "{url}": proxyconnect tcp: 502 Bad Gateway'
+            return httpx.Response(502, json={"error": err2})
+        if retry_mode == "incomplete":
+            return httpx.Response(200, content=(json.dumps({"status": "pulling manifest"}) + "\n").encode())
+        raise httpx.ConnectError("connection refused", request=request)
+
+    def factory() -> httpx.Client:
+        return httpx.Client(base_url="http://127.0.0.1:18947", transport=httpx.MockTransport(handler))
+
+    with pytest.raises(LogicError) as ei:
+        ollama_pull_action(client_factory=factory, model="qwen3.5:4b")(lambda _p: None)
+    assert len(pull_calls) == 2
+    assert pull_calls[1] == {"model": "qwen3.5:4b", "stream": True, "insecure": True}
+    msg = ei.value.message
+    assert "Fake-IP" in msg and expected_brief in msg
+    assert "OLLAMA_HOST=127.0.0.1:18947 ollama pull --insecure qwen3.5:4b" in msg
+    assert "X-Amz-" not in msg and "https://" not in msg and "max retries exceeded" not in msg
+    err_log = capsys.readouterr().err
+    assert "attempt=1" in err_log and "attempt=2" in err_log and "X-Amz-Signature=" in err_log
+
+
+def test_ollama_pull_non_fakeip_errors_do_not_retry_and_strip_urls(capsys):
+    url = _long_presigned_url()
+    cases = [
+        (f'max retries exceeded: Get "{url}": x509: certificate signed by unknown authority', 200, "TLS"),
+        (f'Get "{url}": dial tcp: lookup registry.ollama.ai: no such host', 200, "域名解析"),
+        (f'Get "{url}": proxyconnect tcp: EOF', 200, "代理"),
+        (f'write /models/blob: no space left on device (see {url})', 500, "磁盘空间不足"),
+    ]
+    for raw_err, status, expected in cases:
+        calls: list[dict] = []
+
+        def handler(request: httpx.Request, _raw=raw_err, _status=status, _calls=calls) -> httpx.Response:
+            _calls.append(json.loads(request.content))
+            if _status >= 400:
+                return httpx.Response(_status, json={"error": _raw})
+            return httpx.Response(200, content=(json.dumps({"error": _raw}) + "\n").encode())
+
+        with pytest.raises(LogicError) as ei:
+            ollama_pull_action(
+                client_factory=lambda _h=handler: _client(_h),
+                model="qwen3.5:4b",
+                ollama_host="http://127.0.0.1:17947",
+            )(lambda _p: None)
+        assert len(calls) == 1, raw_err
+        msg = ei.value.message
+        assert expected in msg
+        assert "OLLAMA_HOST=127.0.0.1:17947 ollama pull qwen3.5:4b" in msg
+        assert "--insecure" not in msg
+        assert "X-Amz-" not in msg and "https://" not in msg and "max retries exceeded" not in msg
+        assert "X-Amz-Signature=" in capsys.readouterr().err
+
+    # 未知超长残余上限 ≤160 字并带省略号，剥离裸 URL
+    huge = f"unexpected failure at {url} " + ("detail-" * 50)
+    formatted = format_ollama_pull_error(huge, model="qwen3.5:4b", ollama_host="http://127.0.0.1:17947")
+    assert "https://" not in formatted and "X-Amz-" not in formatted and "…" in formatted
+    assert "OLLAMA_HOST=127.0.0.1:17947 ollama pull qwen3.5:4b" in formatted
 
 
 class FakeRun:

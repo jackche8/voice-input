@@ -18,6 +18,7 @@ import httpx
 from _contracts import ComponentName
 from _jobs_client import build_tls_context
 from _paths import INTERNAL_SERVER_FLAG, AppPaths, asr_runtime_root, internal_subcommand
+from _platform.system_proxy import SystemProxyReader, merge_proxy_env, read_os_system_proxy
 from _ports import LocalPorts, local_ports
 from _supervision.gpu_preflight import asr_gpu_preflight
 from _v3.setup_probe import probe_asr_sidecar, probe_asr_weights, probe_ollama
@@ -79,7 +80,13 @@ def _http_ready(url: str, check: Callable[[httpx.Client], ReadyResult], *, verif
         return ReadyResult(False, f"{type(exc).__name__}: {exc}")
 
 
-def _ollama(paths: AppPaths, environ: Mapping[str, str], ports: LocalPorts) -> ComponentSpec:
+def _ollama(
+    paths: AppPaths,
+    environ: Mapping[str, str],
+    ports: LocalPorts,
+    *,
+    read_system_proxy: SystemProxyReader = read_os_system_proxy,
+) -> ComponentSpec:
     def ready() -> ReadyResult:
         def check(client: httpx.Client) -> ReadyResult:
             probe = probe_ollama(binary=paths.ollama_binary, client=client, model="")
@@ -90,7 +97,9 @@ def _ollama(paths: AppPaths, environ: Mapping[str, str], ports: LocalPorts) -> C
     def installed() -> str | None:
         return None if paths.ollama_binary.is_file() else f"未安装 Ollama（{paths.ollama_binary} 不存在）"
 
-    env = {**environ, "OLLAMA_HOST": f"127.0.0.1:{ports.ollama}", "OLLAMA_MODELS": str(paths.ollama_models)}
+    env = merge_proxy_env(environ, os_name=paths.os_name, read_system_proxy=read_system_proxy)
+    env["OLLAMA_HOST"] = f"127.0.0.1:{ports.ollama}"
+    env["OLLAMA_MODELS"] = str(paths.ollama_models)
     return ComponentSpec(
         name=ComponentName.ollama, argv=(str(paths.ollama_binary), "serve"), env=env, cwd=paths.data_root,
         log_path=paths.logs / "ollama.log", port=ports.ollama, ready=ready, installed=installed,
@@ -181,10 +190,11 @@ def build_specs(
     run: Runner = subprocess.run,
     frozen: bool | None = None,
     executable: str | None = None,
+    read_system_proxy: SystemProxyReader = read_os_system_proxy,
 ) -> tuple[ComponentSpec, ...]:
     ports = local_ports(environ)
     return (
-        _ollama(paths, environ, ports),
+        _ollama(paths, environ, ports, read_system_proxy=read_system_proxy),
         _asr(paths, environ, ports, which=which, run=run, frozen=frozen),
         _server(paths, environ, ports, frozen=frozen, executable=executable),
     )

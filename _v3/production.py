@@ -139,7 +139,9 @@ def setup_task_actions(
 
     return {
         SetupTaskKind.ollama_pull: lambda report: ollama_pull_action(
-            client_factory=lambda: _client(endpoints.ollama_url, adapters, timeout=long_read), model=_model(config)
+            client_factory=lambda: _client(endpoints.ollama_url, adapters, timeout=long_read),
+            model=_model(config),
+            ollama_host=endpoints.ollama_url,
         )(report),
         SetupTaskKind.ollama_install: ollama_install_action(
             version=endpoints.ollama_version,
@@ -187,10 +189,12 @@ def setup_task_kinds(paths: AppPaths, adapters: SystemAdapters) -> dict[SetupTas
 
 
 def setup_worker_kind(kind: SetupTaskKind, environ: Mapping[str, str]) -> tuple[SetupAction, Callable[[], None]]:
-    """安装 worker 进程入口用：按与服务端相同的 environ 定位 live 路径，取该类任务的动作与清理。"""
+    """安装 worker 进程入口用：按与服务端相同的 environ 定位 live 路径与端口，取该类任务的动作与清理。"""
     paths = default_app_paths(environ)
+    ports = local_ports(environ)
     adapters = SystemAdapters(environ=environ)
-    action = setup_task_actions(paths, ProductionEndpoints(), adapters, ConfigStore(paths.config))[kind]
+    endpoints = ProductionEndpoints(port=ports.server, sidecar_url=ports.asr_url, ollama_url=ports.ollama_url)
+    action = setup_task_actions(paths, endpoints, adapters, ConfigStore(paths.config))[kind]
     return action, setup_task_kinds(paths, adapters)[kind].cleanup
 
 

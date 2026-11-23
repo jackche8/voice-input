@@ -31,6 +31,7 @@ CROSS_PLATFORM_PURE_MODULES = (
     "_platform._child_posix",
     "_platform._child_windows",
     "_platform.child_guard",
+    "_platform.system_proxy",
     "_procfs",
     "_atomic_file",
     "_ports",
@@ -75,7 +76,7 @@ MODULES = (
     "_platform._pynput_hotkeys", "_platform._win32_api", "_platform._macos_api",
     "_platform._certs_backends", "_platform._certs_crypto", "_platform._certs_openssl",
     "_platform.linux", "_platform.windows", "_platform.macos", "_platform.certs",
-    "_platform.child_process", "_platform._child_posix", "_platform._child_windows", "_platform.child_guard", "_procfs", "_atomic_file", "_ports",
+    "_platform.child_process", "_platform._child_posix", "_platform._child_windows", "_platform.child_guard", "_platform.system_proxy", "_procfs", "_atomic_file", "_ports",
     "_supervision", "_supervision.gpu_preflight", "_supervision.machine", "_supervision.ports", "_supervision.records",
     "_supervision.spec",
     "_linux.inject_guard", "_linux.x11keys", "_linux.uinput_device", "_linux.modifiers",
@@ -132,6 +133,7 @@ def test_non_linux_platform_modules_never_import_linux():
         "_platform/_child_posix.py",
         "_platform/_child_windows.py",
         "_platform/child_guard.py",
+        "_platform/system_proxy.py",
     )
     for rel in checked:
         tree = ast.parse((ROOT / rel).read_text(encoding="utf-8"), filename=rel)

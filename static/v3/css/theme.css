@@ -172,6 +172,7 @@ body {
   background: var(--c-bg);
   color: var(--c-muted);
   white-space: nowrap;
+  flex-shrink: 0;
 }
 .badge.ok { background: var(--c-ok-soft); color: var(--c-ok); }
 .badge.warn { background: var(--c-warn-soft); color: var(--c-warn); }
@@ -270,7 +271,7 @@ select option:disabled {
 .row:first-child { border-top: 0; }
 .row-main { flex: 1; min-width: 0; }
 .row-title { font-weight: 600; }
-.row-sub { font-size: var(--fs-xs); color: var(--c-muted); margin-top: 2px; }
+.row-sub { font-size: var(--fs-xs); color: var(--c-muted); margin-top: 2px; overflow-wrap: anywhere; }
 .row-sub.err { color: var(--c-danger); }
 .row .progress { margin-top: var(--sp-2); max-width: 320px; }
 
@@ -302,6 +303,7 @@ select option:disabled {
   border-radius: var(--radius-md);
   font-size: var(--fs-sm);
   line-height: 1.6;
+  overflow-wrap: anywhere;
 }
 .banner.danger { background: var(--c-danger-soft); color: var(--c-danger); }
 .banner.warn { background: var(--c-warn-soft); color: var(--c-warn); }

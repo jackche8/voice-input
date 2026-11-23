@@ -74,6 +74,37 @@ def test_ports_can_be_moved_by_environment_for_all_three_components(paths):
         build_specs(paths, {"OVI_PORT_ASR": "port"})
 
 
+def test_build_specs_merges_proxy_only_into_ollama(tmp_path):
+    win_paths = AppPaths.for_roots(
+        config_root=tmp_path / "win-c",
+        data_root=tmp_path / "win-d",
+        runtime_dir=tmp_path / "win-r",
+        os_name="windows",
+        environ={"APPDATA": str(tmp_path / "live-app"), "LOCALAPPDATA": str(tmp_path / "live-local")},
+    )
+    specs = {
+        s.name: s
+        for s in build_specs(
+            win_paths,
+            {"PATH": "/usr/bin"},
+            read_system_proxy=lambda os_name: (
+                {"http": "http://127.0.0.1:7890", "https": "http://127.0.0.1:7890"},
+                ["*.corp"],
+            )
+            if os_name == "windows"
+            else ({}, []),
+        )
+    }
+    ollama, asr, server = specs[ComponentName.ollama], specs[ComponentName.asr], specs[ComponentName.server]
+    assert ollama.env["HTTP_PROXY"] == "http://127.0.0.1:7890"
+    assert ollama.env["HTTPS_PROXY"] == "http://127.0.0.1:7890"
+    assert ollama.env["NO_PROXY"] == "*.corp,127.0.0.1,localhost,::1"
+    assert ollama.env["OLLAMA_HOST"] == f"127.0.0.1:{DEFAULT_OLLAMA_PORT}"
+    assert ollama.env["OLLAMA_MODELS"] == str(win_paths.ollama_models)
+    for other in (asr, server):
+        assert "HTTP_PROXY" not in other.env and "HTTPS_PROXY" not in other.env and "NO_PROXY" not in other.env
+
+
 @pytest.mark.parametrize(("variant", "tail"), [
     ("cuda", ("--backend", "vllm", "--gpu-memory-utilization", "0.45", "--max-model-len", "4096")),
     ("cpu", ("--backend", "transformers", "--device", "cpu")),

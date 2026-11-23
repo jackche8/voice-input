@@ -825,6 +825,143 @@
     assert(keySetupPane.querySelectorAll(".row")[0].innerText.indexOf("已就绪") === -1, "底层未知不是 ready");
     keyHome.destroy();
 
+    /* ---------- 5. 设置页与工作台长报错防溢出几何与样式验收 ---------- */
+    const longUnspacedErr = "https://r2.example.invalid/blobs/sha256-" + "a1b2c3d4e5".repeat(22);
+    assert(longUnspacedErr.length === 260 && !/\s/.test(longUnspacedErr), "长错测试样本为 260 字无空格字符串");
+
+    const overflowHome = V3.home.mount(homeRoot, {
+      connection: "connected",
+      activePanel: "setup",
+      setupTab: "models",
+      statusNotice: longUnspacedErr,
+      asr: { status: "ready", sidecarRunning: true, sizeLabel: "3.5 GB", message: "" },
+      ollama: {
+        installed: true,
+        running: true,
+        modelStatus: "failed",
+        message: longUnspacedErr
+      },
+      installAll: {
+        state: "failed",
+        current: "ollama_pull",
+        steps: [
+          { kind: "ollama_install", state: "skipped", message: "", progress: null },
+          { kind: "wait_ollama", state: "done", message: "", progress: null },
+          { kind: "ollama_pull", state: "failed", message: longUnspacedErr, progress: null },
+          { kind: "asr_runtime_install", state: "pending", message: "", progress: null },
+          { kind: "asr_download", state: "pending", message: "", progress: null }
+        ]
+      },
+      components: [
+        { name: "ollama", state: "stopped", reason: longUnspacedErr, failures: 5 },
+        { name: "asr", state: "running", reason: "", failures: 0 },
+        { name: "server", state: "running", reason: "", failures: 0 }
+      ],
+      capabilities: [
+        { name: "xclip（剪贴板）", available: false, message: longUnspacedErr, installCommand: longUnspacedErr }
+      ],
+      lanEntries: [],
+      lanMessage: longUnspacedErr
+    }, hooks);
+
+    const ovSetupPane = homeRoot.querySelector('[data-panel-view="setup"] .setup-pane');
+    const ovStepRow = ovSetupPane.querySelector('[data-step="ollama_pull"]');
+    const ovRowMain = ovStepRow.querySelector(".row-main");
+    const ovRowSub = ovStepRow.querySelector(".row-sub.err");
+    const ovBadge = ovStepRow.querySelector(".badge");
+    const ovStepRect = ovStepRow.getBoundingClientRect();
+    const ovRowMainRect = ovRowMain.getBoundingClientRect();
+    const ovBadgeRect = ovBadge.getBoundingClientRect();
+    const ovBadgeCs = window.getComputedStyle(ovBadge);
+    const ovRowSubCs = window.getComputedStyle(ovRowSub);
+
+    assert(
+      ovRowSub.scrollWidth <= ovRowSub.clientWidth + 1 && ovStepRow.scrollWidth <= ovStepRow.clientWidth + 1,
+      "设置页一键装齐失败步 260 字无空格长错不横向溢出（rowSub " + ovRowSub.scrollWidth + "/" + ovRowSub.clientWidth + "）"
+    );
+    assert(
+      ovBadgeRect.width > 0 && ovBadgeRect.right <= ovStepRect.right + 1,
+      "设置页长错不遮挡或顶出右侧失败徽章（badge.right=" + ovBadgeRect.right.toFixed(1) + " vs row.right=" + ovStepRect.right.toFixed(1) + "）"
+    );
+    assert(
+      ovRowMainRect.width > 20,
+      "设置页失败步左侧 .row-main 宽度未被压塌（width=" + ovRowMainRect.width.toFixed(1) + "）"
+    );
+    assert(ovBadgeCs.flexShrink === "0", "右侧 .badge 计算样式 flexShrink 为 0");
+    assert(ovRowSubCs.overflowWrap === "anywhere", "报错副文 .row-sub 计算样式 overflowWrap 为 anywhere");
+
+    const ovBanner = homeRoot.querySelector(".banner:not([hidden])");
+    assert(
+      !!ovBanner && ovBanner.scrollWidth <= ovBanner.clientWidth + 1 && window.getComputedStyle(ovBanner).overflowWrap === "anywhere",
+      "顶部 .banner 承载 260 字无空格长错正常折行无横向溢出"
+    );
+    assert(
+      ovSetupPane.scrollWidth <= ovSetupPane.clientWidth + 1 && document.documentElement.scrollWidth <= document.documentElement.clientWidth + 1,
+      "设置页模型子标签与页面整体无横向滚动溢出"
+    );
+
+    /* 设置页「系统检测」子标签：右侧普通 span 承载 260 字无空格长错与安装命令不压塌左侧 .row-main */
+    overflowHome.setSetupTab("sys");
+    const ovSysRows = ovSetupPane.querySelectorAll(".rows .row");
+    const ovSysCapRow = ovSysRows[0];
+    const ovSysCapMain = ovSysCapRow.querySelector(".row-main");
+    const ovSysCapSpan = ovSysCapRow.querySelector("span:not(.badge):not(.dot):not(.saved)");
+    const ovSysCapRowRect = ovSysCapRow.getBoundingClientRect();
+    const ovSysCapMainRect = ovSysCapMain.getBoundingClientRect();
+    const ovSysCapSpanRect = ovSysCapSpan.getBoundingClientRect();
+    const ovSysCapSpanCs = window.getComputedStyle(ovSysCapSpan);
+    assert(
+      ovSysCapRow.scrollWidth <= ovSysCapRow.clientWidth + 1 && ovSysCapSpan.scrollWidth <= ovSysCapSpan.clientWidth + 1,
+      "系统检测能力行 260 字无空格长错正常折行不横向溢出"
+    );
+    assert(
+      ovSysCapMainRect.width > 20 && ovSysCapSpanRect.right <= ovSysCapRowRect.right + 1 && ovSysCapSpanRect.width <= ovSysCapRowRect.width * 0.66 + 1,
+      "系统检测右侧长错受 max-width:65% 约束且左侧 .row-main 未被压塌（main=" + ovSysCapMainRect.width.toFixed(1) + " span=" + ovSysCapSpanRect.width.toFixed(1) + "/" + ovSysCapRowRect.width.toFixed(1) + "）"
+    );
+    assert(
+      ovSysCapSpanCs.overflowWrap === "anywhere" && ovSysCapSpanCs.textAlign === "right",
+      "系统检测右侧长错计算样式 overflowWrap=anywhere 且 textAlign=right"
+    );
+    const ovSysCmdRow = ovSysRows[1];
+    const ovSysCmdMainRect = ovSysCmdRow.querySelector(".row-main").getBoundingClientRect();
+    assert(
+      ovSysCmdRow.scrollWidth <= ovSysCmdRow.clientWidth + 1 && ovSysCmdMainRect.width > 20,
+      "系统检测安装命令长串不横向溢出且左侧标签不被压塌"
+    );
+
+    /* 工作台翻译区 .box-error 与扫码区 .empty 260 字无空格长错防溢出 */
+    overflowHome.setState({
+      activePanel: "translate",
+      statusNotice: "",
+      translate: { phase: "error", error: "translate_failed", message: longUnspacedErr }
+    });
+    const ovBoxError = homeRoot.querySelector('[data-panel-view="translate"] .box-error');
+    const ovBoxErrorSpan = ovBoxError.querySelector("span");
+    const ovBoxBody = homeRoot.querySelector('[data-role="translate-output"]');
+    assert(
+      ovBoxError.scrollWidth <= ovBoxError.clientWidth + 1
+        && ovBoxErrorSpan.scrollWidth <= ovBoxErrorSpan.clientWidth + 1
+        && ovBoxBody.scrollWidth <= ovBoxBody.clientWidth + 1
+        && document.documentElement.scrollWidth <= document.documentElement.clientWidth + 1,
+      "工作台翻译失败 .box-error 260 字无空格长错不横向溢出"
+    );
+    assert(
+      window.getComputedStyle(ovBoxError).overflowWrap === "anywhere" && window.getComputedStyle(ovBoxErrorSpan).minWidth === "0px",
+      "工作台 .box-error 与子 span 计算样式具备 overflowWrap=anywhere 与 minWidth=0px"
+    );
+
+    overflowHome.setPanel("lan");
+    const ovLanEmpty = homeRoot.querySelector('[data-panel-view="lan"] .empty');
+    assert(
+      !!ovLanEmpty
+        && ovLanEmpty.scrollWidth <= ovLanEmpty.clientWidth + 1
+        && window.getComputedStyle(ovLanEmpty).overflowWrap === "anywhere"
+        && document.documentElement.scrollWidth <= document.documentElement.clientWidth + 1,
+      "工作台空态/异常 .empty 260 字无空格长错不横向溢出"
+    );
+
+    overflowHome.destroy();
+
     window.__V3_HARNESS__ = { passes: passes, failures: failures, copies: copies, confirms: confirms };
   } catch (err) {
     fail("harness 异常：" + err.stack);
