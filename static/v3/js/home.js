@@ -1088,7 +1088,7 @@
           "aria-live": "polite"
         }, [
           document.createTextNode(loadingHint),
-          V3.dom.el("div", { className: "progress", "aria-hidden": "true" }, [V3.dom.el("i")])
+          V3.dom.el("div", { className: "progress indeterminate", "aria-hidden": "true" }, [V3.dom.el("i")])
         ]));
       } else if (phase === "error") {
         translateOutBody.appendChild(V3.dom.el("div", {
@@ -1193,7 +1193,7 @@
           "aria-live": "polite"
         }, [
           document.createTextNode("正在识别图片文字…"),
-          V3.dom.el("div", { className: "progress", "aria-hidden": "true" }, [V3.dom.el("i")])
+          V3.dom.el("div", { className: "progress indeterminate", "aria-hidden": "true" }, [V3.dom.el("i")])
         ]));
       } else if (phase === "error") {
         ocrOutBody.appendChild(V3.dom.el("div", {

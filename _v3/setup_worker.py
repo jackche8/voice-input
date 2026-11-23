@@ -48,6 +48,17 @@ def kill_own_process_group() -> None:
     os.killpg(os.getpgrp(), signal.SIGTERM)
 
 
+def _flush_stdio() -> None:
+    """os._exit 前安全刷新 stdout 与 stderr（判空且捕获 OSError，避免最后几行 uv 日志丢失）。"""
+    for stream in (sys.stdout, sys.stderr):
+        if stream is None:
+            continue
+        try:
+            stream.flush()
+        except OSError:
+            pass
+
+
 def run_task(
     *,
     task_file: Path,
@@ -60,6 +71,7 @@ def run_task(
     abort_children: Callable[[], None] = kill_own_process_group,
     cancel_event: threading.Event | None = None,
     interval_s: float = 1.0,
+    cancel_join_s: float = 2.0,
     clock: Callable[[], str] = now_iso,
 ) -> int:
     pid = os.getpid()
@@ -107,7 +119,7 @@ def run_task(
                 abort_children()
             except OSError:
                 pass
-            worker.join(0.2)
+            worker.join(cancel_join_s)
             try:
                 cleanup()
             except OSError:
@@ -136,5 +148,5 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 if __name__ == "__main__":
     code = main()
-    sys.stdout.flush()
+    _flush_stdio()
     os._exit(code)  # 中止时动作线程可能还卡在网络读：直接退出，不等它

@@ -3,10 +3,12 @@ from __future__ import annotations
 
 from _platform.system_proxy import (
     WINDOWS_INTERNET_SETTINGS_KEY,
+    format_proxy_hint,
     merge_proxy_env,
     normalize_go_proxy_url,
     read_os_system_proxy,
     read_windows_system_proxy,
+    redact_url_credentials,
 )
 
 
@@ -180,3 +182,38 @@ def test_merge_proxy_env_precedence_no_proxy_and_fail_open():
 
     safe = merge_proxy_env({"PATH": "/usr/bin"}, os_name="macos", read_system_proxy=crashing_reader)
     assert safe == {"PATH": "/usr/bin"}
+
+
+def test_redact_url_credentials_and_format_proxy_hint():
+    # 1. URL 凭证脱敏：单 URL、多 URL、密码含 @、IPv6，不误伤路径/查询/片段里的 @
+    assert redact_url_credentials("") == ""
+    assert redact_url_credentials("http://alice:s3cr3t@127.0.0.1:7890") == "http://***@127.0.0.1:7890"
+    assert redact_url_credentials("http://alice:p@ss@127.0.0.1:7890/api") == "http://***@127.0.0.1:7890/api"
+    assert redact_url_credentials("socks5h://tok@[::1]:1080") == "socks5h://***@[::1]:1080"
+    assert (
+        redact_url_credentials("failed http://u1:p1@a.local:8080 and https://u2:p2@b.local:8443/x")
+        == "failed http://***@a.local:8080 and https://***@b.local:8443/x"
+    )
+    assert redact_url_credentials("https://example.com/path?email=a@b.com") == "https://example.com/path?email=a@b.com"
+    assert redact_url_credentials("https://example.com?email=a@b.com") == "https://example.com?email=a@b.com"
+    assert redact_url_credentials("https://example.com#a@b") == "https://example.com#a@b"
+
+    # 2. format_proxy_hint：无代理返回 None；单代理/双代理去重并脱敏凭证；支持 IPv6、ALL_PROXY、Windows 异大小写与畸形值不泄密
+    assert format_proxy_hint({"PATH": "/usr/bin"}, os_name="windows") is None
+    assert (
+        format_proxy_hint(
+            {"HTTP_PROXY": "http://alice:secret@127.0.0.1:7890", "HTTPS_PROXY": "http://alice:secret@127.0.0.1:7890"},
+            os_name="windows",
+        )
+        == "127.0.0.1:7890"
+    )
+    assert (
+        format_proxy_hint(
+            {"https_proxy": "http://u:p@127.0.0.1:7891", "http_proxy": "http://u:p@127.0.0.1:7890"},
+            os_name="macos",
+        )
+        == "127.0.0.1:7891, 127.0.0.1:7890"
+    )
+    assert format_proxy_hint({"All_Proxy": "socks5h://tok@[::1]:1080"}, os_name="windows") == "[::1]:1080"
+    bad_hint = format_proxy_hint({"HTTPS_PROXY": "http://alice:topsecret@127.0.0.1:99999"}, os_name="linux")
+    assert bad_hint is not None and "topsecret" not in bad_hint and "***@" in bad_hint

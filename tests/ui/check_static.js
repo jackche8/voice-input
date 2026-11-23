@@ -387,6 +387,68 @@ if (overflowGuardErrors.length) {
   pass("theme.css / studio.css 长报错防溢出规则齐全（overflow-wrap / min-width / flex-shrink / max-width）");
 }
 
+/* 全站单源不确定态进度条动画守卫（直接对 stripCssComments 结果扫描 @keyframes，并用顶层规则表核验 .progress.indeterminate > i 单源） */
+function extractAtKeyframes(cssText, name) {
+  const clean = stripCssComments(cssText);
+  const re = new RegExp("@keyframes\\s+" + name + "\\s*\\{", "g");
+  const blocks = [];
+  let m;
+  while ((m = re.exec(clean)) !== null) {
+    let depth = 1;
+    let j = m.index + m[0].length;
+    while (j < clean.length && depth > 0) {
+      if (clean[j] === "{") depth += 1;
+      else if (clean[j] === "}") depth -= 1;
+      j += 1;
+    }
+    blocks.push(clean.slice(m.index + m[0].length, j - 1));
+  }
+  return blocks;
+}
+
+const themeKeyframes = extractAtKeyframes(theme, "v3-indeterminate");
+const studioKeyframes = extractAtKeyframes(studioCss, "v3-indeterminate");
+const otherKeyframeHits = cssFiles
+  .filter((f) => path.basename(f) !== "theme.css")
+  .filter((f) => extractAtKeyframes(fs.readFileSync(f, "utf8"), "v3-indeterminate").length > 0)
+  .map((f) => path.relative(repo, f));
+if (
+  themeKeyframes.length !== 1
+  || !/translateX\([^)]+\)[\s\S]*translateX\([^)]+\)/.test(themeKeyframes[0])
+) {
+  fail("theme.css 缺少唯一且完整的 @keyframes v3-indeterminate 动画定义");
+} else if (studioKeyframes.length > 0 || otherKeyframeHits.length > 0) {
+  fail("非 theme.css 存在重复 @keyframes v3-indeterminate 定义：" + otherKeyframeHits.join(", "));
+} else {
+  pass("全站 @keyframes v3-indeterminate 单源定义于 theme.css，studio.css 等无重复");
+}
+
+const themeIndetDecls = mergedDeclsForSelector(themeRules, ".progress.indeterminate > i");
+const studioBoxProgDecls = mergedDeclsForSelector(studioRules, ".box-loading .progress");
+const studioBoxProgBarDecls = mergedDeclsForSelector(studioRules, ".box-loading .progress > i");
+const otherIndetSelectorHits = cssFiles
+  .filter((f) => path.basename(f) !== "theme.css")
+  .filter((f) => {
+    const rules = parseTopLevelCssRules(fs.readFileSync(f, "utf8"));
+    return Object.keys(mergedDeclsForSelector(rules, ".progress.indeterminate > i")).length > 0;
+  })
+  .map((f) => path.relative(repo, f));
+if (
+  themeIndetDecls["width"] !== "45%"
+  || themeIndetDecls["border-radius"] !== "var(--radius-pill)"
+  || !/\bv3-indeterminate\b/.test(themeIndetDecls["animation"] || "")
+) {
+  fail("theme.css .progress.indeterminate > i 缺少单源流动样式（width:45% / var(--radius-pill) / animation:v3-indeterminate）");
+} else if (Object.keys(studioBoxProgBarDecls).length > 0) {
+  fail("studio.css 仍残留重复的 .box-loading .progress > i 规则");
+} else if (otherIndetSelectorHits.length > 0) {
+  fail("非 theme.css 存在重复 .progress.indeterminate > i 定义：" + otherIndetSelectorHits.join(", "));
+} else if (studioBoxProgDecls["width"] !== "180px") {
+  fail("studio.css .box-loading .progress 缺少局部宽度声明 width: 180px");
+} else {
+  pass("全站 .progress.indeterminate > i 单源定义于 theme.css，studio.css 仅保留 .box-loading .progress 宽度");
+}
+
 for (const css of cssFiles) {
   const rel = path.relative(repo, css);
   if (path.basename(css) === "theme.css") continue;
@@ -518,6 +580,45 @@ const homeErrMatch = homeJs.match(/phase === "error"\)\s*\{[\s\S]*?(?=\}\s*else\
 if (homeErrMatch.length < 2 || homeErrMatch.some((seg) => /\bocr_text\b/.test(seg))) {
   fail("home.js 失败分支缺失或可能把 ocr_text 当译文");
 } else pass("home.js 翻译与 OCR 失败分支均如实呈现错误，不拿 ocr_text 冒充译文");
+
+const homeCode = stripSourceComments(path.join(v3, "js/home.js"), homeJs);
+function extractElCallContaining(src, idx) {
+  const start = src.lastIndexOf("V3.dom.el(", idx);
+  if (start === -1) return "";
+  let depth = 0;
+  let inStr = null;
+  for (let i = start; i < src.length; i += 1) {
+    const ch = src[i];
+    if (inStr) {
+      if (ch === "\\") { i += 1; continue; }
+      if (ch === inStr) inStr = null;
+      continue;
+    }
+    if (ch === '"' || ch === "'" || ch === "`") { inStr = ch; continue; }
+    if (ch === "(") depth += 1;
+    else if (ch === ")") {
+      depth -= 1;
+      if (depth === 0) return src.slice(start, i + 1);
+    }
+  }
+  return "";
+}
+const boxLoadingHits = [];
+const boxLoadingRe = /className\s*:\s*["']box-loading["']/g;
+let blMatch;
+while ((blMatch = boxLoadingRe.exec(homeCode)) !== null) {
+  boxLoadingHits.push(extractElCallContaining(homeCode, blMatch.index));
+}
+const boxLoadingBad = boxLoadingHits.filter(
+  (block) => !/className\s*:\s*["'](?:[^"']*\bprogress\b[^"']*\bindeterminate\b|[^"']*\bindeterminate\b[^"']*\bprogress\b)[^"']*["']/.test(block)
+);
+if (boxLoadingHits.length < 2) {
+  fail("home.js 未找到全部 2 处 .box-loading 加载块（实测 " + boxLoadingHits.length + " 处）");
+} else if (boxLoadingBad.length > 0) {
+  fail("home.js 有 " + boxLoadingBad.length + " 处 .box-loading 未使用单源 progress indeterminate 类");
+} else {
+  pass("home.js 全部 " + boxLoadingHits.length + " 处 .box-loading 均使用单源 progress indeterminate 类");
+}
 
 const voiceJs = fs.readFileSync(path.join(v3, "js/voice.js"), "utf8");
 if (!voiceJs.includes("onRecordStart") || !voiceJs.includes("onRecordEnd") || !voiceJs.includes("onPickAudio") || !voiceJs.includes("onSendOriginal")) {

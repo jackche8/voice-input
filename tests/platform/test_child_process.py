@@ -19,12 +19,14 @@ from _platform.child_process import (
     kill_recorded_session,
     process_identity,
     session_record,
+    set_env_var,
     spawn_child,
+    unset_env_var,
     windows_subprocess_kwargs,
 )
 from _procfs import session_members
 
-pytestmark = pytest.mark.skipif(not sys.platform.startswith("linux"), reason="真实进程用例依赖 Linux /proc")
+_LINUX_ONLY = pytest.mark.skipif(not sys.platform.startswith("linux"), reason="真实进程用例依赖 Linux /proc")
 ROOT = Path(__file__).resolve().parents[2]
 SLEEPER = [sys.executable, "-c", "import time; time.sleep(60)"]
 # 组件本体：试图自建会话（已是组长，失败即忽略，同 sidecar 的 enter_new_session），派生一个换了进程组的孙进程后自己退出
@@ -66,6 +68,7 @@ def _spawn_leader(tmp_path: Path):
     return handle, int(pid_file.read_text())
 
 
+@_LINUX_ONLY
 @pytest.mark.parametrize("os_name", ["linux", "macos"])  # macos = watch 模式，在 Linux 上同样可真实运行
 def test_component_exits_when_app_is_killed(tmp_path, os_name):
     sid_file = tmp_path / "sid"
@@ -81,6 +84,7 @@ def test_component_exits_when_app_is_killed(tmp_path, os_name):
     _wait_until(lambda: not session_members(sid))
 
 
+@_LINUX_ONLY
 @pytest.mark.parametrize("mode", ["pdeathsig", "watch"])
 def test_guard_does_not_start_component_when_parent_already_gone(tmp_path, mode):
     marker = tmp_path / "started"
@@ -101,6 +105,7 @@ def test_guarded_argv_uses_internal_flag_when_frozen():
                    "ollama", "serve"]
 
 
+@_LINUX_ONLY
 def test_terminate_session_clears_leftovers_after_component_exit_and_rotates_log(tmp_path):
     log = tmp_path / "logs" / "leader.log"
     log.parent.mkdir()
@@ -114,6 +119,7 @@ def test_terminate_session_clears_leftovers_after_component_exit_and_rotates_log
     assert handle.terminate_session(5.0) == []
 
 
+@_LINUX_ONLY
 def test_recorded_session_cleanup_kills_members_of_dead_leader_and_skips_reused_pid(tmp_path):
     handle, grandchild = _spawn_leader(tmp_path)
     assert kill_recorded_session(session_record(handle), os_name="linux") == [grandchild]
@@ -129,6 +135,7 @@ def test_recorded_session_cleanup_kills_members_of_dead_leader_and_skips_reused_
         assert alive.terminate_session(5.0) == [alive.pid]
 
 
+@_LINUX_ONLY
 @pytest.mark.parametrize("os_name", ["linux", "macos"])
 def test_stdin_pipe_reaches_the_component_through_the_guard(tmp_path, os_name):
     out = tmp_path / "got"
@@ -242,3 +249,48 @@ def test_windows_terminate_descendants_kills_tree_without_killing_root():
     # 孙进程 300 先于父子进程 200 被终结
     assert killed.index(300) < killed.index(200)
     assert all(timeout_ms == 2500 for _pid, timeout_ms in fake_api.killed)
+
+
+def test_set_and_unset_env_var_cross_platform():
+    # 1. Windows overwrite=True：清理全部大小写变体并写入唯一规范键
+    win_env = {"uv_no_config": "0", "Uv_No_Config": "x", "PATH": "C:\\Windows"}
+    set_env_var(win_env, "UV_NO_CONFIG", "1", os_name="windows", overwrite=True)
+    assert win_env == {"PATH": "C:\\Windows", "UV_NO_CONFIG": "1"}
+
+    # 2. Windows overwrite=False：保留非空 "0"/"false"（优先精确键并归一到规范键），空/纯空白视为未设
+    win_defaults = {
+        "uv_system_certs": "0",
+        "Uv_Http_Timeout": "false",
+        "uv_concurrent_downloads": "   ",
+        "UV_EXACT": "keep-exact",
+        "uv_exact": "lower-ignored",
+    }
+    set_env_var(win_defaults, "UV_SYSTEM_CERTS", "1", os_name="windows", overwrite=False)
+    set_env_var(win_defaults, "UV_HTTP_TIMEOUT", "120", os_name="windows", overwrite=False)
+    set_env_var(win_defaults, "UV_CONCURRENT_DOWNLOADS", "8", os_name="windows", overwrite=False)
+    set_env_var(win_defaults, "UV_EXACT", "fallback", os_name="windows", overwrite=False)
+    assert win_defaults == {
+        "UV_SYSTEM_CERTS": "0",
+        "UV_HTTP_TIMEOUT": "false",
+        "UV_CONCURRENT_DOWNLOADS": "8",
+        "UV_EXACT": "keep-exact",
+    }
+
+    # 3. Windows unset_env_var：大小写不敏感移除全部变体
+    win_color = {"FORCE_COLOR": "1", "force_color": "always", "ClColor": "stay"}
+    unset_env_var(win_color, "FORCE_COLOR", os_name="windows")
+    assert win_color == {"ClColor": "stay"}
+
+    # 4. POSIX 区分大小写：小写同名键不影响大写键；空/纯空白视为未设；非空 "0" 保留
+    posix_env = {"uv_system_certs": "0", "UV_HTTP_TIMEOUT": "  ", "UV_CONCURRENT_DOWNLOADS": "0", "force_color": "1", "FORCE_COLOR": "1"}
+    set_env_var(posix_env, "UV_SYSTEM_CERTS", "1", os_name="linux", overwrite=False)
+    set_env_var(posix_env, "UV_HTTP_TIMEOUT", "120", os_name="linux", overwrite=False)
+    set_env_var(posix_env, "UV_CONCURRENT_DOWNLOADS", "8", os_name="linux", overwrite=False)
+    unset_env_var(posix_env, "FORCE_COLOR", os_name="linux")
+    assert posix_env == {
+        "uv_system_certs": "0",
+        "UV_SYSTEM_CERTS": "1",
+        "UV_HTTP_TIMEOUT": "120",
+        "UV_CONCURRENT_DOWNLOADS": "0",
+        "force_color": "1",
+    }

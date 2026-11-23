@@ -45,6 +45,55 @@ def windows_subprocess_kwargs(
     return kwargs
 
 
+def set_env_var(
+    env: dict[str, str],
+    key: str,
+    value: str,
+    *,
+    os_name: OsName | None = None,
+    overwrite: bool = True,
+) -> None:
+    """跨平台写入环境变量：Windows 大小写不敏感去重；overwrite=False 时视空/纯空白为未设并保留非空值（含 \"0\"/\"false\"）。"""
+    target = os_name or detect_os()
+    if target == "windows":
+        upper = key.upper()
+        existing = ""
+        exact = env.get(key)
+        if not overwrite and isinstance(exact, str) and exact.strip():
+            existing = exact
+        for cur in list(env):
+            if cur.upper() != upper:
+                continue
+            if not overwrite and not existing and isinstance(env[cur], str) and env[cur].strip():
+                existing = env[cur]
+            if cur != key:
+                del env[cur]
+        env[key] = existing if (not overwrite and existing) else value
+        return
+    if not overwrite:
+        cur_val = env.get(key)
+        if isinstance(cur_val, str) and cur_val.strip():
+            return
+    env[key] = value
+
+
+def unset_env_var(
+    env: dict[str, str],
+    key: str,
+    *,
+    os_name: OsName | None = None,
+) -> None:
+    """跨平台移除环境变量：Windows 按大小写不敏感清理全部变体，POSIX 精确移除。"""
+    target = os_name or detect_os()
+    if target == "windows":
+        upper = key.upper()
+        for cur in list(env):
+            if cur.upper() == upper:
+                del env[cur]
+        return
+    env.pop(key, None)
+
+
 @dataclass(frozen=True)
 class SessionRecord:
     """写进 run/children.json 的一条：组长 PID、会话号（macOS 为进程组号，Windows 同 PID）、组长身份。"""
@@ -230,6 +279,8 @@ __all__ = [
     "process_identity",
     "rotate_log",
     "session_record",
+    "set_env_var",
     "spawn_child",
+    "unset_env_var",
     "windows_subprocess_kwargs",
 ]

@@ -21,8 +21,63 @@ LOOPBACK_NO_PROXY = ("127.0.0.1", "localhost", "::1")
 
 _NO_PROXY_SPLIT_RE = re.compile(r"[;,]")
 _INVALID_HOST_CHARS = frozenset({"=", ";", ",", "/", "\\"})
+_URL_USERINFO_RE = re.compile(r"([a-zA-Z][a-zA-Z0-9+.-]*://)([^\s/?#\"'<>]+)@")
 
 SystemProxyReader = Callable[[OsName], tuple[dict[str, str], list[str]]]
+
+
+def redact_url_credentials(text: str) -> str:
+    """脱敏任意文本或 URL 内的 `scheme://userinfo@host` 凭证（含密码中含 `@`），不误伤路径/查询参数里的 `@`。"""
+    if not text:
+        return ""
+    return _URL_USERINFO_RE.sub(r"\1***@", text)
+
+
+def _format_single_proxy_endpoint(raw: str) -> str | None:
+    cleaned = redact_url_credentials(raw.strip())
+    if not cleaned:
+        return None
+    candidate = cleaned if "://" in cleaned else f"http://{cleaned}"
+    try:
+        parsed = urlsplit(candidate)
+        host = parsed.hostname
+        port = parsed.port
+    except ValueError:
+        return cleaned
+    if not host:
+        return cleaned
+    host_text = f"[{host}]" if ":" in host else host
+    return f"{host_text}:{port}" if port is not None else host_text
+
+
+def format_proxy_hint(env: Mapping[str, str], *, os_name: OsName | None = None) -> str | None:
+    """从子进程环境提取活跃代理的脱敏 `host:port` 提示（优先 HTTPS_PROXY → HTTP_PROXY → ALL_PROXY），无代理返回 None。"""
+    target = os_name or detect_os()
+    is_windows = target == "windows"
+    seen: list[str] = []
+    for canon in ("HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY"):
+        raw = ""
+        if is_windows:
+            exact = env.get(canon)
+            if isinstance(exact, str) and exact.strip():
+                raw = exact.strip()
+            else:
+                for cur, val in env.items():
+                    if cur.upper() == canon and isinstance(val, str) and val.strip():
+                        raw = val.strip()
+                        break
+        else:
+            for key in (canon, canon.lower()):
+                val = env.get(key)
+                if isinstance(val, str) and val.strip():
+                    raw = val.strip()
+                    break
+        if not raw:
+            continue
+        endpoint = _format_single_proxy_endpoint(raw)
+        if endpoint and endpoint not in seen:
+            seen.append(endpoint)
+    return ", ".join(seen) if seen else None
 
 
 def normalize_go_proxy_url(raw: str, *, default_scheme: str | None = "http") -> str | None:
@@ -268,8 +323,10 @@ __all__ = [
     "LOOPBACK_NO_PROXY",
     "SystemProxyReader",
     "WINDOWS_INTERNET_SETTINGS_KEY",
+    "format_proxy_hint",
     "merge_proxy_env",
     "normalize_go_proxy_url",
     "read_os_system_proxy",
     "read_windows_system_proxy",
+    "redact_url_credentials",
 ]

@@ -12,9 +12,14 @@ from pathlib import Path
 import httpx
 import pytest
 
-from _contracts import LogicError, SetupProgress
+from _contracts import ErrorCode, LogicError, SetupProgress
 from _platform import child_process as cp_mod
 from _v3.lan_access import list_physical_lan_ipv4, load_or_create_token
+from _v3.release_download import (
+    RELEASE_HTTP_TIMEOUT,
+    build_release_proxy_mounts,
+    create_release_client,
+)
 from _v3.setup_actions import (
     FAKEIP_RETRY_STAGE,
     asr_download_action,
@@ -656,3 +661,117 @@ def test_asr_download_passes_utf8_and_windows_no_window_flags(tmp_path, monkeypa
     assert popen.kwargs["env"]["PYTHONUTF8"] == "1"
     assert popen.kwargs["encoding"] == "utf-8" and popen.kwargs["errors"] == "replace"
     assert popen.kwargs["creationflags"] == cp_mod.CREATE_NO_WINDOW
+
+
+def test_build_release_proxy_mounts_and_create_release_client(monkeypatch):
+    # 1. 有限读超时常量
+    assert RELEASE_HTTP_TIMEOUT.connect == 30.0 and RELEASE_HTTP_TIMEOUT.read == 120.0
+
+    # 2. 注入 transport 时不传 mounts 且 trust_env=False，绝不绕过测试 MockTransport
+    mock_transport = httpx.MockTransport(lambda req: httpx.Response(200, text="ok"))
+    with create_release_client(
+        environ={"HTTPS_PROXY": "http://127.0.0.1:7890"},
+        os_name="windows",
+        read_system_proxy=lambda _os: ({"http": "http://os:1", "https": "http://os:2"}, []),
+        transport=mock_transport,
+    ) as client:
+        assert client._trust_env is False
+        assert client._mounts == {}
+        assert client.timeout == RELEASE_HTTP_TIMEOUT
+        assert client.get("https://example.invalid/ping").text == "ok"
+
+    # 3. transport=None：Windows 分协议代理 + 全形状 NO_PROXY（:// 透传、IPv6 加括号、host:port 不误加括号、*.corp/.org/裸域名、畸形项 fail-open）
+    mounts = build_release_proxy_mounts(
+        {
+            "NO_PROXY": "http://bypass.local:9000,::1,[::1],127.0.0.1,localhost,corp.local:8080,*.corp,.example.org,bare.internal,bad:notaport,<local>"
+        },
+        os_name="windows",
+        read_system_proxy=lambda _os: (
+            {"http": "http://127.0.0.1:7890", "https": "http://127.0.0.1:7891"},
+            [],
+        ),
+    )
+    assert isinstance(mounts["http://"], httpx.HTTPTransport)
+    assert isinstance(mounts["https://"], httpx.HTTPTransport)
+    for key in (
+        "http://bypass.local:9000",
+        "all://[::1]",
+        "all://127.0.0.1",
+        "all://localhost",
+        "all://corp.local:8080",
+        "all://*.corp",
+        "all://*.example.org",
+        "all://bare.internal",
+        "all://*.bare.internal",
+    ):
+        assert key in mounts and mounts[key] is None, key
+    assert "all://[corp.local:8080]" not in mounts
+    assert "all://bad:notaport" not in mounts
+    assert all("<local>" not in k.lower() for k in mounts)
+
+    # 实际路由核验：create_release_client(transport=None) trust_env=False、公网走代理、NO_PROXY 命中直连
+    with create_release_client(
+        environ={"NO_PROXY": "corp.local:8080,bare.internal,*.corp"},
+        os_name="windows",
+        read_system_proxy=lambda _os: ({"http": "http://127.0.0.1:7890", "https": "http://127.0.0.1:7891"}, []),
+    ) as live_client:
+        assert live_client._trust_env is False
+        assert live_client._transport_for_url(httpx.URL("https://github.com/astral-sh/uv")) is not live_client._transport
+        assert live_client._transport_for_url(httpx.URL("https://corp.local:8080/x")) is live_client._transport
+        assert live_client._transport_for_url(httpx.URL("https://sub.bare.internal/x")) is live_client._transport
+        assert live_client._transport_for_url(httpx.URL("https://bare.internal/x")) is live_client._transport
+        assert live_client._transport_for_url(httpx.URL("https://a.corp/x")) is live_client._transport
+        assert live_client._transport_for_url(httpx.URL("http://[::1]:17945/x")) is live_client._transport
+
+    # 4. ALL_PROXY / all_proxy 生效且仍保底回环 NO_PROXY；NO_PROXY=* 短路返回空 mounts
+    all_mounts = build_release_proxy_mounts(
+        {"all_proxy": "http://127.0.0.1:7890"},
+        os_name="linux",
+        read_system_proxy=lambda _os: ({}, []),
+    )
+    assert isinstance(all_mounts["http://"], httpx.HTTPTransport) and isinstance(all_mounts["https://"], httpx.HTTPTransport)
+    assert all_mounts["all://127.0.0.1"] is None and all_mounts["all://localhost"] is None and all_mounts["all://[::1]"] is None
+    assert (
+        build_release_proxy_mounts(
+            {"HTTPS_PROXY": "http://127.0.0.1:7890", "NO_PROXY": "corp.local,*"},
+            os_name="linux",
+            read_system_proxy=lambda _os: ({}, []),
+        )
+        == {}
+    )
+
+    # 5. SOCKS5 缺 socksio 显式抛脱敏 LogicError；非法代理 URL 同时脱敏 url 与 exc 文本
+    with pytest.raises(LogicError) as socks_err:
+        build_release_proxy_mounts(
+            {"HTTPS_PROXY": "socks5://alice:topsecret@127.0.0.1:1080"},
+            os_name="windows",
+            read_system_proxy=lambda _os: ({}, []),
+        )
+    assert socks_err.value.code == ErrorCode.dependency_failed
+    assert "SOCKS" in socks_err.value.message and "socks5://***@127.0.0.1:1080" in socks_err.value.message
+    assert "topsecret" not in socks_err.value.message
+
+    for bad_proxy in ("http://alice:topsecret@127.0.0.1:abc", "ftp://alice:topsecret@127.0.0.1:21"):
+        with pytest.raises(LogicError) as bad_err:
+            build_release_proxy_mounts(
+                {"HTTPS_PROXY": bad_proxy},
+                os_name="linux",
+                read_system_proxy=lambda _os: ({}, []),
+            )
+        assert bad_err.value.code == ErrorCode.dependency_failed
+        assert "代理地址无效" in bad_err.value.message and "topsecret" not in bad_err.value.message and "***@" in bad_err.value.message
+
+    # 异常文本本身携带凭证时同样必须经 redact_url_credentials(str(exc)) 脱敏
+    monkeypatch.setattr(
+        httpx,
+        "HTTPTransport",
+        lambda **kw: (_ for _ in ()).throw(ValueError("bad proxy http://bob:excsecret@127.0.0.1:7890")),
+    )
+    with pytest.raises(LogicError) as exc_redact:
+        build_release_proxy_mounts(
+            {"HTTPS_PROXY": "http://alice:urlsecret@127.0.0.1:7890"},
+            os_name="linux",
+            read_system_proxy=lambda _os: ({}, []),
+        )
+    assert "urlsecret" not in exc_redact.value.message and "excsecret" not in exc_redact.value.message
+    assert "http://***@127.0.0.1:7890" in exc_redact.value.message

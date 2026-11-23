@@ -1266,6 +1266,297 @@
 
     overflowHome.destroy();
 
+    /* ---------- 6. 单源流动进度条、设置页持久 DOM 与文案边界验收 ---------- */
+    const progHome = V3.home.mount(homeRoot, {
+      connection: "connected",
+      activePanel: "setup",
+      setupTab: "models",
+      asr: {
+        status: "downloading",
+        progress: { receivedLabel: "1.47 GB", totalLabel: "3.50 GB", percent: 42 }
+      },
+      ollama: {
+        installed: true,
+        running: true,
+        modelStatus: "downloading",
+        progress: { receivedLabel: "640 MB", totalLabel: null, percent: null }
+      },
+      installAll: {
+        state: "running",
+        current: "asr_runtime_install",
+        steps: [
+          { kind: "ollama_install", state: "skipped", message: "已具备，跳过", progress: null },
+          { kind: "wait_ollama", state: "done", message: "Ollama 已运行", progress: null },
+          { kind: "ollama_pull", state: "done", message: "", progress: null },
+          {
+            kind: "asr_runtime_install",
+            state: "running",
+            message: "正在下载 torch-2.9.1+cu128…",
+            progress: { receivedLabel: "1.25 GB", totalLabel: null, percent: null }
+          },
+          { kind: "asr_download", state: "pending", message: "", progress: null }
+        ]
+      }
+    }, hooks);
+
+    const progSetupPane = homeRoot.querySelector('[data-panel-view="setup"] .setup-pane');
+    const progModelRows = progSetupPane.querySelectorAll(".setup-section")[0].querySelectorAll(".row");
+    const progAsrSub = progModelRows[0].querySelector(".row-sub");
+    const progAsrBar = progModelRows[0].querySelector(".progress");
+    const progAsrFill = progAsrBar.querySelector("i");
+    const progOllSub = progModelRows[1].querySelector(".row-sub");
+    const progOllBar = progModelRows[1].querySelector(".progress");
+    const progOllFill = progOllBar.querySelector("i");
+    const progStepRow = progSetupPane.querySelector('[data-step="asr_runtime_install"]');
+    const progStepSub = progStepRow.querySelector(".row-sub");
+    const progStepBar = progStepRow.querySelector(".progress");
+    const progStepFill = progStepBar.querySelector("i");
+    const progStepsContainer = progStepRow.parentNode;
+
+    const childObserver = new MutationObserver(function () {});
+    childObserver.observe(progStepsContainer, { childList: true, subtree: true });
+    childObserver.observe(progModelRows[0], { childList: true, subtree: true });
+    childObserver.observe(progModelRows[1], { childList: true, subtree: true });
+    function countElementChildMutations(observer) {
+      let count = 0;
+      observer.takeRecords().forEach(function (rec) {
+        Array.prototype.forEach.call(rec.addedNodes, function (n) { if (n.nodeType === 1) count += 1; });
+        Array.prototype.forEach.call(rec.removedNodes, function (n) { if (n.nodeType === 1) count += 1; });
+      });
+      return count;
+    }
+
+    assert(
+      progAsrSub.textContent === "下载中 · 1.47 GB / 3.50 GB · 42%"
+        && !progAsrBar.hidden
+        && !progAsrBar.classList.contains("indeterminate")
+        && progAsrFill.style.width === "42%"
+        && progAsrBar.getAttribute("aria-valuemin") === "0"
+        && progAsrBar.getAttribute("aria-valuemax") === "100"
+        && progAsrBar.getAttribute("aria-valuenow") === "42"
+        && !progAsrBar.hasAttribute("aria-valuetext"),
+      "确定态进度条渲染 received / total · percent、内联宽度与 aria-valuemin/max/now"
+    );
+    assert(
+      progOllSub.textContent === "下载中 · 已写入 640 MB"
+        && progOllSub.textContent.indexOf(" / ?") === -1
+        && !progOllBar.hidden
+        && progOllBar.classList.contains("indeterminate")
+        && progOllFill.style.width === ""
+        && window.getComputedStyle(progOllFill).animationName === "v3-indeterminate"
+        && !progOllBar.hasAttribute("aria-valuemin")
+        && !progOllBar.hasAttribute("aria-valuemax")
+        && !progOllBar.hasAttribute("aria-valuenow")
+        && progOllBar.getAttribute("aria-valuetext") === "进度未知",
+      "未知总量仅已写入态显示「已写入 640 MB」、无「 / ?」且启用单源 v3-indeterminate 流动动画"
+    );
+    assert(
+      progStepSub.textContent === "正在下载 torch-2.9.1+cu128… · 已写入 1.25 GB"
+        && progStepSub.textContent.indexOf(" / ?") === -1
+        && progStepSub.textContent.indexOf("……") === -1
+        && !progStepBar.hidden
+        && progStepBar.classList.contains("indeterminate")
+        && progStepFill.style.width === ""
+        && window.getComputedStyle(progStepFill).animationName === "v3-indeterminate"
+        && progStepBar.getAttribute("aria-valuetext") === "进度未知",
+      "步骤未知总量运行态显示「已写入 1.25 GB」、以 · 连接且启用单源流动动画"
+    );
+
+    /* 连续轮询 tick 2：无已写入有总量（0 B / total）、title 以 … 结尾不重复拼 ……、全部节点原地更新零 childList 变更 */
+    progHome.setState({
+      asr: {
+        status: "downloading",
+        progress: { receivedLabel: "2.10 GB", totalLabel: "3.50 GB", percent: 60 }
+      },
+      ollama: {
+        installed: true,
+        running: true,
+        modelStatus: "downloading",
+        progress: { receivedLabel: null, totalLabel: "3.40 GB", percent: null }
+      },
+      installAll: {
+        state: "running",
+        current: "asr_runtime_install",
+        steps: [
+          { kind: "ollama_install", state: "skipped", message: "已具备，跳过", progress: null },
+          { kind: "wait_ollama", state: "done", message: "Ollama 已运行", progress: null },
+          { kind: "ollama_pull", state: "done", message: "", progress: null },
+          {
+            kind: "asr_runtime_install",
+            state: "running",
+            message: "正在解析依赖…",
+            progress: { receivedLabel: null, totalLabel: null, percent: null }
+          },
+          { kind: "asr_download", state: "pending", message: "", progress: null }
+        ]
+      }
+    });
+    const tick2ElMutations = countElementChildMutations(childObserver);
+    assert(
+      tick2ElMutations === 0
+        && progSetupPane.querySelector('[data-step="asr_runtime_install"]') === progStepRow
+        && progStepRow.querySelector(".row-sub") === progStepSub
+        && progStepRow.querySelector(".progress") === progStepBar
+        && progStepBar.querySelector("i") === progStepFill
+        && progModelRows[0].querySelector(".row-sub") === progAsrSub
+        && progModelRows[0].querySelector(".progress") === progAsrBar
+        && progAsrBar.querySelector("i") === progAsrFill
+        && progModelRows[1].querySelector(".row-sub") === progOllSub
+        && progModelRows[1].querySelector(".progress") === progOllBar
+        && progOllBar.querySelector("i") === progOllFill,
+      "连续轮询 tick 更新进度时步骤行、进度条、asrSub/ollamaSub 节点身份不变且零元素节点拆挂（不重置流动动画）"
+    );
+    assert(
+      progStepSub.textContent === "正在解析依赖…" && progStepSub.textContent.indexOf("……") === -1,
+      "title 已以「…」结尾且无字节/百分比时不重复拼接「……」"
+    );
+    assert(
+      progOllSub.textContent === "下载中 · 0 B / 3.40 GB" && progOllSub.textContent.indexOf("?") === -1,
+      "无 received 有 total 时渲染「0 B / 3.40 GB」且不出现「?」"
+    );
+
+    /* tick 3：无末尾 … 的 title 正常补单一 …；确定态 ↔ 不确定态双向切换彻底清理 width 与 aria-* */
+    progHome.setState({
+      asr: {
+        status: "downloading",
+        progress: { receivedLabel: "2.20 GB", totalLabel: null, percent: null }
+      },
+      installAll: {
+        state: "running",
+        current: "asr_runtime_install",
+        steps: [
+          { kind: "ollama_install", state: "skipped", message: "已具备，跳过", progress: null },
+          { kind: "wait_ollama", state: "done", message: "Ollama 已运行", progress: null },
+          { kind: "ollama_pull", state: "done", message: "", progress: null },
+          {
+            kind: "asr_runtime_install",
+            state: "running",
+            message: "安装 Python 3.12",
+            progress: { receivedLabel: null, totalLabel: null, percent: null }
+          },
+          { kind: "asr_download", state: "pending", message: "", progress: null }
+        ]
+      }
+    });
+    assert(
+      progStepSub.textContent === "安装 Python 3.12…" && progStepSub.textContent.indexOf("……") === -1,
+      "无末尾「…」的 title 在无字节/百分比时补单一「…」"
+    );
+    assert(
+      countElementChildMutations(childObserver) === 0
+        && progAsrBar.classList.contains("indeterminate")
+        && progAsrFill.style.width === ""
+        && !progAsrBar.hasAttribute("aria-valuemin")
+        && !progAsrBar.hasAttribute("aria-valuemax")
+        && !progAsrBar.hasAttribute("aria-valuenow")
+        && progAsrBar.getAttribute("aria-valuetext") === "进度未知"
+        && progAsrSub.textContent === "下载中 · 已写入 2.20 GB",
+      "确定态 → 不确定态切换彻底清空 barFill.style.width 与 aria-valuemin/max/now 并切回 .indeterminate"
+    );
+
+    /* tick 4：不确定态 → 确定态切换清理 aria-valuetext 与 .indeterminate */
+    progHome.setState({
+      installAll: {
+        state: "running",
+        current: "asr_runtime_install",
+        steps: [
+          { kind: "ollama_install", state: "skipped", message: "已具备，跳过", progress: null },
+          { kind: "wait_ollama", state: "done", message: "Ollama 已运行", progress: null },
+          { kind: "ollama_pull", state: "done", message: "", progress: null },
+          {
+            kind: "asr_runtime_install",
+            state: "running",
+            message: "安装识别依赖（cuda）",
+            progress: { receivedLabel: "2.00 GB", totalLabel: "2.86 GB", percent: 70 }
+          },
+          { kind: "asr_download", state: "pending", message: "", progress: null }
+        ]
+      }
+    });
+    assert(
+      countElementChildMutations(childObserver) === 0
+        && !progStepBar.classList.contains("indeterminate")
+        && progStepFill.style.width === "70%"
+        && !progStepBar.hasAttribute("aria-valuetext")
+        && progStepBar.getAttribute("aria-valuemin") === "0"
+        && progStepBar.getAttribute("aria-valuemax") === "100"
+        && progStepBar.getAttribute("aria-valuenow") === "70"
+        && progStepSub.textContent === "安装识别依赖（cuda） · 2.00 GB / 2.86 GB · 70%",
+      "不确定态 → 确定态切换清理 .indeterminate 与 aria-valuetext 并设置精确 width 与 aria-valuenow"
+    );
+
+    /* tick 5：运行态 → 非运行态（ready / failed / done）彻底隐藏并清空进度条属性与样式，节点仍不重建 */
+    progHome.setState({
+      asr: { status: "ready", sidecarRunning: true, sizeLabel: "3.5 GB", deviceLabel: "GPU 加速", progress: null },
+      ollama: { installed: true, running: true, modelStatus: "failed", message: "拉取超时", progress: null },
+      installAll: {
+        state: "failed",
+        current: "asr_runtime_install",
+        steps: [
+          { kind: "ollama_install", state: "skipped", message: "已具备，跳过", progress: null },
+          { kind: "wait_ollama", state: "done", message: "Ollama 已运行", progress: null },
+          { kind: "ollama_pull", state: "done", message: "", progress: null },
+          { kind: "asr_runtime_install", state: "failed", message: "安装停滞超过 5 分钟", progress: null },
+          { kind: "asr_download", state: "pending", message: "", progress: null }
+        ]
+      }
+    });
+    assert(
+      countElementChildMutations(childObserver) === 0
+        && progAsrBar.hidden === true
+        && !progAsrBar.classList.contains("indeterminate")
+        && progAsrFill.style.width === ""
+        && !progAsrBar.hasAttribute("aria-label")
+        && !progAsrBar.hasAttribute("aria-valuemin")
+        && !progAsrBar.hasAttribute("aria-valuemax")
+        && !progAsrBar.hasAttribute("aria-valuenow")
+        && !progAsrBar.hasAttribute("aria-valuetext"),
+      "asrSub 不确定态 → 就绪态彻底隐藏进度条并清空 width / .indeterminate / 全部 aria-*"
+    );
+    assert(
+      progStepSub.classList.contains("err")
+        && progStepSub.textContent === "安装停滞超过 5 分钟"
+        && progStepBar.hidden === true
+        && !progStepBar.classList.contains("indeterminate")
+        && progStepFill.style.width === ""
+        && !progStepBar.hasAttribute("aria-label")
+        && !progStepBar.hasAttribute("aria-valuemin")
+        && !progStepBar.hasAttribute("aria-valuemax")
+        && !progStepBar.hasAttribute("aria-valuenow")
+        && !progStepBar.hasAttribute("aria-valuetext")
+        && progOllSub.classList.contains("err")
+        && progOllSub.textContent === "拉取超时"
+        && progOllBar.hidden === true,
+      "步骤确定态 → 失败态与 ollama 失败态保留 .row-sub.err 并彻底隐藏清理进度条"
+    );
+
+    /* tick 6：翻译与 OCR 加载态均复用单源 .box-loading .progress.indeterminate 流动动画 */
+    progHome.setState({
+      activePanel: "translate",
+      translate: { phase: "loading", sourceText: "Hello" },
+      ocr: { phase: "loading" }
+    });
+    const trLoadBar = homeRoot.querySelector('[data-panel-view="translate"] .box-loading .progress.indeterminate');
+    const trLoadFill = trLoadBar ? trLoadBar.querySelector("i") : null;
+    assert(
+      !!trLoadBar && !!trLoadFill
+        && window.getComputedStyle(trLoadBar).width === "180px"
+        && window.getComputedStyle(trLoadFill).animationName === "v3-indeterminate",
+      "工作台翻译 loading 态使用单源 .box-loading .progress.indeterminate（宽 180px + v3-indeterminate 动画）"
+    );
+    progHome.setPanel("ocr");
+    const ocrLoadBar = homeRoot.querySelector('[data-panel-view="ocr"] .box-loading .progress.indeterminate');
+    const ocrLoadFill = ocrLoadBar ? ocrLoadBar.querySelector("i") : null;
+    assert(
+      !!ocrLoadBar && !!ocrLoadFill
+        && window.getComputedStyle(ocrLoadBar).width === "180px"
+        && window.getComputedStyle(ocrLoadFill).animationName === "v3-indeterminate",
+      "工作台 OCR loading 态使用单源 .box-loading .progress.indeterminate（宽 180px + v3-indeterminate 动画）"
+    );
+
+    childObserver.disconnect();
+    progHome.destroy();
+
     window.__V3_HARNESS__ = { passes: passes, failures: failures, copies: copies, confirms: confirms };
   } catch (err) {
     fail("harness 异常：" + err.stack);

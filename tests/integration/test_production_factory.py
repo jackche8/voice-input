@@ -5,11 +5,14 @@
 """
 from __future__ import annotations
 
+import io
 import json
 import os
 import platform
+import signal
 import subprocess
 import sys
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -18,14 +21,20 @@ import pytest
 from fastapi.testclient import TestClient
 
 from _asr_provider import SidecarStreamProvider
+from _config import ConfigStore
 from _contracts import (
     AudioInputDevice,
     AudioInputListResponse,
+    ErrorCode,
+    LogicError,
     OcrTextBlock,
     OcrTextLine,
     SetupTaskKind,
+    SetupTaskState,
 )
-from _paths import INTERNAL_SETUP_WORKER_FLAG, PROGRAM_ROOT, STATIC_V3, AppPaths
+from _paths import INTERNAL_SETUP_WORKER_FLAG, PROGRAM_ROOT, STATIC_V3, AppPaths, default_app_paths
+from _platform.child_process import process_identity
+from _v3 import setup_actions as setup_actions_mod
 from _v3.production import (
     ProductionEndpoints,
     SystemAdapters,
@@ -35,6 +44,8 @@ from _v3.production import (
     setup_worker_kind,
 )
 from _v3.runtime_install import probe_asr_hardware
+from _v3.setup_tasks import SetupTaskManager
+from _v3.setup_worker import APP_EXIT_MESSAGE
 from _v3_app import create_app
 from tests.api.providers import make_text_wav
 
@@ -623,3 +634,382 @@ def test_asr_runtime_server_cleanup_is_noop_and_worker_cleanup_is_conditional(tm
     assert not cancel_event.is_set()
     worker_cleanup()
     assert live_paths.asr_venv.is_dir() and live_paths.asr_manifest.is_file()
+
+
+def test_setup_task_actions_wires_proxy_release_client_download_env_and_runtime_popen(tmp_path: Path, monkeypatch):
+    def _win_paths(name: str) -> AppPaths:
+        return AppPaths.for_roots(
+            config_root=tmp_path / name / "c",
+            data_root=tmp_path / name / "d",
+            runtime_dir=tmp_path / name / "r",
+            os_name="windows",
+            environ={"APPDATA": str(tmp_path / name / "a"), "LOCALAPPDATA": str(tmp_path / name / "l")},
+        )
+
+    class _Captured(Exception):
+        pass
+
+    captured_clients: list[httpx.Client] = []
+    captured_pull: list[httpx.Client] = []
+
+    def _capture_download(client: httpx.Client, **_kw):
+        captured_clients.append(client)
+        raise _Captured()
+
+    def _capture_pull(client: httpx.Client, _payload, _report):
+        captured_pull.append(client)
+        raise _Captured()
+
+    monkeypatch.setattr(setup_actions_mod, "download_verified", _capture_download)
+    monkeypatch.setattr(setup_actions_mod, "_pull_stream_once", _capture_pull)
+
+    # 1. release_client 延迟构造：SOCKS5 代理在 setup_task_actions() 构造期不报错，执行 ollama_install 时才抛明确错且不泄密
+    socks_paths = _win_paths("socks")
+    socks_paths.config_root.mkdir(parents=True)
+    socks_adapters = SystemAdapters(
+        environ={"HTTPS_PROXY": "socks5://alice:s3cr3t@127.0.0.1:1080"},
+        http_transport=None,
+        read_system_proxy=lambda _os: ({}, []),
+    )
+    socks_actions = setup_task_actions(socks_paths, ENDPOINTS, socks_adapters, ConfigStore(socks_paths.config))
+    with pytest.raises(LogicError) as exc_info:
+        socks_actions[SetupTaskKind.ollama_install](lambda _p: None)
+    assert exc_info.value.code == ErrorCode.dependency_failed
+    assert "SOCKS" in exc_info.value.message
+    assert "s3cr3t" not in exc_info.value.message
+
+    # 2. release_client 读系统代理 + 有限 read=120s；ollama_pull 保持独立 long_read(read=None)；注入 transport 透传无 mounts
+    sys_proxy = (
+        {"http": "http://127.0.0.1:7890", "https": "http://127.0.0.1:7891"},
+        ["*.corp"],
+    )
+
+    win_paths = _win_paths("wired")
+    win_paths.config_root.mkdir(parents=True)
+    real_transport_adapters = SystemAdapters(
+        environ={},
+        http_transport=None,
+        read_system_proxy=lambda os_name: sys_proxy if os_name == "windows" else ({}, []),
+    )
+    actions = setup_task_actions(win_paths, ENDPOINTS, real_transport_adapters, ConfigStore(win_paths.config))
+    with pytest.raises(_Captured):
+        actions[SetupTaskKind.ollama_install](lambda _p: None)
+    rel_client = captured_clients[-1]
+    assert rel_client.timeout.read == 120.0
+    assert rel_client._trust_env is False
+    assert rel_client._transport_for_url(httpx.URL("https://github.com/ollama")) is not rel_client._transport
+    assert rel_client._transport_for_url(httpx.URL("http://127.0.0.1:17945")) is rel_client._transport
+    assert rel_client._transport_for_url(httpx.URL("https://a.corp")) is rel_client._transport
+
+    with pytest.raises(_Captured):
+        actions[SetupTaskKind.ollama_pull](lambda _p: None)
+    assert captured_pull[-1].timeout.read is None
+
+    mock_transport = httpx.MockTransport(FakeServices())
+    mock_adapters = SystemAdapters(
+        environ={},
+        http_transport=mock_transport,
+        read_system_proxy=lambda _os: sys_proxy,
+    )
+    mock_actions = setup_task_actions(win_paths, ENDPOINTS, mock_adapters, ConfigStore(win_paths.config))
+    with pytest.raises(_Captured):
+        mock_actions[SetupTaskKind.ollama_install](lambda _p: None)
+    assert captured_clients[-1]._transport is mock_transport
+    assert captured_clients[-1]._mounts == {}
+
+    # 3. Step 5 download_env 合并系统代理并大小写去重 HF_HOME / HF_HUB_DISABLE_PROGRESS_BARS / PYTHONUTF8
+    download_calls: list[dict[str, str]] = []
+
+    class _DoneProc:
+        pid = 43210
+        returncode = 0
+
+        def __init__(self) -> None:
+            self.stdout = io.StringIO("")
+
+        def poll(self):
+            return 0
+
+    def _capture_download_popen(_argv, **kwargs):
+        download_calls.append(dict(kwargs["env"]))
+        return _DoneProc()
+
+    win_paths.asr_python.parent.mkdir(parents=True, exist_ok=True)
+    win_paths.asr_python.write_text("", encoding="utf-8")
+    win_paths.asr_model_dir.mkdir(parents=True, exist_ok=True)
+    (win_paths.asr_model_dir / "config.json").write_text("{}", encoding="utf-8")
+    (win_paths.asr_model_dir / "model.safetensors").write_bytes(b"w")
+
+    dl_adapters = SystemAdapters(
+        environ={"hf_home": "C:\\old-hf", "hf_hub_disable_progress_bars": "0", "pythonutf8": "0"},
+        popen=_capture_download_popen,
+        http_transport=mock_transport,
+        read_system_proxy=lambda os_name: sys_proxy if os_name == "windows" else ({}, []),
+    )
+    dl_actions = setup_task_actions(win_paths, ENDPOINTS, dl_adapters, ConfigStore(win_paths.config))
+    assert dl_actions[SetupTaskKind.asr_download](lambda _p: None).endswith("已下载")
+    dl_env = download_calls[-1]
+    assert dl_env["HTTP_PROXY"] == "http://127.0.0.1:7890"
+    assert dl_env["HTTPS_PROXY"] == "http://127.0.0.1:7891"
+    assert "*.corp" in dl_env["NO_PROXY"]
+    assert dl_env["HF_HOME"] == str(win_paths.hf_home) and "hf_home" not in dl_env
+    assert dl_env["HF_HUB_DISABLE_PROGRESS_BARS"] == "1" and "hf_hub_disable_progress_bars" not in dl_env
+    assert dl_env["PYTHONUTF8"] == "1" and "pythonutf8" not in dl_env
+
+    # 4. Step 4 asr_runtime_install 透传 adapters.popen 与 adapters.read_system_proxy
+    rt_paths = _win_paths("runtime")
+    rt_paths.config_root.mkdir(parents=True)
+    rt_paths.uv_dir.mkdir(parents=True, exist_ok=True)
+    (rt_paths.uv_dir / "uv.exe").write_text("", encoding="utf-8")
+    uv_calls: list[tuple[list[str], dict[str, str]]] = []
+
+    def _capture_uv_popen(argv, **kwargs):
+        uv_calls.append((list(argv), dict(kwargs["env"])))
+        return _DoneProc()
+
+    rt_adapters = SystemAdapters(
+        environ={},
+        popen=_capture_uv_popen,
+        which=lambda _name: None,
+        http_transport=mock_transport,
+        read_system_proxy=lambda os_name: sys_proxy if os_name == "windows" else ({}, []),
+    )
+    rt_actions = setup_task_actions(rt_paths, ENDPOINTS, rt_adapters, ConfigStore(rt_paths.config))
+    res = rt_actions[SetupTaskKind.asr_runtime_install](lambda _p: None)
+    assert "cpu" in res
+    assert len(uv_calls) == 4
+    for argv, env in uv_calls:
+        assert "--color" in argv and "never" in argv
+        assert env["HTTPS_PROXY"] == "http://127.0.0.1:7891"
+        assert env["UV_SYSTEM_CERTS"] == "1"
+        assert env["UV_CONCURRENT_DOWNLOADS"] == "8"
+        assert env["UV_HTTP_TIMEOUT"] == "120"
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX 桩可执行脚本真链验收")
+def test_setup_worker_real_asr_runtime_streaming_log_progress_and_host_exit(tmp_path: Path):
+    """真链验收：真实 setup_worker 子进程 + 本地桩 uv 脚本（显式 CUDA_VISIBLE_DEVICES="" 保 CPU 变体确定）。
+
+    路径 1：POST /api/setup/install-all → GET /api/setup/check 实时呈现 percent=None、total_bytes=None、
+    completed_bytes 递增与包名进度，同时 setup-asr_runtime_install.log 在运行中实时落盘并脱敏代理凭据，最终完成。
+    路径 2：宿主进程退出 → setup_worker 中止任务并终止 uv 及后代子进程，不写 manifest。
+    """
+    strip_exact = {"http_proxy", "https_proxy", "all_proxy", "no_proxy"}
+
+    def _isolated_env(root: Path) -> dict[str, str]:
+        base = {
+            k: v
+            for k, v in os.environ.items()
+            if not k.startswith(("XDG_", "OVI_", "UV_")) and k.lower() not in strip_exact
+        }
+        return {
+            **base,
+            "HOME": str(root / "home"),
+            "XDG_CONFIG_HOME": str(root / "config"),
+            "XDG_DATA_HOME": str(root / "data"),
+            "XDG_RUNTIME_DIR": str(root / "run"),
+            "APPDATA": str(root / "appdata"),
+            "LOCALAPPDATA": str(root / "localappdata"),
+            "PYTHONPATH": str(PROGRAM_ROOT),
+            "PYTHONDONTWRITEBYTECODE": "1",
+            "CUDA_VISIBLE_DEVICES": "",
+            "HTTPS_PROXY": "http://alice:topsecret@127.0.0.1:7890",
+        }
+
+    def _write_uv_stub(
+        uv_path: Path,
+        *,
+        gate_file: Path,
+        env_dump: Path | None = None,
+        pids_file: Path | None = None,
+    ) -> None:
+        uv_path.parent.mkdir(parents=True, exist_ok=True)
+        script = f"""#!{sys.executable}
+import json, os, subprocess, sys, time
+from pathlib import Path
+
+args = sys.argv[1:]
+sub = args[0] if args else ""
+gate = Path({str(gate_file)!r})
+env_dump = {(str(env_dump) if env_dump is not None else None)!r}
+pids_file = {(str(pids_file) if pids_file is not None else None)!r}
+
+if sub == "python":
+    if env_dump:
+        keys = ("HTTPS_PROXY", "UV_SYSTEM_CERTS", "UV_CONCURRENT_DOWNLOADS", "UV_HTTP_TIMEOUT", "NO_COLOR", "PYTHONUTF8")
+        Path(env_dump).write_text(json.dumps({{k: os.environ.get(k) for k in keys}}), encoding="utf-8")
+    print("Downloading cpython-3.12.13-linux-x86_64-none (download) (21.5MiB)", flush=True)
+    raise SystemExit(0)
+
+if sub == "venv":
+    Path(args[-1]).mkdir(parents=True, exist_ok=True)
+    raise SystemExit(0)
+
+if sub == "pip":
+    cache_dir = Path(os.environ["UV_CACHE_DIR"])
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    (cache_dir / "torch.tmp").write_bytes(b"x" * (256 * 1024))
+    print("Resolved 62 packages in 0.1s", flush=True)
+    print("Downloading torch (2.7GiB)", flush=True)
+    print("fetch http://alice:topsecret@127.0.0.1:7890/torch.whl", flush=True)
+    child = None
+    if pids_file:
+        child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+        tmp = Path(pids_file + ".tmp")
+        tmp.write_text(json.dumps({{"uv": os.getpid(), "child": child.pid}}), encoding="utf-8")
+        os.replace(tmp, pids_file)
+    deadline = time.monotonic() + 30.0
+    while not gate.exists() and time.monotonic() < deadline:
+        time.sleep(0.05)
+    if child is not None:
+        child.terminate()
+    print("Installed 62 packages in 0.2s", flush=True)
+    raise SystemExit(0)
+
+if sub == "cache":
+    raise SystemExit(0)
+
+raise SystemExit(2)
+"""
+        uv_path.write_text(script, encoding="utf-8")
+        uv_path.chmod(0o755)
+
+    def _wait_until(predicate, timeout_s: float = 20.0):
+        deadline = time.monotonic() + timeout_s
+        while True:
+            val = predicate()
+            if val:
+                return val
+            assert time.monotonic() < deadline, "等待真链状态超时"
+            time.sleep(0.1)
+
+    # 路径 1：真实 API + 真实 setup_worker 子进程实时进度、实时脱敏日志与最终落盘
+    root1 = tmp_path / "real-chain-ok"
+    env1 = _isolated_env(root1)
+    paths1 = default_app_paths(env1)
+    gate1 = root1 / "release-pip"
+    env_dump1 = root1 / "uv-env.json"
+    _write_uv_stub(paths1.uv_dir / "uv", gate_file=gate1, env_dump=env_dump1)
+    # 预置其他步骤为已就绪，确保一键装齐直达 Step 4 asr_runtime_install
+    paths1.ollama_binary.parent.mkdir(parents=True, exist_ok=True)
+    paths1.ollama_binary.write_text("#!/bin/sh\n", encoding="utf-8")
+    paths1.ollama_binary.chmod(0o755)
+    paths1.asr_model_dir.mkdir(parents=True, exist_ok=True)
+    (paths1.asr_model_dir / "config.json").write_text("{}", encoding="utf-8")
+    (paths1.asr_model_dir / "model.safetensors").write_bytes(b"w")
+
+    services = FakeServices()
+    services.models = ["qwen3.5:4b"]
+    adapters1 = SystemAdapters(environ=env1, http_transport=httpx.MockTransport(services))
+    runtime1 = compose_production_runtime(paths=paths1, token=FAKE_TOKEN, adapters=adapters1, endpoints=ENDPOINTS)
+    log1 = paths1.logs / "setup-asr_runtime_install.log"
+    try:
+        with TestClient(
+            create_app(runtime1, static_v3=STATIC_V3),
+            client=("127.0.0.1", 50000),
+            base_url="https://127.0.0.1:17945",
+        ) as client:
+            report = {
+                "components": [
+                    {"name": n, "state": "running", "since": "2026-11-23T00:00:00+00:00"}
+                    for n in ("ollama", "asr", "server")
+                ]
+            }
+            assert client.post("/api/v1/components", json=report, headers=H).status_code == 202
+            assert client.post("/api/setup/install-all", headers=H).status_code == 202
+
+            def _step4_live():
+                chk = client.get("/api/setup/check").json()
+                step4 = chk["install_all"]["steps"][3]
+                prog = step4.get("progress") or {}
+                if (
+                    step4["state"] == "running"
+                    and (prog.get("completed_bytes") or 0) >= 256 * 1024
+                    and "torch (2.7GiB)" in (prog.get("stage") or "")
+                ):
+                    return step4
+                return None
+
+            live_step4 = _wait_until(_step4_live)
+            prog = live_step4["progress"]
+            assert prog["percent"] is None and prog["total_bytes"] is None
+            assert prog["completed_bytes"] >= 256 * 1024
+            assert "torch (2.7GiB)" in live_step4["message"]
+            # 运行中日志已实时落盘且不含代理密码
+            live_log = log1.read_text(encoding="utf-8")
+            assert "Downloading torch (2.7GiB)" in live_log
+            assert "http://***@127.0.0.1:7890/torch.whl" in live_log
+            assert "topsecret" not in live_log
+
+            gate1.write_text("go", encoding="utf-8")
+            done_chk = _wait_until(
+                lambda: (c := client.get("/api/setup/check").json())
+                and c["install_all"]["state"] in ("done", "failed")
+                and c
+            )
+            assert done_chk["install_all"]["state"] == "done"
+            assert done_chk["install_all"]["steps"][3]["state"] == "done"
+            assert paths1.asr_manifest.is_file()
+            assert json.loads(paths1.asr_manifest.read_text(encoding="utf-8"))["variant"] == "cpu"
+            seen_env = json.loads(env_dump1.read_text(encoding="utf-8"))
+            assert seen_env == {
+                "HTTPS_PROXY": "http://alice:topsecret@127.0.0.1:7890",
+                "UV_SYSTEM_CERTS": "1",
+                "UV_CONCURRENT_DOWNLOADS": "8",
+                "UV_HTTP_TIMEOUT": "120",
+                "NO_COLOR": "1",
+                "PYTHONUTF8": "1",
+            }
+    finally:
+        gate1.write_text("cleanup", encoding="utf-8")
+
+    # 路径 2：真实宿主退出 → setup_worker 中止任务并终止 uv 与其后代进程，绝不写 manifest
+    root2 = tmp_path / "real-chain-host-exit"
+    env2 = _isolated_env(root2)
+    paths2 = default_app_paths(env2)
+    gate2 = root2 / "never-release"
+    pids_file = root2 / "pids.json"
+    _write_uv_stub(paths2.uv_dir / "uv", gate_file=gate2, pids_file=pids_file)
+    host = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    pids: dict[str, int] = {}
+    try:
+        mgr = SetupTaskManager(
+            kinds=setup_task_kinds(paths2, SystemAdapters(environ=env2)),
+            tasks_dir=paths2.setup_tasks,
+            log_dir=paths2.logs,
+            worker_argv=[sys.executable, "-m", "_v3.setup_worker"],
+            owner_pid=host.pid,
+            environ=env2,
+        )
+        mgr.start(SetupTaskKind.asr_runtime_install)
+        _wait_until(
+            lambda: pids_file.is_file()
+            and (t := mgr.latest(SetupTaskKind.asr_runtime_install)) is not None
+            and t.progress is not None
+            and "torch (2.7GiB)" in (t.progress.stage or "")
+        )
+        pids = json.loads(pids_file.read_text(encoding="utf-8"))
+        host.kill()
+        host.wait(timeout=5)
+        done = _wait_until(
+            lambda: (t := mgr.latest(SetupTaskKind.asr_runtime_install)) is not None
+            and t.state != SetupTaskState.running
+            and t
+        )
+        assert done.state == SetupTaskState.interrupted
+        assert done.message == APP_EXIT_MESSAGE
+        _wait_until(
+            lambda: process_identity(pids["uv"]) is None and process_identity(pids["child"]) is None,
+            timeout_s=5.0,
+        )
+        assert not paths2.asr_manifest.exists()
+    finally:
+        gate2.write_text("cleanup", encoding="utf-8")
+        if host.poll() is None:
+            host.kill()
+            host.wait(timeout=5)
+        for pid in pids.values():
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except OSError:
+                pass

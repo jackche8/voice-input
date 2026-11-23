@@ -82,8 +82,12 @@
       var kb = n / 1024;
       return (Math.round(kb * 10) / 10).toString() + " KB";
     }
-    var mb = n / (1024 * 1024);
-    return (Math.round(mb * 10) / 10).toString() + " MB";
+    if (n < 1024 * 1024 * 1024) {
+      var mb = n / (1024 * 1024);
+      return (Math.round(mb * 10) / 10).toString() + " MB";
+    }
+    var gb = n / (1024 * 1024 * 1024);
+    return gb.toFixed(2) + " GB";
   }
 
   function mapProgress(progress) {

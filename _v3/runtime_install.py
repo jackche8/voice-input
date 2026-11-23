@@ -27,8 +27,9 @@ import httpx
 from _atomic_file import atomic_write_bytes
 from _contracts import ErrorCode, LogicError, SetupProgress
 from _paths import PROGRAM_ROOT, AppPaths, asr_runtime_root
-from _platform.child_process import windows_subprocess_kwargs
+from _platform.child_process import set_env_var, unset_env_var
 from _platform.protocol import OsName
+from _platform.system_proxy import SystemProxyReader, merge_proxy_env, read_os_system_proxy
 from _supervision.gpu_preflight import (
     NvidiaSmiNotFoundError,
     evaluate_windows_cuda_gpu,
@@ -38,6 +39,7 @@ from _supervision.gpu_preflight import (
 from _v3.release_download import download_verified, extract_archive
 from _v3.setup_probe import asr_variant
 from _v3.setup_tasks import GIB, ProgressFn, SetupAction
+from _v3.uv_runner import INSTALL_TIMEOUT_S, STALL_TIMEOUT_S, dir_bytes, run_uv_streaming
 
 UV_VERSION = "0.11.3"
 PYTHON_VERSION = "3.12.13"
@@ -45,7 +47,6 @@ UV_RELEASE_BASE = "https://github.com/astral-sh/uv/releases/download"
 LOCK_DIR = asr_runtime_root(PROGRAM_ROOT) / "runtimes" / "asr"
 HARDWARE_PROBE_TTL_S = 30.0
 REMOVING_VENV_PREFIX = ".venv.removing."
-INSTALL_TIMEOUT_S = 3600
 Runner = Callable[..., subprocess.CompletedProcess]
 
 _UV_TARGETS = {
@@ -222,38 +223,20 @@ def _same_volume(a: Path, b: Path) -> bool:
         return False
 
 
-def _dir_bytes(path: Path) -> int:
-    if not path.exists():
-        return 0
-    if path.is_file() or path.is_symlink():
-        try:
-            return os.lstat(path).st_size
-        except OSError:
-            return 0
-    total = 0
-    for root, _dirs, files in os.walk(path, followlinks=False):
-        for name in files:
-            try:
-                total += os.lstat(os.path.join(root, name)).st_size
-            except OSError:
-                continue
-    return total
-
-
 def asr_runtime_disk_budget(paths: AppPaths, os_name: OsName, variant: str) -> tuple[Path, int]:
     """计算目标变体净磁盘需求：扣减同卷可回收/可复用的旧 asr_venv、.venv.removing* 与 uv/cache，钳制 >= 0。"""
     gross = variant_disk_bytes(os_name, variant)
     reclaimable = 0
     if paths.asr_venv.exists() and _same_volume(paths.asr_venv, paths.asr_venv):
-        reclaimable += _dir_bytes(paths.asr_venv)
+        reclaimable += dir_bytes(paths.asr_venv)
     parent = paths.asr_venv.parent
     if parent.is_dir() and _same_volume(parent, paths.asr_venv):
         for entry in parent.iterdir():
             if entry.name.startswith(REMOVING_VENV_PREFIX):
-                reclaimable += _dir_bytes(entry)
+                reclaimable += dir_bytes(entry)
     uv_cache = paths.uv_dir / "cache"
     if uv_cache.exists() and _same_volume(uv_cache, paths.asr_venv):
-        reclaimable += _dir_bytes(uv_cache)
+        reclaimable += dir_bytes(uv_cache)
     return paths.asr_venv, max(0, gross - reclaimable)
 
 
@@ -337,19 +320,27 @@ def _install_uv(paths: AppPaths, os_name: OsName, machine: str, client: httpx.Cl
     return uv
 
 
-def _run_uv(run: Runner, argv: list[str], env: Mapping[str, str], what: str) -> None:
-    proc = run(
-        argv,
-        env={**env, "PYTHONUTF8": "1"},
-        capture_output=True,
-        text=True,
-        timeout=INSTALL_TIMEOUT_S,
-        check=False,
-        **windows_subprocess_kwargs(encoding="utf-8", errors="replace"),
-    )
-    if proc.returncode != 0:
-        tail = (proc.stderr or proc.stdout or "").strip()[-600:]
-        raise LogicError(ErrorCode.dependency_failed, f"{what}失败（退出码 {proc.returncode}）：{tail}")
+def _build_uv_env(
+    environ: Mapping[str, str],
+    *,
+    paths: AppPaths,
+    os_name: OsName,
+    read_system_proxy: SystemProxyReader,
+) -> dict[str, str]:
+    """单源合并系统代理与 `uv` 隔离/网络参数（Windows 大小写去重，保留用户显式非空网络覆盖）。"""
+    env = merge_proxy_env(environ, os_name=os_name, read_system_proxy=read_system_proxy)
+    set_env_var(env, "UV_PYTHON_INSTALL_DIR", str(paths.python_dir), os_name=os_name, overwrite=True)
+    set_env_var(env, "UV_CACHE_DIR", str(paths.uv_dir / "cache"), os_name=os_name, overwrite=True)
+    set_env_var(env, "UV_PYTHON_PREFERENCE", "only-managed", os_name=os_name, overwrite=True)
+    set_env_var(env, "UV_NO_CONFIG", "1", os_name=os_name, overwrite=True)
+    set_env_var(env, "PYTHONUTF8", "1", os_name=os_name, overwrite=True)
+    set_env_var(env, "NO_COLOR", "1", os_name=os_name, overwrite=True)
+    unset_env_var(env, "FORCE_COLOR", os_name=os_name)
+    unset_env_var(env, "CLICOLOR_FORCE", os_name=os_name)
+    set_env_var(env, "UV_SYSTEM_CERTS", "1", os_name=os_name, overwrite=False)
+    set_env_var(env, "UV_CONCURRENT_DOWNLOADS", "8", os_name=os_name, overwrite=False)
+    set_env_var(env, "UV_HTTP_TIMEOUT", "120", os_name=os_name, overwrite=False)
+    return env
 
 
 def asr_runtime_install_action(
@@ -361,6 +352,8 @@ def asr_runtime_install_action(
     environ: Mapping[str, str],
     client_factory: Callable[[], httpx.Client],
     run: Runner = subprocess.run,
+    popen: Callable[..., subprocess.Popen] = subprocess.Popen,
+    read_system_proxy: SystemProxyReader = read_os_system_proxy,
     clock: Callable[[], str] = lambda: datetime.now(timezone.utc).isoformat(),
     on_replace_start: Callable[[], None] | None = None,
     cancel_event: threading.Event | None = None,
@@ -375,13 +368,26 @@ def asr_runtime_install_action(
             raise LogicError(ErrorCode.conflict, f"识别运行环境已安装（{chosen}，{paths.asr_manifest}），未重复安装")
         report(SetupProgress(stage=f"识别运行环境变体 {chosen}：{why}"))
         lock = lock_file(chosen, os_name=os_name, program_root=paths.program_root)
-        with client_factory() as client:
-            uv = _install_uv(paths, os_name, machine, client, report, run)
-        # 只用托管 Python、不读用户的 uv/pip 配置（锁文件已写明索引地址）
-        env = {**environ, "UV_PYTHON_INSTALL_DIR": str(paths.python_dir), "UV_CACHE_DIR": str(paths.uv_dir / "cache"),
-               "UV_PYTHON_PREFERENCE": "only-managed", "UV_NO_CONFIG": "1"}
-        report(SetupProgress(stage=f"安装 Python {PYTHON_VERSION}"))
-        _run_uv(run, [str(uv), "python", "install", PYTHON_VERSION], env, f"安装 Python {PYTHON_VERSION} ")
+        uv = _uv_binary(paths, os_name)
+        if not uv.is_file():
+            with client_factory() as client:
+                uv = _install_uv(paths, os_name, machine, client, report, run)
+        # 只用托管 Python、不读用户的 uv/pip 配置（锁文件已写明索引地址），并同步系统代理
+        env = _build_uv_env(environ, paths=paths, os_name=os_name, read_system_proxy=read_system_proxy)
+        uv_cache = paths.uv_dir / "cache"
+        log_path = paths.logs / "setup-asr_runtime_install.log"
+        run_uv_streaming(
+            [str(uv), "python", "install", "--color", "never", PYTHON_VERSION],
+            env=env,
+            what=f"安装 Python {PYTHON_VERSION}",
+            report=report,
+            os_name=os_name,
+            log_path=log_path,
+            primary_dir=paths.python_dir,
+            activity_dirs=(paths.python_dir, uv_cache),
+            popen=popen,
+            cancel_event=cancel_event,
+        )
         if cancel_event is not None and cancel_event.is_set():
             raise LogicError(ErrorCode.dependency_failed, "安装已中止，未替换既有识别运行环境")
         if on_replace_start is not None:
@@ -393,13 +399,53 @@ def asr_runtime_install_action(
                 ErrorCode.dependency_failed,
                 f"清理旧识别运行环境失败（可能有进程仍占用文件，请关闭占用后重试）：{exc}",
             ) from exc
-        report(SetupProgress(stage="创建识别运行环境"))
-        _run_uv(run, [str(uv), "venv", "--clear", "--python", PYTHON_VERSION, str(paths.asr_venv)], env, "创建识别运行环境")
-        report(SetupProgress(stage=f"安装识别依赖（{chosen}）"))
-        _run_uv(run, [str(uv), "pip", "install", "--python", str(paths.asr_python), "--require-hashes", "-r", str(lock)],
-                env, f"安装识别依赖（{chosen}）")
-        report(SetupProgress(stage="清理下载缓存"))
-        _run_uv(run, [str(uv), "cache", "clean"], env, "清理下载缓存")  # 已装进 venv 的文件不受影响；失败重试时缓存保留可续用
+        run_uv_streaming(
+            [str(uv), "venv", "--color", "never", "--clear", "--python", PYTHON_VERSION, str(paths.asr_venv)],
+            env=env,
+            what="创建识别运行环境",
+            report=report,
+            os_name=os_name,
+            log_path=log_path,
+            primary_dir=None,
+            activity_dirs=(paths.asr_venv,),
+            popen=popen,
+            cancel_event=cancel_event,
+        )
+        run_uv_streaming(
+            [
+                str(uv),
+                "pip",
+                "install",
+                "--color",
+                "never",
+                "--python",
+                str(paths.asr_python),
+                "--require-hashes",
+                "-r",
+                str(lock),
+            ],
+            env=env,
+            what=f"安装识别依赖（{chosen}）",
+            report=report,
+            os_name=os_name,
+            log_path=log_path,
+            primary_dir=uv_cache,
+            activity_dirs=(uv_cache, paths.asr_venv),
+            popen=popen,
+            cancel_event=cancel_event,
+        )
+        run_uv_streaming(
+            [str(uv), "cache", "clean", "--color", "never"],
+            env=env,
+            what="清理下载缓存",
+            report=report,
+            os_name=os_name,
+            log_path=log_path,
+            primary_dir=None,
+            activity_dirs=(uv_cache,),
+            popen=popen,
+            cancel_event=cancel_event,
+        )  # 已装进 venv 的文件不受影响；失败重试时缓存保留可续用
         if cancel_event is not None and cancel_event.is_set():
             raise LogicError(ErrorCode.dependency_failed, "安装已中止，未写入运行环境清单")
         manifest = {"variant": chosen, "python": PYTHON_VERSION, "uv": UV_VERSION,
@@ -412,8 +458,10 @@ def asr_runtime_install_action(
 
 __all__ = [
     "HARDWARE_PROBE_TTL_S",
+    "INSTALL_TIMEOUT_S",
     "PYTHON_VERSION",
     "REMOVING_VENV_PREFIX",
+    "STALL_TIMEOUT_S",
     "UV_VERSION",
     "AsrHardwareProbe",
     "CachedHardwareProbe",

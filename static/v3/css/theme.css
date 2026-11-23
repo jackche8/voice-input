@@ -194,6 +194,15 @@ body {
   width: 0;
   background: var(--c-accent);
 }
+.progress.indeterminate > i {
+  width: 45%;
+  border-radius: var(--radius-pill);
+  animation: v3-indeterminate 1.4s ease-in-out infinite;
+}
+@keyframes v3-indeterminate {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(240%); }
+}
 
 .switch {
   position: relative;

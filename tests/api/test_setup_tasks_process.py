@@ -2,10 +2,12 @@
 worker 被杀 → interrupted → 重试先清理；宿主应用退出 → worker 中止并清理；磁盘不足立即失败；同类运行中不重复。"""
 from __future__ import annotations
 
+import inspect
 import os
 import signal
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -14,7 +16,8 @@ import pytest
 from _contracts import ErrorCode, LogicError, SetupTask, SetupTaskKind, SetupTaskState
 from _v3.setup_tasks import INTERRUPTED_BY_RESTART, TASK_RETENTION, SetupTaskManager, TaskKindSpec, read_task_file, write_task_file
 from _platform.child_process import process_identity
-from _v3.setup_worker import APP_EXIT_MESSAGE, EXIT_INTERRUPTED, NO_OWNER_MESSAGE, kill_own_process_group, run_task
+from _v3 import setup_worker as setup_worker_mod
+from _v3.setup_worker import APP_EXIT_MESSAGE, EXIT_INTERRUPTED, NO_OWNER_MESSAGE, _flush_stdio, kill_own_process_group, run_task
 
 ROOT = Path(__file__).resolve().parents[2]
 PULL, INSTALL = SetupTaskKind.ollama_pull, SetupTaskKind.ollama_install
@@ -254,3 +257,100 @@ def test_worker_host_exit_sets_cancel_event_catches_cleanup_oserror_and_terminat
     monkeypatch.setattr(_child_windows, "terminate_descendants", lambda root_pid, **kw: called.append(root_pid) or [])
     kill_own_process_group()
     assert called == [os.getpid()]
+
+
+def test_flush_stdio_flushes_both_streams_tolerates_none_and_oserror(monkeypatch):
+    class _FakeStream:
+        def __init__(self, *, fail: bool = False) -> None:
+            self.fail = fail
+            self.flushed = 0
+
+        def flush(self) -> None:
+            self.flushed += 1
+            if self.fail:
+                raise OSError("broken pipe")
+
+    out = _FakeStream()
+    err = _FakeStream()
+    monkeypatch.setattr(sys, "stdout", out)
+    monkeypatch.setattr(sys, "stderr", err)
+    _flush_stdio()
+    assert (out.flushed, err.flushed) == (1, 1)
+
+    # stdout flush 抛 OSError 时不得阻断 stderr flush
+    broken_out = _FakeStream(fail=True)
+    ok_err = _FakeStream()
+    monkeypatch.setattr(sys, "stdout", broken_out)
+    monkeypatch.setattr(sys, "stderr", ok_err)
+    _flush_stdio()
+    assert (broken_out.flushed, ok_err.flushed) == (1, 1)
+
+    # 无控制台（--noconsole）stdout/stderr 为 None 时静默通过
+    monkeypatch.setattr(sys, "stdout", None)
+    monkeypatch.setattr(sys, "stderr", None)
+    _flush_stdio()
+
+
+def test_run_task_host_exit_waits_cancel_join_s_before_cleanup(tmp_path, monkeypatch):
+    assert inspect.signature(run_task).parameters["cancel_join_s"].default == 2.0
+
+    join_timeouts: list[float | None] = []
+    real_thread_cls = threading.Thread
+
+    class _SpyThread(real_thread_cls):
+        def join(self, timeout=None):
+            join_timeouts.append(timeout)
+            return super().join(timeout)
+
+    monkeypatch.setattr(setup_worker_mod.threading, "Thread", _SpyThread)
+
+    task_file = tmp_path / "task-cancel-join.json"
+    cancel = threading.Event()
+    started = threading.Event()
+    abort_done = threading.Event()
+    order: list[str] = []
+    owner_alive = {"ok": True}
+
+    def action(_report) -> str:
+        started.set()
+        cancel.wait(5.0)
+        abort_done.wait(5.0)
+        order.append("action_cleanup_done")
+        return "cancelled"
+
+    def abort_children() -> None:
+        assert cancel.is_set()
+        order.append("abort_children")
+        abort_done.set()
+
+    def cleanup() -> None:
+        order.append("cleanup")
+
+    def fake_identity(pid: int) -> str | None:
+        if pid == 5151:
+            return "owner-id" if owner_alive["ok"] else None
+        return "worker-id"
+
+    def trigger_owner_exit() -> None:
+        started.wait(5.0)
+        owner_alive["ok"] = False
+
+    trigger = real_thread_cls(target=trigger_owner_exit, daemon=True)
+    trigger.start()
+    code = run_task(
+        task_file=task_file,
+        kind=SetupTaskKind.asr_runtime_install,
+        action=action,
+        cleanup=cleanup,
+        owner_pid=5151,
+        owner_identity="owner-id",
+        identity=fake_identity,
+        abort_children=abort_children,
+        cancel_event=cancel,
+        interval_s=0.02,
+        cancel_join_s=1.75,
+    )
+    trigger.join(2.0)
+    assert code == EXIT_INTERRUPTED
+    assert 1.75 in join_timeouts
+    assert order == ["abort_children", "action_cleanup_done", "cleanup"]

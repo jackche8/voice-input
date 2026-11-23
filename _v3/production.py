@@ -48,6 +48,8 @@ from _ocr_layout import extract_ocr_layout
 from _ollama import OllamaClient
 from _paths import INTERNAL_SETUP_WORKER_FLAG, PROGRAM_ROOT, STATIC_V3, AppPaths, default_app_paths, internal_subcommand
 from _platform._common import list_audio_input_devices
+from _platform.child_process import set_env_var
+from _platform.system_proxy import SystemProxyReader, merge_proxy_env, read_os_system_proxy
 from _polish import polish_text
 from _ports import DEFAULT_SERVER_PORT, local_ports
 from _session_finals import SessionFinalIndex
@@ -56,6 +58,7 @@ from _utterance import UtteranceService
 from _v3.auth import AuthSettings
 from _v3.component_routes import ComponentRegistry
 from _v3.lan_access import LanAccessService, list_physical_lan_ipv4
+from _v3.release_download import create_release_client
 from _v3.runtime import Runtime
 from _v3.runtime_install import (
     CachedHardwareProbe,
@@ -110,6 +113,7 @@ class SystemAdapters:
     list_ips: Callable[[], list[str]] | None = None
     list_audio_inputs: Callable[[], AudioInputListResponse] | None = None
     http_transport: httpx.BaseTransport | None = None
+    read_system_proxy: SystemProxyReader = read_os_system_proxy
     spawn: Spawn = thread_spawn
 
 
@@ -149,12 +153,23 @@ def setup_task_actions(
     cancel_event: threading.Event | None = None,
 ) -> dict[SetupTaskKind, SetupAction]:
     """安装 worker 进程里执行的真实动作表（服务端进程不执行动作，只拉起 worker）。"""
-    download_env = dict(adapters.environ)
-    download_env.update({"HF_HOME": str(paths.hf_home), "HF_HUB_DISABLE_PROGRESS_BARS": "1"})
+    download_env = merge_proxy_env(
+        adapters.environ,
+        os_name=paths.os_name,
+        read_system_proxy=adapters.read_system_proxy,
+    )
+    set_env_var(download_env, "HF_HOME", str(paths.hf_home), os_name=paths.os_name, overwrite=True)
+    set_env_var(download_env, "HF_HUB_DISABLE_PROGRESS_BARS", "1", os_name=paths.os_name, overwrite=True)
+    set_env_var(download_env, "PYTHONUTF8", "1", os_name=paths.os_name, overwrite=True)
     long_read = httpx.Timeout(30.0, read=None)
 
     def release_client() -> httpx.Client:
-        return httpx.Client(timeout=long_read, transport=adapters.http_transport, follow_redirects=True)
+        return create_release_client(
+            environ=adapters.environ,
+            os_name=paths.os_name,
+            read_system_proxy=adapters.read_system_proxy,
+            transport=adapters.http_transport,
+        )
 
     return {
         SetupTaskKind.ollama_pull: lambda report: ollama_pull_action(
@@ -184,6 +199,8 @@ def setup_task_actions(
             environ=adapters.environ,
             client_factory=release_client,
             run=adapters.run,
+            popen=adapters.popen,
+            read_system_proxy=adapters.read_system_proxy,
             on_replace_start=on_replace_start,
             cancel_event=cancel_event,
         ),

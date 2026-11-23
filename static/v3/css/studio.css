@@ -390,17 +390,6 @@ body.v3-studio {
   width: 180px;
 }
 
-.box-loading .progress > i {
-  width: 45%;
-  border-radius: var(--radius-pill);
-  animation: v3-indeterminate 1.4s ease-in-out infinite;
-}
-
-@keyframes v3-indeterminate {
-  0% { transform: translateX(-100%); }
-  100% { transform: translateX(240%); }
-}
-
 .box-error {
   padding: var(--sp-3) var(--sp-4);
   border-radius: var(--radius-md);

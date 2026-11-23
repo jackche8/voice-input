@@ -2332,6 +2332,66 @@ async function runUnit() {
     pass("mapAudioInputs 正确映射设备列表、空列表与 null");
   } else fail("mapAudioInputs 映射异常：" + JSON.stringify({ mappedAudio: mappedAudio, mappedAudioEmpty: mappedAudioEmpty }));
 
+  /* formatBytes B / KB / MB / GB 边界与 mapProgress 未知总量（GB）映射 */
+  const GIB = 1024 * 1024 * 1024;
+  const MIB = 1024 * 1024;
+  const twoPoint86GiB = Math.round(2.86 * GIB);
+  const fmtChecks = {
+    zero: B.formatBytes(0),
+    bMax: B.formatBytes(1023),
+    kbMin: B.formatBytes(1024),
+    mbMin: B.formatBytes(MIB),
+    mbBeforeGib: B.formatBytes(GIB - MIB),
+    gbMin: B.formatBytes(GIB),
+    gb286: B.formatBytes(twoPoint86GiB),
+    neg: B.formatBytes(-1),
+    nan: B.formatBytes(NaN),
+    inf: B.formatBytes(Infinity),
+    nullVal: B.formatBytes(null)
+  };
+  if (
+    fmtChecks.zero === "0 B"
+    && fmtChecks.bMax === "1023 B"
+    && fmtChecks.kbMin === "1 KB"
+    && fmtChecks.mbMin === "1 MB"
+    && fmtChecks.mbBeforeGib === "1023 MB"
+    && fmtChecks.gbMin === "1.00 GB"
+    && fmtChecks.gb286 === "2.86 GB"
+    && fmtChecks.neg === null
+    && fmtChecks.nan === null
+    && fmtChecks.inf === null
+    && fmtChecks.nullVal === null
+  ) {
+    pass("formatBytes 正确覆盖 B / KB / MB / GB 边界与非法输入（1 GiB=1.00 GB，2.86 GiB=2.86 GB）");
+  } else fail("formatBytes 边界格式化异常：" + JSON.stringify(fmtChecks));
+
+  const progUnknownTotal = B.mapProgress({
+    completed_bytes: twoPoint86GiB,
+    total_bytes: null,
+    percent: null,
+    stage: "正在下载 torch-2.9.1+cu128"
+  });
+  const progKnownTotal = B.mapProgress({
+    completed_bytes: GIB,
+    total_bytes: Math.round(3.5 * GIB),
+    percent: 28.6,
+    stage: "download"
+  });
+  if (
+    progUnknownTotal
+    && progUnknownTotal.receivedLabel === "2.86 GB"
+    && progUnknownTotal.totalLabel === null
+    && progUnknownTotal.percent === null
+    && progUnknownTotal.stage === "正在下载 torch-2.9.1+cu128"
+    && progKnownTotal
+    && progKnownTotal.receivedLabel === "1.00 GB"
+    && progKnownTotal.totalLabel === "3.50 GB"
+    && progKnownTotal.percent === 28.6
+    && B.mapProgress(null) === null
+  ) {
+    pass("mapProgress 在 total_bytes=null/percent=null 时真实映射为 GB 字节标签且不编造百分比");
+  } else fail("mapProgress GB 映射异常：" + JSON.stringify({ progUnknownTotal: progUnknownTotal, progKnownTotal: progKnownTotal }));
+
   /* 主题持久化、连点乱序、错误回滚、并发其他配置防旧 theme 闪回、503 隔离与麦克风刷新/保存 */
   const audioThemeWorld = createWorld();
   audioThemeWorld.serverConfig = {
