@@ -15,7 +15,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from typing import Literal
 
-from _contracts import ComponentName, ComponentState, ComponentStatus
+from _contracts import UPGRADE_STOP_REASON, ComponentName, ComponentState, ComponentStatus
 from _supervision.spec import ComponentSpec
 
 MAX_CONSECUTIVE_FAILURES = 5
@@ -81,6 +81,9 @@ def _stop(m: Machine, now: float, reason: str) -> tuple[Machine, tuple[Intent, .
 
 
 def _try_start(m: Machine, spec: ComponentSpec, probe: Probe, now: float) -> tuple[Machine, tuple[Intent, ...]]:
+    missing = spec.installed()
+    if missing is not None:
+        return _enter(m, ComponentState.not_installed, now, reason=missing, failures=0, pid=None), ()
     owner = probe.port_owner()
     if owner is not None:
         return _stop(m, now, f"端口 {spec.port} 被 {owner}占用，未抢占")
@@ -136,10 +139,10 @@ def retry(m: Machine, now: float) -> Machine:
     return replace(_enter(m, ComponentState.backing_off, now, reason=m.reason, failures=0), retry_at=now)
 
 
-def stop(m: Machine, now: float) -> tuple[Machine, tuple[Intent, ...]]:
-    """应用退出：有进程的先终止会话；状态置 stopped，原因「应用退出」，不发通知。"""
+def stop(m: Machine, now: float, *, reason: str = APP_EXIT_REASON) -> tuple[Machine, tuple[Intent, ...]]:
+    """主动停服（应用退出或升级停服）：有进程的先终止会话；状态置 stopped，不发通知。"""
     intents: tuple[Intent, ...] = (TerminateSession(),) if m.pid is not None else ()
-    return _enter(m, ComponentState.stopped, now, reason=APP_EXIT_REASON, pid=None), intents
+    return _enter(m, ComponentState.stopped, now, reason=reason, pid=None), intents
 
 
 def _iso(mono: float, *, mono_now: float, wall_now: float) -> str:
@@ -163,6 +166,7 @@ __all__ = [
     "BACKOFF_S",
     "MAX_CONSECUTIVE_FAILURES",
     "STABLE_RESET_S",
+    "UPGRADE_STOP_REASON",
     "Intent",
     "Machine",
     "Notify",

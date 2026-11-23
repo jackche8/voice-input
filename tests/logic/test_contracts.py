@@ -284,6 +284,7 @@ def test_product_events_are_typed_not_style_text():
         ProductHistoryWriteFailedEvent(job_id="j", message="disk", error=ErrorCode.history_io),
         ProductDeliveryUnknownEvent(job_id="j", text="maybe"),
         ProductComponentCommandEvent(action="retry", component=ComponentName.asr),
+        ProductComponentCommandEvent(action="stop", component=ComponentName.asr),
         ProductConfigChangedEvent(),
     ]
     seen: set[str] = set()
@@ -315,8 +316,16 @@ def test_component_report_carries_each_component_exactly_once():
     ):
         with pytest.raises(ValidationError):
             ComponentReport(components=broken)
-    with pytest.raises(ValidationError):  # 命令只有 retry；「已安装」由看护层按文件发现，不经事件
-        ProductSSEEventEnvelope.model_validate({"event": "component_command", "action": "installed", "component": "asr"})
+    stop_ev = ProductSSEEventEnvelope.model_validate(
+        {"event": "component_command", "action": "stop", "component": "asr"}
+    )
+    assert isinstance(stop_ev.root, ProductComponentCommandEvent)
+    assert stop_ev.root.action == "stop" and stop_ev.root.component == ComponentName.asr
+    for bad_action in ("installed", "restart", ""):
+        with pytest.raises(ValidationError):  # 命令只允许 retry / stop；「已安装」由看护层按文件发现，不经事件
+            ProductSSEEventEnvelope.model_validate(
+                {"event": "component_command", "action": bad_action, "component": "asr"}
+            )
 
 
 def test_openapi_skeleton_includes_both_sse_families_and_no_fake_paths():

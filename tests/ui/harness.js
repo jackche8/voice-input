@@ -412,6 +412,98 @@
       "装齐进行中重读状态不重建按钮（点击不被吞），按钮禁用并显示安装中"
     );
 
+    /* 一键装齐运行中隐藏并禁用 asr 重试按钮（防换 venv 期间误点撞锁），ollama / server 不受影响；非 running 态恢复 */
+    const asrRetryBtn = asrRow.querySelector("button");
+    const ollamaRetryBtn = ollamaRow.querySelector("button");
+    home.setState({
+      connection: "connected",
+      installAll: V3Fixtures.setupDownloading.installAll,
+      components: [
+        { name: "ollama", state: "stopped", reason: "端口 11434 被占用", failures: 1 },
+        { name: "asr", state: "stopped", reason: "正在升级识别运行环境", failures: 0 },
+        { name: "server", state: "stopped", reason: "服务已停止", failures: 1 }
+      ]
+    });
+    const serverRow = setupPane.querySelector('[data-component="server"]');
+    const serverRetryBtn = serverRow.querySelector("button");
+    assert(
+      asrRow.querySelector("button") === asrRetryBtn && asrRetryBtn.hidden === true && asrRetryBtn.disabled === true,
+      "一键装齐 running 且 asr 为 stopped 时隐藏并禁用 asr 重试按钮"
+    );
+    const actionsBeforeBlockedAsr = setupActions.length;
+    asrRetryBtn.click();
+    assert(
+      setupActions.length === actionsBeforeBlockedAsr,
+      "一键装齐 running 时点击被禁用的 asr 重试按钮不触发 onRetryComponent"
+    );
+    assert(
+      ollamaRow.querySelector("button") === ollamaRetryBtn && ollamaRetryBtn.hidden === false && ollamaRetryBtn.disabled === false,
+      "一键装齐 running 时同样 stopped 的 ollama 重试按钮仍可见可用"
+    );
+    assert(
+      !!serverRetryBtn && serverRetryBtn.hidden === false && serverRetryBtn.disabled === false,
+      "一键装齐 running 时同样 stopped 的 server 重试按钮仍可见可用"
+    );
+    const actionsBeforeOllamaRunning = setupActions.length;
+    ollamaRetryBtn.click();
+    assert(
+      setupActions.length === actionsBeforeOllamaRunning + 1 && setupActions[setupActions.length - 1] === "retry:ollama",
+      "一键装齐 running 时点击 ollama 重试按钮正常触发 onRetryComponent('ollama')"
+    );
+
+    ["failed", "done", "idle"].forEach(function (nonRunningState) {
+      home.setState({
+        installAll: {
+          state: nonRunningState,
+          current: null,
+          steps: V3Fixtures.setupDownloading.installAll.steps
+        }
+      });
+      assert(
+        asrRow.querySelector("button") === asrRetryBtn && asrRetryBtn.hidden === false && asrRetryBtn.disabled === false,
+        "installAll.state=" + nonRunningState + " 且 asr 为 stopped 时恢复展示可用 asr 重试按钮"
+      );
+    });
+    const actionsBeforeAsrRecover = setupActions.length;
+    asrRetryBtn.click();
+    assert(
+      setupActions.length === actionsBeforeAsrRecover + 1 && setupActions[setupActions.length - 1] === "retry:asr",
+      "非 running 态恢复展示后点击 asr 重试按钮正常触发 onRetryComponent('asr')"
+    );
+
+    /* ASR 模型卡片副标题如实呈现 deviceLabel 升级提示与旧驱动提示文案 */
+    const upgradeDeviceLabel = "CPU（检测到 NVIDIA GPU，点「一键装齐」可升级 GPU 加速）";
+    home.setState({
+      connection: "connected",
+      asr: {
+        status: "ready",
+        sidecarRunning: true,
+        sizeLabel: "3.5 GB",
+        deviceLabel: upgradeDeviceLabel,
+        message: ""
+      }
+    });
+    const asrModelSubUpgrade = setupPane.querySelectorAll(".row")[0].querySelector(".row-sub");
+    assert(
+      !!asrModelSubUpgrade && asrModelSubUpgrade.textContent.indexOf(upgradeDeviceLabel) !== -1,
+      "ASR 卡片副标题正常呈现 deviceLabel 升级提示文案"
+    );
+    const oldDriverDeviceLabel = "CPU（检测到 NVIDIA 驱动版本过低 < 570，请升级驱动后再启用 GPU 加速）";
+    home.setState({
+      asr: {
+        status: "ready",
+        sidecarRunning: true,
+        sizeLabel: "3.5 GB",
+        deviceLabel: oldDriverDeviceLabel,
+        message: ""
+      }
+    });
+    const asrModelSubOldDriver = setupPane.querySelectorAll(".row")[0].querySelector(".row-sub");
+    assert(
+      !!asrModelSubOldDriver && asrModelSubOldDriver.textContent.indexOf(oldDriverDeviceLabel) !== -1,
+      "ASR 卡片副标题正常呈现 deviceLabel 旧驱动提示文案"
+    );
+
     home.setState(Object.assign({}, V3Fixtures.setupConnected, {
       apiPaths: [
         { method: "GET", path: "/api/setup/check", operationId: "setup_check_api_setup_check_get", access: "local" },

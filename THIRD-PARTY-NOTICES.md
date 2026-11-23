@@ -21,9 +21,9 @@ Under both the `AGPL-3.0-only` open-source distribution and the Commercial Licen
 
 ---
 
-## 2. Permissive Core Dependencies / 核心宽松许可依赖
+## 2. Permissive Core Dependencies & Bundled Components / 核心宽松许可依赖与随包分发组件
 
-| Component | License | Project URL |
+| Component | License | Project URL / Distribution Notes |
 |---|---|---|
 | **FastAPI** | MIT | <https://fastapi.tiangolo.com/> |
 | **Starlette** | BSD-3-Clause | <https://www.starlette.io/> |
@@ -40,18 +40,21 @@ Under both the `AGPL-3.0-only` open-source distribution and the Commercial Licen
 | **qrcode** | BSD-3-Clause | <https://github.com/lincolnloop/python-qrcode> |
 | **evdev** (Linux) | BSD-3-Clause | <https://github.com/gvalkov/python-evdev> |
 | **pywebview** (Windows / macOS) | BSD-3-Clause | <https://pywebview.flowrl.com/> |
+| **Tesseract OCR 5** (Windows bundle) | Apache-2.0 | <https://github.com/tesseract-ocr/tesseract> — Bundled inside Windows installer under `_internal/tesseract/` (`tesseract.exe` & runtime DLLs) |
+| **Leptonica** (Windows Tesseract runtime) | BSD-2-Clause | <https://github.com/DanBloomberg/leptonica> — Dynamically linked library bundled with Windows Tesseract 5 under `_internal/tesseract/` |
+| **Tesseract `tessdata_fast 4.1.0`** (`chi_sim`, `chi_tra`, `eng`; Windows bundle) | Apache-2.0 | <https://github.com/tesseract-ocr/tessdata_fast> — SHA256-verified traineddata bundled inside Windows installer under `_internal/tesseract/tessdata/` |
 
 ---
 
 ## 3. External System Tools & On-Demand Downloaded Runtimes / 外部系统工具与按需下载组件
 
-The following components are **not embedded inside this repository or installer binaries**; they are either installed as independent OS packages or downloaded on demand into the user's data directory when the user triggers one-click setup:
+The following components are **not embedded inside this repository or installer binaries** (except Tesseract OCR 5 & `tessdata_fast 4.1.0`, which are bundled in the Windows installer as noted in Section 2); they are either installed as independent OS packages or downloaded on demand into the user's data directory when the user triggers one-click setup:
 
-| Component | License | Project URL |
+| Component | License | Project URL / Notes |
 |---|---|---|
-| **Ollama** | MIT | <https://github.com/ollama/ollama> |
-| **uv** | Apache-2.0 OR MIT | <https://github.com/astral-sh/uv> |
-| **Qwen3-ASR** (model & runtime) | Apache-2.0 | <https://github.com/QwenLM/Qwen3-ASR> |
-| **Tesseract OCR** (Linux system dependency) | Apache-2.0 | <https://github.com/tesseract-ocr/tesseract> |
+| **Ollama** | MIT | <https://github.com/ollama/ollama> — Downloaded on demand into user data directory |
+| **uv** | Apache-2.0 OR MIT | <https://github.com/astral-sh/uv> — Downloaded on demand into user data directory |
+| **Qwen3-ASR** (model & runtime) | Apache-2.0 | <https://github.com/QwenLM/Qwen3-ASR> — Downloaded on demand into isolated ASR venv |
+| **Tesseract OCR** (Linux system dependency / macOS external tool) | Apache-2.0 | <https://github.com/tesseract-ocr/tesseract> — Linux `.deb` depends on OS `tesseract-ocr` packages; Windows installer bundles Tesseract 5 + `tessdata_fast 4.1.0` directly (see Section 2) |
 
-Full texts of standard licenses (`LGPL-3.0`, `LGPL-2.1`, `Apache-2.0`, `MIT`, `BSD-3-Clause`) are available from <https://opensource.org/licenses/> and <https://www.gnu.org/licenses/> (and on Debian/Ubuntu systems under `/usr/share/common-licenses/`).
+Full texts of standard licenses (`LGPL-3.0`, `LGPL-2.1`, `Apache-2.0`, `MIT`, `BSD-3-Clause`, `BSD-2-Clause`) are available from <https://opensource.org/licenses/> and <https://www.gnu.org/licenses/> (and on Debian/Ubuntu systems under `/usr/share/common-licenses/`).

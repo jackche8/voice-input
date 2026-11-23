@@ -204,18 +204,51 @@ def test_macos_and_windows_packaging_scripts_and_inno_setup():
     for forbidden in ("ollama-voice-input-window.exe", "IGNORE_SSL_ERRORS", "PYTHONHTTPSVERIFY", "SSL_CERT_FILE"):
         assert forbidden not in iss_src, f"installer.iss 违规包含 {forbidden!r}"
 
-    # Windows build.ps1 关键步骤
+    # Windows build.ps1 关键步骤（防 Chocolatey shim、DLL 强校验、tessdata_fast 4.1.0 SHA256、含空格去 PATH 双路径冒烟）
     ps1_src = WIN_BUILD.read_text(encoding="utf-8")
     for token in (
         "APP_VERSION",
         r"packaging\pyinstaller\ollama-voice-input.spec",
         r"dist\ollama-voice-input\ollama-voice-input.exe",
         r"_internal\_asr_runtime\runtimes\asr\server.py",
+        r"${env:ProgramFiles}\Tesseract-OCR",
+        r"${env:ProgramFiles(x86)}\Tesseract-OCR",
+        "Get-Command tesseract",
+        r"chocolatey\\bin",
+        r"dist\ollama-voice-input\_internal\tesseract",
+        "tesseract.exe",
+        "*.dll",
+        "*tesseract*.dll",
+        "*lept*.dll",
+        r"tessdata\configs",
+        "https://github.com/tesseract-ocr/tessdata_fast/raw/4.1.0",
+        "7d4322bd2a7749724879683fc3912cb542f19906c83bcc1a52132556427170b2",
+        "a5fcb6f0db1e1d6d8522f39db4e848f05984669172e584e8d76b6b3141e1f730",
+        "529c5b5797d64b126065cd55f2bb4c7fd7b15790798091b1ff259941a829330b",
+        "Get-FileHash",
+        "-Algorithm SHA256",
+        r".pp\tmp\Ollama Voice Input",
+        "Remove-Item Env:TESSDATA_PREFIX",
+        "--list-langs",
+        r"docs\site\assets\workbench-light.png",
+        "_ocr.image_to_text",
+        "_ocr_layout.extract_ocr_layout",
         '"/DMyAppVersion=$Version"',
         r"packaging\windows\installer.iss",
         "Ollama-Voice-Input-$Version-windows-x64-setup.exe",
     ):
         assert token in ps1_src, f"windows/build.ps1 缺少 {token!r}"
+    # 必须先查 Program Files\Tesseract-OCR 再兜底 Get-Command tesseract，防止误拷贝 Chocolatey shim
+    assert ps1_src.index(r"${env:ProgramFiles}\Tesseract-OCR") < ps1_src.index("Get-Command tesseract")
+    # 拷贝后强校验 *tesseract*.dll 与 *lept*.dll；PATH 过滤显式剥离 chocolatey\bin
+    staged_idx = ps1_src.index(r"dist\ollama-voice-input\_internal\tesseract")
+    assert "*tesseract*.dll" in ps1_src[staged_idx:] and "*lept*.dll" in ps1_src[staged_idx:]
+    filter_idx = ps1_src.index("$FilteredPath")
+    assert r"chocolatey\\bin" in ps1_src[filter_idx : filter_idx + 400]
+    # 含空格双路径冒烟（image_to_text + extract_ocr_layout）必须在编 Inno Setup 安装包之前完成
+    assert ps1_src.index("_ocr.image_to_text") < ps1_src.index("_ocr_layout.extract_ocr_layout") < ps1_src.index(
+        r"packaging\windows\installer.iss"
+    )
 
 
 def test_release_workflow_yaml_enforces_security_runners_checksums_and_tag_only_publish():
@@ -267,6 +300,9 @@ def test_release_workflow_yaml_enforces_security_runners_checksums_and_tag_only_
         assert job["runs-on"] == runner
         py_step = next(s for s in job["steps"] if "actions/setup-python@v5" in s.get("uses", ""))
         assert str(py_step["with"]["python-version"]) == "3.12"
+    win_runs = "\n".join(s.get("run", "") for s in jobs["build-windows"]["steps"])
+    assert "choco install -y tesseract" in win_runs, "build-windows 缺少安装 Tesseract 5 步骤"
+    assert win_runs.index("choco install -y tesseract") < win_runs.index(r"packaging\windows\build.ps1")
 
     # publish-release：依赖全部 4 任务、basename SHA256SUMS.txt、仅 tag 发 softprops/action-gh-release@v2
     pub = jobs["publish-release"]
@@ -310,6 +346,13 @@ def test_dual_license_notices_and_packaging_readme_are_complete():
         "Ollama",
         "Qwen3-ASR",
         "--onedir",
+        "Tesseract OCR 5",
+        "Leptonica",
+        "BSD-2-Clause",
+        "tessdata_fast 4.1.0",
+        "Apache-2.0",
+        "_internal/tesseract/",
+        "Linux system dependency",
     ):
         assert token in notices, f"THIRD-PARTY-NOTICES.md 缺少 {token!r}"
 

@@ -18,7 +18,7 @@ import traceback
 from dataclasses import replace
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
-from typing import Protocol
+from typing import Literal, Protocol
 
 from _contracts import ComponentName, ComponentState, ComponentStatus, ErrorCode
 from _paths import AppPaths
@@ -85,7 +85,7 @@ class Supervisor:
         self._specs_by_name: dict[ComponentName, ComponentSpec] = {}
         self._stopping = False
         self._last_fault: str | None = None
-        self._commands: queue.Queue[ComponentName] = queue.Queue()
+        self._commands: queue.Queue[tuple[Literal["retry", "stop"], ComponentName, str | None]] = queue.Queue()
         self._stop = threading.Event()
         self._lock = threading.Lock()
         self._snapshot: list[ComponentStatus] = []
@@ -98,7 +98,11 @@ class Supervisor:
 
     def retry(self, name: ComponentName | str) -> None:
         """设置页/托盘「重试」：线程安全，下一轮处理。"""
-        self._commands.put(ComponentName(name))
+        self._commands.put(("retry", ComponentName(name), None))
+
+    def stop_component(self, name: ComponentName | str, reason: str = sm.UPGRADE_STOP_REASON) -> None:
+        """主动停服（如升级识别运行环境）：仅入队，绝不阻塞调用方/Qt 主线程；下一轮看护线程处理。"""
+        self._commands.put(("stop", ComponentName(name), reason))
 
     def stop(self, timeout_s: float) -> None:
         """退出路径调用：看护线程按 server → asr → ollama 逆序终止各组件会话后结束。"""
@@ -131,11 +135,18 @@ class Supervisor:
 
     def tick(self) -> None:
         now = self._mono()
-        while not self._commands.empty():
-            name = self._commands.get_nowait()
-            self._apply(name, sm.retry(self._machines[name], now), ())
         specs = self._specs()
         self._specs_by_name = {spec.name: spec for spec in specs}
+        while not self._commands.empty():
+            action, name, reason = self._commands.get_nowait()
+            if action == "retry":
+                self._apply(name, sm.retry(self._machines[name], now), (), spec=self._specs_by_name.get(name))
+            elif action == "stop":
+                current = self._machines[name]
+                if current.state == ComponentState.stopped and name not in self._handles and current.pid is not None:
+                    continue  # 先前终止失败保留了 pid 与原因：重复 stop 幂等保留失败态，绝不覆写
+                machine, intents = sm.stop(current, now, reason=reason or sm.UPGRADE_STOP_REASON)
+                self._apply(name, machine, intents, spec=self._specs_by_name.get(name))
         for spec in specs:
             handle = self._handles.get(spec.name)
             probe = sm.Probe(exit_code=None if handle is None else handle.poll(),
@@ -197,9 +208,13 @@ class Supervisor:
             if self._stopping:
                 self._fault(f"{LABELS[name]}{reason}", exc)
             else:
-                # 清理只由「失败」触发，状态机已为这次事件计过一次失败；「连续失败 5 次」按事件计，这里不再加计
+                # 清理失败时保留未退出进程的 pid 与原因：状态机已为这次事件计过一次失败（或已置 stopped），这里不再加计
                 current = self._machines[name]
-                self._machines[name] = replace(current, reason=f"{current.reason}；{reason}" if current.reason else reason)
+                self._machines[name] = replace(
+                    current,
+                    pid=handle.pid,
+                    reason=f"{current.reason}；{reason}" if current.reason else reason,
+                )
         problem = self._write_records()
         if problem is not None:
             self._fault(problem)

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import os
+import platform
 import subprocess
 import sys
 from pathlib import Path
@@ -30,7 +31,10 @@ from _v3.production import (
     SystemAdapters,
     compose_production_runtime,
     setup_task_actions,
+    setup_task_kinds,
+    setup_worker_kind,
 )
+from _v3.runtime_install import probe_asr_hardware
 from _v3_app import create_app
 from tests.api.providers import make_text_wav
 
@@ -91,8 +95,8 @@ class FakeRun:
 
     def __call__(self, cmd, **_kw):
         self.calls.append(list(cmd))
-        if cmd[0] == "nvidia-smi":  # 假单卡读数：16303 MiB 总量、14574 MiB 空闲（本机 06:3x EST 只读读数）
-            return subprocess.CompletedProcess(cmd, 0, stdout="0, GPU-fixture, 16303, 14574, Fixture GPU\n", stderr="")
+        if Path(cmd[0]).name.lower() in ("nvidia-smi", "nvidia-smi.exe"):
+            return subprocess.CompletedProcess(cmd, 0, stdout="0, GPU-fixture, 16303, 14574, 572.16, 8.9, Fixture GPU\n", stderr="")
         return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
 
 
@@ -525,7 +529,9 @@ def test_setup_worker_real_loopback_ollama_pull_fakeip_chain(tmp_path: Path):
         paths.ollama_binary.write_text("#!/bin/sh\n", encoding="utf-8")
         paths.ollama_binary.chmod(0o755)
         paths.asr_manifest.parent.mkdir(parents=True, exist_ok=True)
-        paths.asr_manifest.write_text(json.dumps({"variant": "cpu"}), encoding="utf-8")
+        host_probe = probe_asr_hardware(paths.os_name, platform.machine(), environ=env)
+        seeded_variant = host_probe.target_variant or "cpu"
+        paths.asr_manifest.write_text(json.dumps({"variant": seeded_variant}), encoding="utf-8")
         paths.asr_model_dir.mkdir(parents=True, exist_ok=True)
         (paths.asr_model_dir / "config.json").write_text("{}", encoding="utf-8")
         (paths.asr_model_dir / "model.safetensors").write_bytes(b"w")
@@ -585,3 +591,35 @@ def test_setup_worker_real_loopback_ollama_pull_fakeip_chain(tmp_path: Path):
         server.shutdown()
         server.server_close()
         thread.join(timeout=5)
+
+
+def test_asr_runtime_server_cleanup_is_noop_and_worker_cleanup_is_conditional(tmp_path: Path):
+    env = {
+        **{k: v for k, v in os.environ.items() if not k.startswith(("XDG_", "OVI_"))},
+        "HOME": str(tmp_path / "home"),
+        "XDG_CONFIG_HOME": str(tmp_path / "config"),
+        "XDG_DATA_HOME": str(tmp_path / "data"),
+        "XDG_RUNTIME_DIR": str(tmp_path / "run"),
+        "APPDATA": str(tmp_path / "appdata"),
+        "LOCALAPPDATA": str(tmp_path / "localappdata"),
+    }
+    paths = _paths_for(tmp_path / "srv")
+    paths.asr_venv.mkdir(parents=True)
+    paths.asr_manifest.parent.mkdir(parents=True, exist_ok=True)
+    paths.asr_manifest.write_text(json.dumps({"variant": "cpu"}), encoding="utf-8")
+    kinds = setup_task_kinds(paths, SystemAdapters(environ=env))
+    kinds[SetupTaskKind.asr_runtime_install].cleanup()
+    # 服务端 cleanup 绝不误删既有 cpu 环境
+    assert paths.asr_venv.is_dir() and paths.asr_manifest.is_file()
+
+    # worker 侧在进入替换阶段之前（on_replace_start 未触发）中止清理同样不动既有环境
+    from _paths import default_app_paths
+
+    live_paths = default_app_paths(env)
+    live_paths.asr_venv.mkdir(parents=True)
+    live_paths.asr_manifest.parent.mkdir(parents=True, exist_ok=True)
+    live_paths.asr_manifest.write_text(json.dumps({"variant": "cpu"}), encoding="utf-8")
+    _action, worker_cleanup, cancel_event = setup_worker_kind(SetupTaskKind.asr_runtime_install, env)
+    assert not cancel_event.is_set()
+    worker_cleanup()
+    assert live_paths.asr_venv.is_dir() and live_paths.asr_manifest.is_file()

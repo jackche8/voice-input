@@ -8,11 +8,11 @@
 
 Hold hotkey to speak → `Qwen3-ASR 1.7B` streaming recognition → local `qwen3.5:4b` typo-only polish → auto-type into any focused app
 
-[简体中文](README.md) · **English** &nbsp;|&nbsp; [🌐 Product Website](https://jackche8.github.io/voice-input/?lang=en) &nbsp;|&nbsp; [⬇️ Download v3.4.3](https://github.com/jackche8/voice-input/releases) &nbsp;|&nbsp; [📄 Commercial License](COMMERCIAL.md)
+[简体中文](README.md) · **English** &nbsp;|&nbsp; [🌐 Product Website](https://jackche8.github.io/voice-input/?lang=en) &nbsp;|&nbsp; [⬇️ Download v3.4.4](https://github.com/jackche8/voice-input/releases) &nbsp;|&nbsp; [📄 Commercial License](COMMERCIAL.md)
 
 <br />
 
-[![Version](https://img.shields.io/badge/Version-3.4.3-2563EB?style=flat-square)](https://github.com/jackche8/voice-input/releases/tag/v3.4.3)
+[![Version](https://img.shields.io/badge/Version-3.4.4-2563EB?style=flat-square)](https://github.com/jackche8/voice-input/releases/tag/v3.4.4)
 [![Website](https://img.shields.io/badge/Website-GitHub%20Pages-0F766E?style=flat-square)](https://jackche8.github.io/voice-input/?lang=en)
 [![Python](https://img.shields.io/badge/Python-3.11+-3776AB?style=flat-square&logo=python&logoColor=white)](https://python.org)
 [![Ollama](https://img.shields.io/badge/Ollama-0.40.16-111827?style=flat-square&logo=ollama)](https://ollama.com)
@@ -69,12 +69,12 @@ All hotkeys can be customized in **Models & Hotkeys** inside the main window (st
 
 Official packages are built automatically via GitHub Actions and published on [GitHub Releases](https://github.com/jackche8/voice-input/releases) (see [Packaging & Release Guide](packaging/README.md)):
 
-| Platform | Package (v3.4.3 Direct Link) | Install / Status Notes |
+| Platform | Package (v3.4.4 Direct Link) | Install / Status Notes |
 |:---|:---|:---|
-| **Linux** (Ubuntu 24.04 amd64, Python 3.12) | [`ollama-voice-input_3.4.3_amd64.deb`](https://github.com/jackche8/voice-input/releases/download/v3.4.3/ollama-voice-input_3.4.3_amd64.deb) | `sudo apt install ./ollama-voice-input_3.4.3_amd64.deb` (isolated venv, ships `uaccess` udev rules without manual `input` group; locally verified) |
-| **Windows** (x64) | [`Ollama-Voice-Input-3.4.3-windows-x64-setup.exe`](https://github.com/jackche8/voice-input/releases/download/v3.4.3/Ollama-Voice-Input-3.4.3-windows-x64-setup.exe) | Per-user Inno Setup installer; **unsigned and not yet verified on real Windows hardware** |
-| **macOS** (Apple Silicon arm64) | [`Ollama-Voice-Input-3.4.3-macos-arm64.dmg`](https://github.com/jackche8/voice-input/releases/download/v3.4.3/Ollama-Voice-Input-3.4.3-macos-arm64.dmg) | Drag to `Applications`; **unnotarized and not yet verified on real macOS hardware** |
-| **Checksums** | [`SHA256SUMS.txt`](https://github.com/jackche8/voice-input/releases/download/v3.4.3/SHA256SUMS.txt) | Verify downloads with `sha256sum -c SHA256SUMS.txt` |
+| **Linux** (Ubuntu 24.04 amd64, Python 3.12) | [`ollama-voice-input_3.4.4_amd64.deb`](https://github.com/jackche8/voice-input/releases/download/v3.4.4/ollama-voice-input_3.4.4_amd64.deb) | `sudo apt install ./ollama-voice-input_3.4.4_amd64.deb` (isolated venv, ships `uaccess` udev rules without manual `input` group; locally verified) |
+| **Windows** (x64) | [`Ollama-Voice-Input-3.4.4-windows-x64-setup.exe`](https://github.com/jackche8/voice-input/releases/download/v3.4.4/Ollama-Voice-Input-3.4.4-windows-x64-setup.exe) | Per-user Inno Setup installer; **unsigned and not yet verified on real Windows hardware** |
+| **macOS** (Apple Silicon arm64) | [`Ollama-Voice-Input-3.4.4-macos-arm64.dmg`](https://github.com/jackche8/voice-input/releases/download/v3.4.4/Ollama-Voice-Input-3.4.4-macos-arm64.dmg) | Drag to `Applications`; **unnotarized and not yet verified on real macOS hardware** |
+| **Checksums** | [`SHA256SUMS.txt`](https://github.com/jackche8/voice-input/releases/download/v3.4.4/SHA256SUMS.txt) | Verify downloads with `sha256sum -c SHA256SUMS.txt` |
 
 <details>
 <summary>⚠️ First-Open Guidance for Unsigned Installers (Windows SmartScreen / macOS Gatekeeper)</summary>

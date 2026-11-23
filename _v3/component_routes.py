@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import threading
+from collections.abc import Callable
 
 from fastapi import APIRouter
 
@@ -37,7 +38,12 @@ class ComponentRegistry:
         return next((item for item in self.snapshot() if item.name == name), None)
 
 
-def build_component_router(registry: ComponentRegistry, events: EventBus) -> APIRouter:
+def build_component_router(
+    registry: ComponentRegistry,
+    events: EventBus,
+    *,
+    asr_retry_blocked_reason: Callable[[], str | None] | None = None,
+) -> APIRouter:
     router = APIRouter(tags=["components"])
 
     @router.post("/api/v1/components", response_model=ComponentReportAccepted, status_code=202)
@@ -49,7 +55,12 @@ def build_component_router(registry: ComponentRegistry, events: EventBus) -> API
     def retry_component(name: str) -> ComponentRetryAccepted:
         if name not in ComponentName.__members__:
             raise LogicError(ErrorCode.not_found, f"没有组件 {name!r}", {"known": [n.value for n in ComponentName]})
-        events.publish(ProductComponentCommandEvent(action="retry", component=ComponentName(name)))
+        component = ComponentName(name)
+        if component == ComponentName.asr and asr_retry_blocked_reason is not None:
+            reason = asr_retry_blocked_reason()
+            if reason:
+                raise LogicError(ErrorCode.conflict, reason)
+        events.publish(ProductComponentCommandEvent(action="retry", component=component))
         return ComponentRetryAccepted()
 
     return router

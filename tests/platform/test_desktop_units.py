@@ -1885,10 +1885,14 @@ def test_component_command_and_config_changed_go_to_app_callbacks():
     commands: list[tuple[str, str]] = []
     reloads: list[bool] = []
     untouched = SimpleNamespace()  # 底栏与托盘没有任何方法：给应用自身的命令若去改它们会直接报错
-    for ev in ({"event": "component_command", "action": "retry", "component": "server"}, {"event": "config_changed"}):
+    for ev in (
+        {"event": "component_command", "action": "retry", "component": "server"},
+        {"event": "component_command", "action": "stop", "component": "asr"},
+        {"event": "config_changed"},
+    ):
         dispatch_product_event(ev, hud=untouched, tray=untouched, on_component_command=lambda a, c: commands.append((a, c)),
                                on_config_changed=lambda: reloads.append(True))
-    assert commands == [("retry", "server")] and reloads == [True]
+    assert commands == [("retry", "server"), ("stop", "asr")] and reloads == [True]
 
 
 def test_product_event_loop_exponential_backoff_and_hud_dispatch():

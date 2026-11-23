@@ -20,7 +20,31 @@ from _platform.child_process import (
 JOB_OBJECT_EXTENDED_LIMIT_INFORMATION_CLASS = 9
 JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000
 PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+PROCESS_TERMINATE = 0x0001
+SYNCHRONIZE = 0x00100000
+TH32CS_SNAPPROCESS = 0x00000002
+INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
 TERMINATED_EXIT_CODE = 1
+
+
+class ProcessTreeApi(Protocol):
+    def list_processes(self) -> list[tuple[int, int]]: ...
+    def terminate_and_wait(self, pid: int, timeout_ms: int) -> bool: ...
+
+
+class _ProcessEntry32W(ctypes.Structure):
+    _fields_ = [
+        ("dwSize", ctypes.c_uint32),
+        ("cntUsage", ctypes.c_uint32),
+        ("th32ProcessID", ctypes.c_uint32),
+        ("th32DefaultHeapID", ctypes.c_size_t),
+        ("th32ModuleID", ctypes.c_uint32),
+        ("cntThreads", ctypes.c_uint32),
+        ("th32ParentProcessID", ctypes.c_uint32),
+        ("pcPriClassBase", ctypes.c_int32),
+        ("dwFlags", ctypes.c_uint32),
+        ("szExeFile", ctypes.c_wchar * 260),
+    ]
 
 
 class JobApi(Protocol):
@@ -164,12 +188,97 @@ def kill_recorded(pid: int, identity: str | None, *, api: JobApi, run=subprocess
     return [pid]
 
 
+class CtypesProcessTreeApi:
+    """基于 Win32 Toolhelp 快照与 TerminateProcess/WaitForSingleObject 的后代进程树终结实现。"""
+
+    def __init__(self) -> None:
+        windll = getattr(ctypes, "windll", None)
+        if windll is None:
+            raise RuntimeError("当前系统不支持 ctypes.windll（非 Windows 平台）")
+        self._k = windll.kernel32
+        self._k.CreateToolhelp32Snapshot.restype = ctypes.c_void_p
+        self._k.OpenProcess.restype = ctypes.c_void_p
+
+    def list_processes(self) -> list[tuple[int, int]]:
+        snap = self._k.CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
+        if not snap or snap == INVALID_HANDLE_VALUE:
+            err = ctypes.WinError()
+            raise OSError(err.errno, f"CreateToolhelp32Snapshot 失败：{err.strerror}")
+        pairs: list[tuple[int, int]] = []
+        try:
+            entry = _ProcessEntry32W()
+            entry.dwSize = ctypes.sizeof(_ProcessEntry32W)
+            ok = self._k.Process32FirstW(ctypes.c_void_p(snap), ctypes.byref(entry))
+            while ok:
+                pairs.append((int(entry.th32ProcessID), int(entry.th32ParentProcessID)))
+                ok = self._k.Process32NextW(ctypes.c_void_p(snap), ctypes.byref(entry))
+        finally:
+            self._k.CloseHandle(ctypes.c_void_p(snap))
+        return pairs
+
+    def terminate_and_wait(self, pid: int, timeout_ms: int) -> bool:
+        handle = self._k.OpenProcess(PROCESS_TERMINATE | SYNCHRONIZE, False, int(pid))
+        if not handle:
+            return False
+        try:
+            terminated = bool(self._k.TerminateProcess(ctypes.c_void_p(handle), TERMINATED_EXIT_CODE))
+            self._k.WaitForSingleObject(ctypes.c_void_p(handle), max(0, int(timeout_ms)))
+            return terminated
+        finally:
+            self._k.CloseHandle(ctypes.c_void_p(handle))
+
+
+def collect_descendant_pids(root_pid: int, pairs: Sequence[tuple[int, int]]) -> list[int]:
+    """从 (pid, ppid) 列表递归收集 root_pid 的全部后代 PID（绝不包含 root_pid 自身，孙进程优先以便由叶向根清理）。"""
+    children_by_parent: dict[int, list[int]] = {}
+    for pid, ppid in pairs:
+        if pid == root_pid or pid == ppid:
+            continue
+        children_by_parent.setdefault(ppid, []).append(pid)
+    visited: set[int] = {root_pid}
+    postorder: list[int] = []
+
+    def dfs(parent: int) -> None:
+        for child in children_by_parent.get(parent, ()):
+            if child in visited:
+                continue
+            visited.add(child)
+            dfs(child)
+            postorder.append(child)
+
+    dfs(root_pid)
+    return postorder
+
+
+def terminate_descendants(
+    root_pid: int,
+    *,
+    timeout_s: float = 5.0,
+    api: ProcessTreeApi | None = None,
+) -> list[int]:
+    """终止 root_pid 派生的全部后代进程（排除 root_pid 自身，不自杀），返回成功发送终止的 PID。"""
+    tree_api = CtypesProcessTreeApi() if api is None else api
+    timeout_ms = max(0, int(timeout_s * 1000))
+    descendants = collect_descendant_pids(root_pid, tree_api.list_processes())
+    killed: list[int] = []
+    for pid in descendants:
+        if pid == root_pid:
+            continue
+        if tree_api.terminate_and_wait(pid, timeout_ms):
+            killed.append(pid)
+    return killed
+
+
 __all__ = [
     "CREATE_NEW_PROCESS_GROUP",
     "CREATE_NO_WINDOW",
     "CtypesJobApi",
+    "CtypesProcessTreeApi",
     "JobApi",
+    "ProcessTreeApi",
     "WindowsChild",
+    "collect_descendant_pids",
     "kill_recorded",
     "spawn",
+    "terminate_descendants",
 ]

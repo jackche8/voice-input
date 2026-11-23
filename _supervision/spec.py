@@ -6,7 +6,6 @@ asr 的变体（cuda / cpu / mps）只读运行环境清单 `paths.asr_manifest`
 """
 from __future__ import annotations
 
-import json
 import shutil
 import subprocess
 from collections.abc import Callable, Mapping
@@ -18,19 +17,26 @@ import httpx
 from _contracts import ComponentName
 from _jobs_client import build_tls_context
 from _paths import INTERNAL_SERVER_FLAG, AppPaths, asr_runtime_root, internal_subcommand
+from _platform.protocol import OsName
 from _platform.system_proxy import SystemProxyReader, merge_proxy_env, read_os_system_proxy
 from _ports import LocalPorts, local_ports
-from _supervision.gpu_preflight import asr_gpu_preflight
-from _v3.setup_probe import probe_asr_sidecar, probe_asr_weights, probe_ollama
+from _supervision.gpu_preflight import asr_gpu_preflight, asr_windows_cuda_preflight
+from _v3.setup_probe import ASR_VARIANTS, asr_variant, probe_asr_sidecar, probe_asr_weights, probe_ollama
 
 READY_TIMEOUT_S = 3.0
-ASR_VARIANTS = ("cuda", "cpu", "mps")
-_VARIANT_ARGS: Mapping[str, tuple[str, ...]] = {
-    "cuda": ("--backend", "vllm", "--gpu-memory-utilization", "0.45", "--max-model-len", "4096"),
-    "cpu": ("--backend", "transformers", "--device", "cpu"),
-    "mps": ("--backend", "transformers", "--device", "mps"),
-}
 Runner = Callable[..., subprocess.CompletedProcess]
+
+
+def _asr_variant_args(variant: str | None, os_name: OsName) -> tuple[str, ...]:
+    if variant == "cuda":
+        if os_name == "windows":
+            return ("--backend", "transformers", "--device", "cuda")
+        return ("--backend", "vllm", "--gpu-memory-utilization", "0.45", "--max-model-len", "4096")
+    if variant == "cpu":
+        return ("--backend", "transformers", "--device", "cpu")
+    if variant == "mps":
+        return ("--backend", "transformers", "--device", "mps")
+    return ()
 
 
 @dataclass(frozen=True)
@@ -56,20 +62,6 @@ class ComponentSpec:
     start_timeout_s: float
     stop_timeout_s: float
     preflight: Callable[[], str | None] = _no_preflight  # None = 通过；否则拒启原因
-
-
-def asr_variant(paths: AppPaths) -> str | None:
-    """清单不存在 → None（未安装）；清单损坏或变体未知 → ValueError（带清单路径）。"""
-    try:
-        raw = json.loads(paths.asr_manifest.read_text(encoding="utf-8"))
-    except FileNotFoundError:
-        return None
-    except (OSError, ValueError) as exc:
-        raise ValueError(f"识别运行环境清单 {paths.asr_manifest} 无法读取：{exc}") from exc
-    variant = raw.get("variant") if isinstance(raw, dict) else None
-    if variant not in ASR_VARIANTS:
-        raise ValueError(f"识别运行环境清单 {paths.asr_manifest} 的 variant={variant!r} 不是 {ASR_VARIANTS} 之一")
-    return variant
 
 
 def _http_ready(url: str, check: Callable[[httpx.Client], ReadyResult], *, verify: Callable[[], object] = lambda: True) -> ReadyResult:
@@ -115,6 +107,7 @@ def _asr(
     which: Callable[[str], str | None],
     run: Runner,
     frozen: bool | None = None,
+    machine: str | None = None,
 ) -> ComponentSpec:
     try:
         variant, variant_error = asr_variant(paths), None
@@ -123,7 +116,7 @@ def _asr(
     asr_root = asr_runtime_root(paths.program_root, frozen=frozen)
     argv = (
         str(paths.asr_python), "-m", "runtimes.asr", "serve", "--host", "127.0.0.1", "--port", str(ports.asr),
-        "--model", str(paths.asr_model_dir), "--load", "--warmup", *_VARIANT_ARGS.get(variant or "", ()),
+        "--model", str(paths.asr_model_dir), "--load", "--warmup", *_asr_variant_args(variant, paths.os_name),
     )
     env = {**environ, "PYTHONPATH": str(asr_root), "HF_HOME": str(paths.hf_home), "HF_HUB_OFFLINE": "1",
            "PYTHONUNBUFFERED": "1", "PYTHONUTF8": "1"}
@@ -144,7 +137,10 @@ def _asr(
         return None if weights.complete else f"识别模型不完整：{'、'.join(weights.missing)}"
 
     def preflight() -> str | None:
-        result = asr_gpu_preflight(argv, run=run, which=which, environ=env)
+        if paths.os_name == "windows":
+            result = asr_windows_cuda_preflight(run=run, which=which, environ=env, machine=machine)
+        else:
+            result = asr_gpu_preflight(argv, run=run, which=which, environ=env, os_name=paths.os_name)
         return None if result.ok else result.reason
 
     return ComponentSpec(
@@ -191,11 +187,12 @@ def build_specs(
     frozen: bool | None = None,
     executable: str | None = None,
     read_system_proxy: SystemProxyReader = read_os_system_proxy,
+    machine: str | None = None,
 ) -> tuple[ComponentSpec, ...]:
     ports = local_ports(environ)
     return (
         _ollama(paths, environ, ports, read_system_proxy=read_system_proxy),
-        _asr(paths, environ, ports, which=which, run=run, frozen=frozen),
+        _asr(paths, environ, ports, which=which, run=run, frozen=frozen, machine=machine),
         _server(paths, environ, ports, frozen=frozen, executable=executable),
     )
 

@@ -26,6 +26,8 @@ from _contracts import (  # noqa: E402  仓库根目录需先加入 sys.path
     ComponentName,
     ComponentState,
     ErrorCode,
+    InstallAllState,
+    InstallStepKind,
     LogicError,
     OllamaSetupStatus,
     SetupCheckResponse,
@@ -38,6 +40,7 @@ from _contracts import (  # noqa: E402  仓库根目录需先加入 sys.path
 from _v3.component_routes import ComponentRegistry  # noqa: E402
 from _v3.isolated import FORBIDDEN_PORTS  # noqa: E402
 from _v3.setup_sequence import InstallSequence, SequenceFacts  # noqa: E402
+from _v3.setup_service import UPGRADE_BUSY_MESSAGE  # noqa: E402
 
 
 def _pick_port() -> int:
@@ -97,6 +100,10 @@ class SandboxTasks:
             self._tasks[task_id] = task
             return task
 
+    def latest(self, kind: SetupTaskKind) -> SetupTask | None:
+        with self._lock:
+            return self._tasks.get(self._by_kind.get(kind, ""))
+
     def succeeded(self, kind: SetupTaskKind) -> bool:
         with self._lock:
             task = self._tasks.get(self._by_kind.get(kind, ""))
@@ -106,7 +113,7 @@ class SandboxTasks:
 class SandboxSetup:
     """设置替身：真实一键装齐顺序任务（InstallSequence）+ 真实组件登记表，只替换安装 worker 与本机探测。"""
 
-    def __init__(self, components: ComponentRegistry, state_file: Path) -> None:
+    def __init__(self, components: ComponentRegistry, state_file: Path, *, events=None) -> None:
         self.tasks = SandboxTasks()
         self._components = components
         done = self.tasks.succeeded
@@ -119,10 +126,20 @@ class SandboxSetup:
                 asr_weights_complete=lambda: done(SetupTaskKind.asr_download),
             ),
             components=components,
+            events=events,
             state_file=state_file,
             poll_s=0.05,
             wait_ollama_s=5.0,
         )
+
+    def asr_runtime_upgrade_busy_reason(self) -> str | None:
+        seq = self.sequence.status()
+        if seq.state == InstallAllState.running and seq.current == InstallStepKind.asr_runtime_install:
+            return UPGRADE_BUSY_MESSAGE
+        task = self.tasks.latest(SetupTaskKind.asr_runtime_install)
+        if task is not None and task.state == SetupTaskState.running:
+            return UPGRADE_BUSY_MESSAGE
+        return None
 
     def _running(self, name: ComponentName) -> bool:
         status = self._components.get(name)
@@ -253,7 +270,7 @@ def main() -> int:
         ocr=ocr,
         list_audio_inputs=list_audio_inputs,
     )
-    runtime.setup = SandboxSetup(runtime.components, sandbox_root / "install_all.json")
+    runtime.setup = SandboxSetup(runtime.components, sandbox_root / "install_all.json", events=runtime.events)
     runtime.lan = SandboxLan(port, token)
     static_v3 = REPO / "static" / "v3"
     app = create_app(runtime, static_v3=static_v3)

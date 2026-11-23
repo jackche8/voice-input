@@ -14,7 +14,7 @@ import pytest
 from _contracts import ErrorCode, LogicError, SetupTask, SetupTaskKind, SetupTaskState
 from _v3.setup_tasks import INTERRUPTED_BY_RESTART, TASK_RETENTION, SetupTaskManager, TaskKindSpec, read_task_file, write_task_file
 from _platform.child_process import process_identity
-from _v3.setup_worker import APP_EXIT_MESSAGE, NO_OWNER_MESSAGE
+from _v3.setup_worker import APP_EXIT_MESSAGE, EXIT_INTERRUPTED, NO_OWNER_MESSAGE, kill_own_process_group, run_task
 
 ROOT = Path(__file__).resolve().parents[2]
 PULL, INSTALL = SetupTaskKind.ollama_pull, SetupTaskKind.ollama_install
@@ -192,3 +192,65 @@ def test_spawn_worker_passes_utf8_and_windows_no_window_flags(tmp_path, monkeypa
     assert "start_new_session" not in seen[-1] and "errors" not in seen[-1]
     assert seen[-1]["creationflags"] == (cp_mod.CREATE_NO_WINDOW | cp_mod.CREATE_NEW_PROCESS_GROUP)
     assert seen[-1]["env"]["PYTHONUTF8"] == "1"
+
+
+def test_worker_host_exit_sets_cancel_event_catches_cleanup_oserror_and_terminates_windows_tree(tmp_path, monkeypatch):
+    import threading
+    from _platform import _child_windows
+
+    task_file = tmp_path / "task-abort.json"
+    cancel = threading.Event()
+    started = threading.Event()
+    order: list[str] = []
+    owner_alive = {"ok": True}
+
+    def action(_report) -> str:
+        started.set()
+        cancel.wait(5.0)
+        order.append("action_saw_cancel")
+        return "never"
+
+    def abort_children() -> None:
+        assert cancel.is_set()
+        order.append("abort_children")
+
+    def failing_cleanup() -> None:
+        order.append("cleanup")
+        raise PermissionError("file still locked")
+
+    def fake_identity(pid: int) -> str | None:
+        if pid == 4242:
+            return "owner-id" if owner_alive["ok"] else None
+        return "worker-id"
+
+    def trigger_owner_exit() -> None:
+        started.wait(5.0)
+        owner_alive["ok"] = False
+
+    t = threading.Thread(target=trigger_owner_exit, daemon=True)
+    t.start()
+    code = run_task(
+        task_file=task_file,
+        kind=SetupTaskKind.asr_runtime_install,
+        action=action,
+        cleanup=failing_cleanup,
+        owner_pid=4242,
+        owner_identity="owner-id",
+        identity=fake_identity,
+        abort_children=abort_children,
+        cancel_event=cancel,
+        interval_s=0.02,
+    )
+    t.join(2.0)
+    assert code == EXIT_INTERRUPTED
+    assert order[:2] == ["abort_children", "action_saw_cancel"] or order[:2] == ["abort_children", "cleanup"]
+    assert "cleanup" in order and "action_saw_cancel" in order
+    record = read_task_file(task_file)
+    assert record.task.state == SetupTaskState.interrupted and record.task.message == APP_EXIT_MESSAGE
+
+    # Windows 下 kill_own_process_group 委托 _child_windows.terminate_descendants(os.getpid())
+    called: list[int] = []
+    monkeypatch.setattr(os, "name", "nt")
+    monkeypatch.setattr(_child_windows, "terminate_descendants", lambda root_pid, **kw: called.append(root_pid) or [])
+    kill_own_process_group()
+    assert called == [os.getpid()]

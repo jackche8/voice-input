@@ -285,12 +285,15 @@ class ProductDeliveryUnknownEvent(BaseModel):
     text: str | None = None
 
 
+UPGRADE_STOP_REASON = "升级识别运行环境，暂停服务"
+
+
 class ProductComponentCommandEvent(BaseModel):
-    """设置页/托盘「重试」经服务端转给应用看护层；组件是否已安装由看护层按文件自行发现，不经事件。"""
+    """设置页/托盘/升级编排的组件命令（retry / stop）经服务端转给应用看护层；组件是否已安装由看护层按文件自行发现，不经事件。"""
 
     model_config = ConfigDict(extra="forbid")
     event: Literal[ProductEventType.component_command] = ProductEventType.component_command
-    action: Literal["retry"]
+    action: Literal["retry", "stop"]
     component: ComponentName
 
 
@@ -1226,6 +1229,7 @@ __all__ = [
     "SIDECAR_DEFAULT_BASE_URL",
     "SIDECAR_SESSIONS_PATH",
     "SIDECAR_TRANSCRIBE_PATH",
+    "UPGRADE_STOP_REASON",
     "SessionClosedEvent",
     "SessionClosedReason",
     "SessionErrorEvent",

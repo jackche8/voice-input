@@ -116,12 +116,65 @@ def test_asr_variant_comes_from_manifest_and_only_cuda_preflights(paths, variant
 
     def run(cmd, **kw):
         smi_calls.append(cmd)
-        return subprocess.CompletedProcess(cmd, 0, "0, GPU-x, 16303, 1000, G\n", "")
+        return subprocess.CompletedProcess(cmd, 0, "0, GPU-x, 16303, 1000, 572.16, 8.9, G\n", "")
 
     asr = _specs(paths, which=lambda n: "/usr/bin/nvidia-smi", run=run)[ComponentName.asr]
     assert asr.argv[-len(tail):] == tail and asr.installed() is None
     refused = asr.preflight()
     assert (refused is not None and "显存不足" in refused) if variant == "cuda" else (refused is None and not smi_calls)
+
+
+def test_windows_cuda_spec_uses_transformers_cuda_and_windows_preflight(tmp_path):
+    win_paths = AppPaths.for_roots(
+        config_root=tmp_path / "wc",
+        data_root=tmp_path / "wd",
+        runtime_dir=tmp_path / "wr",
+        os_name="windows",
+        environ={"APPDATA": str(tmp_path / "live-app"), "LOCALAPPDATA": str(tmp_path / "live-local")},
+    )
+    _install_asr(win_paths, "cuda")
+
+    def smi_out(line: str):
+        return lambda cmd, **kw: subprocess.CompletedProcess(cmd, 0, line, "")
+
+    ok_asr = {
+        s.name: s
+        for s in build_specs(
+            win_paths,
+            {"PATH": r"C:\Windows\System32"},
+            which=lambda _n: r"C:\Windows\System32\nvidia-smi.exe",
+            run=smi_out("0, GPU-w, 12288, 6000, 572.16, 8.9, RTX 4070\n"),
+            machine="AMD64",
+        )
+    }[ComponentName.asr]
+    assert ok_asr.argv[-4:] == ("--backend", "transformers", "--device", "cuda")
+    assert ok_asr.preflight() is None
+
+    old_driver_asr = {
+        s.name: s
+        for s in build_specs(
+            win_paths,
+            {"PATH": r"C:\Windows\System32"},
+            which=lambda _n: r"C:\Windows\System32\nvidia-smi.exe",
+            run=smi_out("0, GPU-w, 12288, 6000, 566.36, 8.9, RTX 4070\n"),
+            machine="AMD64",
+        )
+    }[ComponentName.asr]
+    refused_old = old_driver_asr.preflight()
+    assert refused_old is not None and "570" in refused_old
+
+    low_vram_asr = {
+        s.name: s
+        for s in build_specs(
+            win_paths,
+            {"PATH": r"C:\Windows\System32"},
+            which=lambda _n: r"C:\Windows\System32\nvidia-smi.exe",
+            run=smi_out("0, GPU-w, 12288, 4000, 572.16, 8.9, RTX 4070\n"),
+            machine="AMD64",
+        )
+    }[ComponentName.asr]
+    refused_vram = low_vram_asr.preflight()
+    assert refused_vram is not None and "显存不足" in refused_vram
 
 
 def test_installed_is_read_from_files_each_time(paths):
@@ -210,6 +263,25 @@ def test_app_exit_stops_without_notice_and_status_times_are_wall_clock(paths):
     assert (m.state, m.reason, intents) == (ComponentState.stopped, sm.APP_EXIT_REASON, (sm.TerminateSession(),))
     status = sm.to_status(m, mono_now=30.0, wall_now=1_000_000.0)
     assert datetime.fromisoformat(status.since).timestamp() == 1_000_000.0 - 10.0 and status.pid is None
+
+
+def test_upgrade_stop_without_notify_and_retry_rechecks_installed(paths):
+    spec_ok = replace(_fake(_specs(paths)[ComponentName.asr]), installed=lambda: None)
+    m, _ = sm.step(sm.initial(ComponentName.asr, 0.0), spec_ok, sm.Probe(), 0.0)
+    m, intents = sm.stop(sm.spawned(m, 77), 5.0, reason=sm.UPGRADE_STOP_REASON)
+    assert (m.state, m.reason, m.pid, intents) == (
+        ComponentState.stopped,
+        sm.UPGRADE_STOP_REASON,
+        None,
+        (sm.TerminateSession(),),
+    )
+
+    # 重试前若 manifest 已被删或损坏，_try_start 必须回迁 not_installed，绝不硬拉 Spawn
+    spec_missing = replace(spec_ok, installed=lambda: "未安装识别运行环境（manifest.json 不存在）")
+    retried = sm.retry(m, 6.0)
+    m2, intents2 = sm.step(retried, spec_missing, sm.Probe(), 6.0)
+    assert m2.state == ComponentState.not_installed and "manifest.json" in (m2.reason or "")
+    assert m2.failures == 0 and m2.pid is None and intents2 == ()
 
 
 # ---------------------------------------------------------------- records

@@ -21,6 +21,7 @@ from _ocr import (
     ensure_ocr_languages,
     invoke_ocr_runner,
     prepare_ocr_image,
+    pytesseract_runtime_context,
     raise_ocr_error,
 )
 from _ocr_segment import LineSpan, segment_lines
@@ -243,12 +244,13 @@ def extract_ocr_layout(
         def _default_data_runner(
             img: Image.Image, lang: str, timeout: int = OCR_TIMEOUT_S
         ) -> dict[str, list[Any]]:
-            return pytesseract.image_to_data(
-                img,
-                lang=lang,
-                output_type=pytesseract.Output.DICT,
-                timeout=timeout,
-            )
+            with pytesseract_runtime_context(pytesseract):
+                return pytesseract.image_to_data(
+                    img,
+                    lang=lang,
+                    output_type=pytesseract.Output.DICT,
+                    timeout=timeout,
+                )
 
         runner = _default_data_runner
 

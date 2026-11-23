@@ -1,12 +1,16 @@
 """Tesseract OCR 能力封装。缺语言包必须显式失败，不在本层安装或下载语言包。"""
 from __future__ import annotations
 
+import contextlib
 import inspect
 import io
+import os
 import re
+import shutil
 import subprocess
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Iterator, Mapping
+from pathlib import Path
 from typing import Any, NoReturn
 
 import numpy as np
@@ -14,7 +18,10 @@ from PIL import Image, ImageOps
 
 from _contracts import ErrorCode, LogicError
 from _ocr_text import clean_cjk_spaces
+from _paths import PROGRAM_ROOT
 from _platform.child_process import windows_subprocess_kwargs
+from _platform.detect import detect_os
+from _platform.protocol import OsName
 
 DEFAULT_OCR_LANG = "chi_sim+chi_tra+eng"
 DEFAULT_OCR_LANGS = DEFAULT_OCR_LANG
@@ -32,8 +39,19 @@ _LIGHT_CANVAS_RGB = (255, 255, 255)  # #ffffff
 _DARK_CANVAS_RGB = (17, 24, 39)      # #111827
 
 _lang_cache_lock = threading.Lock()
+_tesseract_env_lock = threading.Lock()
 _cached_languages: tuple[str, ...] | None = None
 _LANG_CODE_RE = re.compile(r"^[A-Za-z0-9_/-]+$")
+
+
+def _env_get_ci(environ: Mapping[str, str], key: str) -> str | None:
+    if key in environ:
+        return environ[key]
+    low = key.lower()
+    for env_key, value in environ.items():
+        if env_key.lower() == low:
+            return value
+    return None
 
 
 def default_ocr_languages() -> list[tuple[str, str]]:
@@ -48,27 +66,110 @@ def clear_language_cache() -> None:
         _cached_languages = None
 
 
-def _resolve_tesseract_cmd(tesseract_cmd: str | None) -> str:
-    if tesseract_cmd:
-        return tesseract_cmd
+def resolve_tesseract(
+    tesseract_cmd: str | None = None,
+    *,
+    program_root: Path | None = None,
+    which: Callable[[str], str | None] = shutil.which,
+    os_name: OsName | None = None,
+    environ: Mapping[str, str] | None = None,
+) -> tuple[str, Path | None]:
+    """单源解析 Tesseract 可执行文件路径与可选内置 tessdata 目录。
+
+    顺序：显式入参 → 显式非默认 pytesseract.tesseract_cmd → 内置 PROGRAM_ROOT/tesseract/tesseract(.exe)（配同级 tessdata/）
+    → which("tesseract") → Windows 标准目录（Program Files / Program Files (x86) 下 Tesseract-OCR）→ "tesseract"。
+    """
+    if isinstance(tesseract_cmd, str) and tesseract_cmd.strip():
+        return tesseract_cmd.strip(), None
     try:
         import pytesseract
 
         configured = getattr(pytesseract.pytesseract, "tesseract_cmd", None)
-        if isinstance(configured, str) and configured.strip():
-            return configured.strip()
+        if isinstance(configured, str) and configured.strip() and configured.strip() != "tesseract":
+            return configured.strip(), None
     except ImportError:
         pass
-    return "tesseract"
+    resolved_os = os_name or detect_os()
+    base = PROGRAM_ROOT if program_root is None else Path(program_root)
+    exe_name = "tesseract.exe" if resolved_os == "windows" else "tesseract"
+    bundled = base / "tesseract" / exe_name
+    if bundled.is_file():
+        tessdata = bundled.parent / "tessdata"
+        return str(bundled), tessdata if tessdata.is_dir() else None
+    found = which("tesseract")
+    if found:
+        return found, None
+    if resolved_os == "windows":
+        env = os.environ if environ is None else environ
+        for key in ("ProgramFiles", "ProgramFiles(x86)"):
+            root_val = (_env_get_ci(env, key) or "").strip()
+            if not root_val:
+                continue
+            candidate = Path(root_val) / "Tesseract-OCR" / "tesseract.exe"
+            if candidate.is_file():
+                tessdata = candidate.parent / "tessdata"
+                return str(candidate), tessdata if tessdata.is_dir() else None
+    return "tesseract", None
+
+
+@contextlib.contextmanager
+def pytesseract_runtime_context(
+    pytesseract_module: Any,
+    *,
+    tesseract_cmd: str | None = None,
+    program_root: Path | None = None,
+    which: Callable[[str], str | None] = shutil.which,
+    os_name: OsName | None = None,
+    environ: Mapping[str, str] | None = None,
+) -> Iterator[tuple[str, Path | None]]:
+    """线程安全地为 pytesseract 设置解析后的可执行文件与 TESSDATA_PREFIX（绝不拼 config='--tessdata-dir'），退出时完整还原。"""
+    with _tesseract_env_lock:
+        cmd, tessdata_dir = resolve_tesseract(
+            tesseract_cmd,
+            program_root=program_root,
+            which=which,
+            os_name=os_name,
+            environ=environ,
+        )
+        pt_inner = getattr(pytesseract_module, "pytesseract", pytesseract_module)
+        prev_cmd = getattr(pt_inner, "tesseract_cmd", "tesseract")
+        had_prefix = "TESSDATA_PREFIX" in os.environ
+        prev_prefix = os.environ.get("TESSDATA_PREFIX")
+        pt_inner.tesseract_cmd = cmd
+        if tessdata_dir is not None:
+            os.environ["TESSDATA_PREFIX"] = str(tessdata_dir)
+        try:
+            yield cmd, tessdata_dir
+        finally:
+            pt_inner.tesseract_cmd = prev_cmd
+            if had_prefix and prev_prefix is not None:
+                os.environ["TESSDATA_PREFIX"] = prev_prefix
+            else:
+                os.environ.pop("TESSDATA_PREFIX", None)
 
 
 def list_tesseract_languages(
     *,
     run: Callable[..., subprocess.CompletedProcess] = subprocess.run,
     tesseract_cmd: str | None = None,
+    program_root: Path | None = None,
+    which: Callable[[str], str | None] = shutil.which,
+    os_name: OsName | None = None,
+    environ: Mapping[str, str] | None = None,
 ) -> list[str]:
-    """直接以隐藏控制台方式执行 `tesseract --list-langs` 并解析语言代码列表（规避 pytesseract.get_languages 闪黑框）。"""
-    cmd = _resolve_tesseract_cmd(tesseract_cmd)
+    """直接以隐藏控制台方式执行 `tesseract --list-langs` 并解析语言代码列表（经 TESSDATA_PREFIX 传递内置 tessdata）。"""
+    cmd, tessdata_dir = resolve_tesseract(
+        tesseract_cmd,
+        program_root=program_root,
+        which=which,
+        os_name=os_name,
+        environ=environ,
+    )
+    run_kwargs = windows_subprocess_kwargs(encoding="utf-8", errors="replace")
+    if tessdata_dir is not None:
+        sub_env = dict(os.environ if environ is None else environ)
+        sub_env["TESSDATA_PREFIX"] = str(tessdata_dir)
+        run_kwargs["env"] = sub_env
     try:
         proc = run(
             [cmd, "--list-langs"],
@@ -76,8 +177,13 @@ def list_tesseract_languages(
             text=True,
             timeout=10,
             check=False,
-            **windows_subprocess_kwargs(encoding="utf-8", errors="replace"),
+            **run_kwargs,
         )
+    except FileNotFoundError as exc:
+        raise LogicError(
+            ErrorCode.ocr_failed,
+            f"未找到 Tesseract OCR 程序（{cmd}）：请重新安装应用或安装 Tesseract 5 并确保其位于 PATH 中",
+        ) from exc
     except (OSError, subprocess.SubprocessError) as exc:
         raise LogicError(ErrorCode.ocr_failed, f"无法查询 Tesseract 语言包: {exc}") from exc
     if proc.returncode != 0:
@@ -125,12 +231,24 @@ def _is_timeout_error(exc: BaseException, message: str) -> bool:
     return "timeout" in lower or "timed out" in lower
 
 
+def _is_tesseract_not_found(exc: BaseException, message: str) -> bool:
+    if isinstance(exc, FileNotFoundError) or type(exc).__name__ == "TesseractNotFoundError":
+        return True
+    lower = message.lower()
+    return "is not installed or it's not in your path" in lower
+
+
 def raise_ocr_error(exc: Exception) -> NoReturn:
     if isinstance(exc, LogicError):
         raise exc
     msg = str(exc)
     if _is_timeout_error(exc, msg):
         raise LogicError(ErrorCode.timeout, f"OCR 识别超时: {msg}") from exc
+    if _is_tesseract_not_found(exc, msg):
+        raise LogicError(
+            ErrorCode.ocr_failed,
+            "未找到 Tesseract OCR 程序：请重新安装应用或安装 Tesseract 5 并确保其位于 PATH 中",
+        ) from exc
     if _missing_language(msg):
         raise LogicError(
             ErrorCode.ocr_language_missing,
@@ -270,7 +388,8 @@ def image_to_text(
             raise LogicError(ErrorCode.ocr_failed, f"OCR 依赖不可用: {exc}") from exc
 
         def _default_runner(img: Image.Image, lang: str, timeout: int = OCR_TIMEOUT_S) -> str:
-            return pytesseract.image_to_string(img, lang=lang, timeout=timeout)
+            with pytesseract_runtime_context(pytesseract):
+                return pytesseract.image_to_string(img, lang=lang, timeout=timeout)
 
         runner = _default_runner
 
@@ -303,5 +422,7 @@ __all__ = [
     "invoke_ocr_runner",
     "list_tesseract_languages",
     "prepare_ocr_image",
+    "pytesseract_runtime_context",
     "raise_ocr_error",
+    "resolve_tesseract",
 ]

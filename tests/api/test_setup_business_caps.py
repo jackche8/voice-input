@@ -6,6 +6,7 @@ import pytest
 from _contracts import ComponentReport, ComponentStatus, ErrorCode, LogicError, SetupProgress, SetupTaskKind
 from _linux.conflicts import ConflictScan
 from _v3.component_routes import ComponentRegistry
+from _v3.runtime_install import AsrHardwareProbe
 from _v3.setup_probe import AsrWeightsProbe, OllamaProbe, hotkey_conflicts_capability
 from _v3.setup_service import SetupService
 from tests.api.setup_fixtures import FakeWorld, FixedSequence, FixedTasks, task
@@ -109,3 +110,55 @@ def test_ollama_running_from_component_and_model_from_probe():
     assert up.running and up.model_status.value == "ready" and up.message == "纠错/翻译模型已就绪"
     missing = _check(FakeWorld(ollama=OllamaProbe(False, False, None, False, None, "x")), _registry()).ollama
     assert missing.installed is False and missing.message == "未安装用户级 Ollama"
+
+
+def test_asr_device_label_and_fault_absorption_never_500():
+    reg = _registry(asr=("running", None))
+
+    # 匹配变体：CUDA GPU / Apple MPS / CPU
+    cuda = _check(
+        FakeWorld(weights=READY_WEIGHTS, asr_variant="cuda", asr_hardware=AsrHardwareProbe("cuda", "RTX 4070", "RTX 4070")),
+        reg,
+    ).asr
+    assert cuda.device_label == "CUDA GPU"
+
+    mps = _check(
+        FakeWorld(weights=READY_WEIGHTS, asr_variant="mps", asr_hardware=AsrHardwareProbe("mps", "Apple Silicon")),
+        reg,
+    ).asr
+    assert mps.device_label == "Apple MPS"
+
+    cpu = _check(
+        FakeWorld(weights=READY_WEIGHTS, asr_variant="cpu", asr_hardware=AsrHardwareProbe("cpu", "无卡")),
+        reg,
+    ).asr
+    assert cpu.device_label == "CPU"
+
+    # 已装 CPU 但检测到符合条件的 CUDA GPU → 明示可一键升级
+    upgrade = _check(
+        FakeWorld(
+            weights=READY_WEIGHTS,
+            asr_variant="cpu",
+            asr_hardware=AsrHardwareProbe("cuda", "检测到 GPU", gpu_name="RTX 4070", driver_version="572.16"),
+        ),
+        reg,
+    ).asr
+    assert upgrade.device_label is not None and "CPU" in upgrade.device_label and "RTX 4070" in upgrade.device_label and "一键装齐" in upgrade.device_label
+
+    # 旧驱动 < 570 或探测故障：保留在 device_label，绝不 500
+    old_drv = _check(
+        FakeWorld(
+            weights=READY_WEIGHTS,
+            asr_variant="cpu",
+            asr_hardware=AsrHardwareProbe(None, "驱动过旧", error="当前驱动版本 566.36 低于 570.00"),
+        ),
+        reg,
+    ).asr
+    assert old_drv.device_label is not None and "CPU" in old_drv.device_label and "570" in old_drv.device_label
+
+    # 清单损坏 ValueError 与硬件探测未预期异常全部吸收，永不 500
+    corrupt = _check(FakeWorld(weights=READY_WEIGHTS, asr_variant=ValueError("manifest bad json")), reg).asr
+    assert corrupt.device_label is not None and "清单损坏" in corrupt.device_label and "一键装齐" in corrupt.device_label
+
+    boom = _check(FakeWorld(weights=READY_WEIGHTS, asr_variant="cpu", asr_hardware=RuntimeError("smi crashed")), reg).asr
+    assert boom.device_label is not None and "CPU" in boom.device_label and "smi crashed" in boom.device_label

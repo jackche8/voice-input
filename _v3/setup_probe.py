@@ -15,8 +15,11 @@ import httpx
 
 from _contracts import SetupCapability
 from _ocr import default_ocr_languages
+from _paths import AppPaths
 from _platform.detect import detect_os
 from _platform.protocol import OsName
+
+ASR_VARIANTS = ("cuda", "cpu", "mps")
 
 if TYPE_CHECKING:  # 只用于类型标注
     from _linux.conflicts import ConflictScan
@@ -84,6 +87,20 @@ def probe_asr_weights(model_dir: Path) -> AsrWeightsProbe:
     if any(model_dir.rglob("*.incomplete")):
         missing.append("存在未完成的下载片段")
     return AsrWeightsProbe(not missing, _dir_bytes(model_dir), tuple(missing))
+
+
+def asr_variant(paths: AppPaths) -> str | None:
+    """清单不存在 → None（未安装）；清单损坏或变体未知 → ValueError（带清单路径）。"""
+    try:
+        raw = json.loads(paths.asr_manifest.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError) as exc:
+        raise ValueError(f"识别运行环境清单 {paths.asr_manifest} 无法读取：{exc}") from exc
+    variant = raw.get("variant") if isinstance(raw, dict) else None
+    if variant not in ASR_VARIANTS:
+        raise ValueError(f"识别运行环境清单 {paths.asr_manifest} 的 variant={variant!r} 不是 {ASR_VARIANTS} 之一")
+    return variant
 
 
 @dataclass(frozen=True)
@@ -253,3 +270,23 @@ def hotkey_conflicts_capability(scan: Callable[[], "ConflictScan"]) -> SetupCapa
         id=HOTKEY_CONFLICTS_ID, label=label, available=True, required=False,
         detail="已读取的 GNOME 键位与其它应用全局快捷键登记中未发现冲突（第三方 evdev 监听与应用内快捷键无法检测）",
     )
+
+
+__all__ = [
+    "ASR_VARIANTS",
+    "HOTKEY_CONFLICTS_ID",
+    "PORTAL_SCREENSHOT",
+    "PORTAL_SHORTCUTS",
+    "AsrWeightsProbe",
+    "OllamaProbe",
+    "PortalVersionFn",
+    "SidecarProbe",
+    "asr_variant",
+    "dbus_portal_version",
+    "hotkey_conflicts_capability",
+    "probe_asr_sidecar",
+    "probe_asr_weights",
+    "probe_capabilities",
+    "probe_ollama",
+    "session_type",
+]

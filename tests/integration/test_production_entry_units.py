@@ -79,6 +79,8 @@ def test_daemon_entry_is_thin():
         "SingleInstanceServer(",
         "run_as_second_instance(paths)",
         "on_retry_server=lambda: supervisor.retry(\"server\")",
+        'elif action == "stop":',
+        "supervisor.stop_component(component)",
         "on_config_changed=sync_autostart",
         "ensure_portal_app_entry(paths, os.environ)",
         "supervisor.stop(",
@@ -252,3 +254,18 @@ def test_entry_daemon_does_not_preimport_pyside6_on_import_or_internal_dispatch(
             timeout=30,
         )
         assert guard.returncode == 1 and "已退出" in guard.stderr
+
+
+def test_fresh_interpreter_imports_have_no_circular_import():
+    """全新子进程解释器独立导入各入口与看护模块，防止 _v3 ↔ _supervision 循环导入在冷启动时炸服。"""
+    env = {**os.environ, "PYTHONPATH": str(ROOT), "PYTHONDONTWRITEBYTECODE": "1"}
+    for mod in ("daemon", "_desktop.supervisor", "_supervision.spec", "_supervision.machine", "app"):
+        proc = subprocess.run(
+            [sys.executable, "-c", f"import {mod}"],
+            cwd=ROOT,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert proc.returncode == 0, f"全新解释器导入 {mod!r} 失败（退出码 {proc.returncode}）：{proc.stderr}"

@@ -246,7 +246,15 @@ def create_app(runtime: Runtime, *, static_v3: Path | None = None) -> FastAPI:
     app.include_router(build_jobs_router(runtime))
     app.include_router(build_capability_router(runtime))
     app.include_router(build_control_router(runtime))
-    app.include_router(build_component_router(runtime.components, runtime.events))
+    app.include_router(
+        build_component_router(
+            runtime.components,
+            runtime.events,
+            asr_retry_blocked_reason=lambda: (
+                runtime.setup.asr_runtime_upgrade_busy_reason() if runtime.setup is not None else None
+            ),
+        )
+    )
     app.include_router(build_setup_router(runtime))
     if static_v3 is not None:
         install_pages(app, static_v3)

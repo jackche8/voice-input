@@ -137,6 +137,8 @@ def main() -> None:
     def _on_component_command(action: str, component: str) -> None:
         if action == "retry":
             supervisor.retry(component)
+        elif action == "stop":
+            supervisor.stop_component(component)
 
     event_loop = ProductEventLoop(
         iter_events=api.iter_product_events,

@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 
 from _contracts import ErrorCode, InstallAllStatus, LogicError, SetupCapability, SetupTask, SetupTaskKind
 from _v3.component_routes import ComponentRegistry
+from _v3.runtime_install import AsrHardwareProbe
 from _v3.setup_probe import AsrWeightsProbe, OllamaProbe, probe_capabilities
 from _v3.setup_sequence import idle_status
 from _v3.setup_service import SetupProbes, SetupService
@@ -24,6 +25,8 @@ class FakeWorld:
     })
     langs: list[str] = field(default_factory=lambda: ["eng", "chi_sim", "chi_tra", "osd"])
     keyboards: list[str] | Exception = field(default_factory=lambda: ["/dev/input/event5"])
+    asr_variant: str | None | Exception = None
+    asr_hardware: AsrHardwareProbe | Exception | None = None
 
     def capabilities(self, session: str) -> list[SetupCapability]:
         return probe_capabilities(
@@ -39,12 +42,25 @@ class FakeWorld:
             raise self.keyboards
         return list(self.keyboards)
 
+    def _asr_variant(self) -> str | None:
+        if isinstance(self.asr_variant, Exception):
+            raise self.asr_variant
+        return self.asr_variant
+
+    def _asr_hardware(self) -> AsrHardwareProbe:
+        if isinstance(self.asr_hardware, Exception):
+            raise self.asr_hardware
+        assert self.asr_hardware is not None
+        return self.asr_hardware
+
     def probes(self) -> SetupProbes:
         return SetupProbes(
             session=lambda: self.session,
             ollama=lambda: self.ollama,
             asr_weights=lambda: self.weights,
             capabilities=self.capabilities,
+            asr_variant=self._asr_variant if self.asr_variant is not None else None,
+            asr_hardware=self._asr_hardware if self.asr_hardware is not None else None,
         )
 
 

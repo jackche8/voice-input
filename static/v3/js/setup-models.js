@@ -266,13 +266,16 @@
       installBtn.disabled = !connected || !installAll || installAll.state === "running";
     }
 
-    function updateComponents(list, connected) {
+    function updateComponents(list, connected, installAll) {
       componentsEmpty.hidden = !!(list && list.length);
       componentsEmpty.textContent = list ? "看护层尚未上报服务状态。" : "尚未读取服务状态。";
+      /* 一键装齐运行中可能正在替换 ASR 运行环境，隐藏并禁用 asr 重试以防误点撞锁。 */
+      var installRunning = !!(installAll && installAll.state === "running");
       var seen = {};
       (list || []).forEach(function (item) {
         var parts = componentRow(item.name);
         var text = componentSubText(item);
+        var blockAsrRetry = item.name === "asr" && installRunning;
         seen[item.name] = true;
         parts.row.hidden = false;
         parts.badge.className = "badge" + (COMPONENT_BADGE[item.state] ? " " + COMPONENT_BADGE[item.state] : "");
@@ -280,8 +283,8 @@
         parts.sub.className = "row-sub" + (item.state === "stopped" ? " err" : "");
         parts.sub.textContent = text;
         parts.sub.hidden = !text;
-        parts.retry.hidden = item.state !== "stopped";
-        parts.retry.disabled = !connected;
+        parts.retry.hidden = item.state !== "stopped" || blockAsrRetry;
+        parts.retry.disabled = !connected || blockAsrRetry;
       });
       Object.keys(componentRows).forEach(function (name) {
         if (!seen[name]) componentRows[name].row.hidden = true;
@@ -297,7 +300,7 @@
       aboutEl.hidden = !state.aboutText;
       aboutEl.textContent = state.aboutText || "";
       updateInstall(state.installAll, connected);
-      updateComponents(state.components, connected);
+      updateComponents(state.components, connected, state.installAll);
       var auto = state.autostart_enabled;
       var known = auto === true || auto === false;
       autostartSwitch.setAttribute("aria-checked", known ? String(auto) : "mixed");

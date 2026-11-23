@@ -219,3 +219,26 @@ def test_windows_subprocess_kwargs_splits_nt_and_posix(monkeypatch):
     assert _child_windows.kill_recorded(4242, api.created, api=api, run=lambda argv, **kw: seen.append(dict(kw))) == [4242]
     assert seen[0]["creationflags"] == CREATE_NO_WINDOW
     assert seen[0]["encoding"] == "oem" and seen[0]["errors"] == "replace"
+
+
+def test_windows_terminate_descendants_kills_tree_without_killing_root():
+    class _FakeTreeApi:
+        def __init__(self, pairs: list[tuple[int, int]]) -> None:
+            self._pairs = pairs
+            self.killed: list[tuple[int, int]] = []
+
+        def list_processes(self) -> list[tuple[int, int]]:
+            return list(self._pairs)
+
+        def terminate_and_wait(self, pid: int, timeout_ms: int) -> bool:
+            self.killed.append((pid, timeout_ms))
+            return True
+
+    # 进程树：root=100 -> 200 -> 300；root=100 -> 201；无关进程 999；含自环 100->100 与 400<->401
+    fake_api = _FakeTreeApi([(100, 100), (200, 100), (300, 200), (201, 100), (999, 1), (400, 401), (401, 400)])
+    killed = _child_windows.terminate_descendants(100, timeout_s=2.5, api=fake_api)
+    assert set(killed) == {200, 300, 201}
+    assert 100 not in killed and 999 not in killed
+    # 孙进程 300 先于父子进程 200 被终结
+    assert killed.index(300) < killed.index(200)
+    assert all(timeout_ms == 2500 for _pid, timeout_ms in fake_api.killed)

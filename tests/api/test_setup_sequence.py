@@ -7,7 +7,9 @@ import time
 import uuid
 
 from _contracts import (
+    ComponentName,
     ComponentReport,
+    ComponentState,
     ComponentStatus,
     InstallAllState,
     InstallAllStatus,
@@ -18,7 +20,10 @@ from _contracts import (
     SetupTaskKind,
     SetupTaskState,
 )
+from _events import EventBus
+from _supervision.machine import UPGRADE_STOP_REASON
 from _v3.component_routes import ComponentRegistry
+from _v3.runtime_install import AsrHardwareProbe
 from _v3.setup_sequence import InstallSequence, SequenceFacts
 from _v3.setup_service import SetupService
 from _v3_app import build_sandbox_runtime, create_app
@@ -61,6 +66,11 @@ class FakeTasks:
     def get(self, task_id: str) -> SetupTask:
         with self._lock:
             return self._tasks[task_id]
+
+    def latest(self, kind: SetupTaskKind) -> SetupTask | None:
+        with self._lock:
+            same = [t for t in self._tasks.values() if t.kind == kind]
+            return same[-1] if same else None
 
     def finish(self, kind: SetupTaskKind, state: SetupTaskState, message: str = "") -> None:
         with self._lock:
@@ -194,3 +204,194 @@ def test_install_all_route_is_local_and_check_carries_status(tmp_path):
     _settled(seq)
     body = local_client(app).get("/api/setup/check").json()["install_all"]
     assert body["state"] == "done" and [s["state"] for s in body["steps"]] == ["skipped", "done", "skipped", "skipped", "skipped"]
+
+
+def _report_states(registry: ComponentRegistry, *, ollama="running", asr="running", asr_reason=None, asr_pid=None) -> None:
+    registry.replace(
+        ComponentReport(
+            components=[
+                ComponentStatus(name="ollama", state=ollama, since=SINCE),
+                ComponentStatus(name="asr", state=asr, reason=asr_reason, pid=asr_pid, since=SINCE),
+                ComponentStatus(name="server", state="running", since=SINCE),
+            ]
+        )
+    )
+
+
+def test_start_concurrent_double_click_spawns_runner_once(tmp_path):
+    registry, tasks = ComponentRegistry(), FakeTasks()
+    _ollama(registry, "running")
+    spawned: list = []
+    barrier = threading.Barrier(4)
+    seq = InstallSequence(
+        tasks=tasks,
+        facts=Facts(ollama=True, model=True, runtime=True, weights=True).build(),
+        components=registry,
+        state_file=tmp_path / "race" / "install_all.json",
+        spawn=spawned.append,
+        poll_s=0.01,
+    )
+
+    def hit() -> None:
+        barrier.wait()
+        seq.start()
+
+    threads = [threading.Thread(target=hit) for _ in range(4)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(5.0)
+    assert len(spawned) == 1
+
+
+def test_step4_safe_upgrade_order_early_abort_recovery_and_post_step5_restart(tmp_path):
+    # 1) 旧驱动 < 570：实时探测直接失败，绝不发 stop、不启 worker
+    reg1, tasks1, ev1 = ComponentRegistry(), FakeTasks(), EventBus()
+    _report_states(reg1, asr="running", asr_pid=101)
+    cmds1: list[tuple[str, str]] = []
+    ev1.subscribe(lambda e: cmds1.append((e.action, e.component.value)) if hasattr(e, "action") else None)
+    invalidations = {"n": 0}
+    facts1 = SequenceFacts(
+        ollama_installed=lambda: True,
+        ollama_has_model=lambda: True,
+        asr_runtime_installed=lambda: True,
+        asr_weights_complete=lambda: True,
+        asr_hardware_probe=lambda: AsrHardwareProbe(None, "驱动过旧", error="请升级 NVIDIA 驱动到 570 及以上"),
+        asr_installed_variant=lambda: "cpu",
+        asr_runtime_on_disk=lambda: True,
+        asr_disk_shortfall=lambda _v: None,
+        invalidate_hardware_cache=lambda: invalidations.__setitem__("n", invalidations["n"] + 1),
+    )
+    seq1 = InstallSequence(tasks=tasks1, facts=facts1, components=reg1, events=ev1, state_file=tmp_path / "drv.json", poll_s=0.01)
+    seq1.start()
+    res1 = _settled(seq1)
+    assert res1.state == InstallAllState.failed and res1.current == InstallStepKind.asr_runtime_install
+    assert "570" in res1.steps[3].message and cmds1 == [] and tasks1.started == []
+    assert invalidations["n"] == 2  # 进入与退出 Step 4 均失效硬件缓存
+
+    # 2) 磁盘不足：先于停服直接失败，绝不发 stop、不启 worker
+    reg2, tasks2, ev2 = ComponentRegistry(), FakeTasks(), EventBus()
+    _report_states(reg2, asr="running", asr_pid=102)
+    cmds2: list[tuple[str, str]] = []
+    ev2.subscribe(lambda e: cmds2.append((e.action, e.component.value)) if hasattr(e, "action") else None)
+    facts2 = SequenceFacts(
+        ollama_installed=lambda: True,
+        ollama_has_model=lambda: True,
+        asr_runtime_installed=lambda: True,
+        asr_weights_complete=lambda: True,
+        asr_hardware_probe=lambda: AsrHardwareProbe("cuda", "RTX 4070"),
+        asr_installed_variant=lambda: "cpu",
+        asr_runtime_on_disk=lambda: True,
+        asr_disk_shortfall=lambda target: f"磁盘空间不足（{target}）",
+    )
+    seq2 = InstallSequence(tasks=tasks2, facts=facts2, components=reg2, events=ev2, state_file=tmp_path / "disk.json", poll_s=0.01)
+    seq2.start()
+    res2 = _settled(seq2)
+    assert res2.state == InstallAllState.failed and "磁盘空间不足（cuda）" in res2.steps[3].message
+    assert cmds2 == [] and tasks2.started == []
+
+    # 3) 停服早停条件：仅 (stopped, pid is not None, "无法结束组件进程" in reason) 立即中止，绝不启 worker
+    reg3, tasks3, ev3 = ComponentRegistry(), FakeTasks(), EventBus()
+    _report_states(reg3, asr="running", asr_pid=303)
+    ev3.subscribe(
+        lambda e: _report_states(
+            reg3, asr="stopped", asr_pid=303, asr_reason=f"{UPGRADE_STOP_REASON}；无法结束组件进程：RuntimeError: stuck"
+        )
+        if getattr(e, "action", None) == "stop"
+        else None
+    )
+    facts3 = SequenceFacts(
+        ollama_installed=lambda: True,
+        ollama_has_model=lambda: True,
+        asr_runtime_installed=lambda: True,
+        asr_weights_complete=lambda: True,
+        asr_hardware_probe=lambda: AsrHardwareProbe("cuda", "RTX 4070"),
+        asr_installed_variant=lambda: "cpu",
+        asr_runtime_on_disk=lambda: True,
+        asr_disk_shortfall=lambda _v: None,
+    )
+    seq3 = InstallSequence(
+        tasks=tasks3, facts=facts3, components=reg3, events=ev3, state_file=tmp_path / "stuck.json", poll_s=0.01, stop_asr_s=5.0
+    )
+    seq3.start()
+    res3 = _settled(seq3)
+    assert res3.state == InstallAllState.failed and "无法结束组件进程" in res3.steps[3].message and tasks3.started == []
+
+    # 4) 停服后 worker 失败 → Step 4 ⑥ 自动补发 retry 恢复旧 ASR
+    reg4, tasks4, ev4 = ComponentRegistry(), FakeTasks(), EventBus()
+    _report_states(reg4, asr="running", asr_pid=404)
+    cmds4: list[tuple[str, str]] = []
+
+    def on_ev4(e) -> None:
+        if getattr(e, "action", None) == "stop":
+            cmds4.append(("stop", e.component.value))
+            _report_states(reg4, asr="stopped", asr_pid=None, asr_reason=UPGRADE_STOP_REASON)
+        elif getattr(e, "action", None) == "retry":
+            cmds4.append(("retry", e.component.value))
+
+    ev4.subscribe(on_ev4)
+    seq4 = InstallSequence(tasks=tasks4, facts=facts3, components=reg4, events=ev4, state_file=tmp_path / "fail4.json", poll_s=0.01)
+    seq4.start()
+    _wait_until(lambda: tasks4.started == [SetupTaskKind.asr_runtime_install])
+    tasks4.finish(SetupTaskKind.asr_runtime_install, SetupTaskState.failed, "网络断开")
+    res4 = _settled(seq4)
+    assert res4.state == InstallAllState.failed and cmds4 == [("stop", "asr"), ("retry", "asr")]
+
+    # 5) 完整 cpu → cuda 成功升级：先停 ASR → 跑 worker → 跳过已有权重 → 落盘 done 前幂等重发 retry 直至离态
+    reg5, tasks5, ev5 = ComponentRegistry(), FakeTasks(), EventBus()
+    _report_states(reg5, asr="running", asr_pid=505)
+    cmds5: list[tuple[str, str]] = []
+    retry_hits = {"n": 0}
+
+    def on_ev5(e) -> None:
+        action = getattr(e, "action", None)
+        if action == "stop":
+            cmds5.append(("stop", e.component.value))
+            _report_states(reg5, asr="stopped", asr_pid=None, asr_reason=UPGRADE_STOP_REASON)
+        elif action == "retry":
+            cmds5.append(("retry", e.component.value))
+            retry_hits["n"] += 1
+            if retry_hits["n"] >= 2:  # 第 1 次假装看护层未收到，第 2 次重发后离态
+                _report_states(reg5, asr="starting", asr_pid=606)
+
+    ev5.subscribe(on_ev5)
+    seq5 = InstallSequence(
+        tasks=tasks5,
+        facts=facts3,
+        components=reg5,
+        events=ev5,
+        state_file=tmp_path / "ok5.json",
+        poll_s=0.01,
+        restart_asr_s=5.0,
+        restart_asr_resend_s=0.02,
+    )
+    seq5.start()
+    _wait_until(lambda: tasks5.started == [SetupTaskKind.asr_runtime_install])
+    tasks5.finish(SetupTaskKind.asr_runtime_install, SetupTaskState.succeeded, "CUDA 已安装")
+    res5 = _settled(seq5)
+    assert res5.state == InstallAllState.done and res5.steps[3].state == InstallStepState.done
+    assert retry_hits["n"] >= 2 and reg5.get(ComponentName.asr).state == ComponentState.starting
+    assert cmds5[0] == ("stop", "asr") and cmds5[1] == ("retry", "asr")
+
+    # 6) 已有 running worker（服务端重启恢复）：Step 4 ① 直接复用，不重停 ASR、不重查磁盘
+    reg6, tasks6, ev6 = ComponentRegistry(), FakeTasks(), EventBus()
+    _report_states(reg6, asr="stopped", asr_pid=None, asr_reason=UPGRADE_STOP_REASON)
+    running_task = tasks6.start(SetupTaskKind.asr_runtime_install)
+    probe_called = {"n": 0}
+    facts6 = SequenceFacts(
+        ollama_installed=lambda: True,
+        ollama_has_model=lambda: True,
+        asr_runtime_installed=lambda: False,
+        asr_weights_complete=lambda: True,
+        asr_hardware_probe=lambda: probe_called.__setitem__("n", probe_called["n"] + 1) or AsrHardwareProbe("cuda", "x"),
+        asr_installed_variant=lambda: None,
+        asr_runtime_on_disk=lambda: True,
+        asr_disk_shortfall=lambda _v: "不应触发磁盘检查",
+    )
+    ev6.subscribe(lambda e: _report_states(reg6, asr="starting") if getattr(e, "action", None) == "retry" else None)
+    seq6 = InstallSequence(tasks=tasks6, facts=facts6, components=reg6, events=ev6, state_file=tmp_path / "resume6.json", poll_s=0.01)
+    seq6.start()
+    _wait_until(lambda: seq6.status().steps[3].task_id == running_task.task_id)
+    assert probe_called["n"] == 0 and tasks6.started == [SetupTaskKind.asr_runtime_install]
+    tasks6.finish(SetupTaskKind.asr_runtime_install, SetupTaskState.succeeded, "续跑完成")
+    assert _settled(seq6).state == InstallAllState.done

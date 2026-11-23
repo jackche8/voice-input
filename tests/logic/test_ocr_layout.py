@@ -2,11 +2,15 @@
 from __future__ import annotations
 
 import io
+import os
+import sys
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
 from PIL import Image, ImageDraw
 
+import _ocr
 from _contracts import ErrorCode, LogicError
 from _ocr import OCR_BORDER_PX, OCR_TIMEOUT_S
 from _ocr_layout import extract_ocr_layout, sample_ring_colors
@@ -156,3 +160,59 @@ def test_extract_ocr_layout_error_paths():
             runner_data=timeout_runner,
         )
     assert to_err.value.code == ErrorCode.timeout
+
+
+def test_extract_ocr_layout_uses_bundled_tesseract_via_tessdata_prefix_and_restores(tmp_path, monkeypatch):
+    bundled_root = tmp_path / "Ollama Voice Input" / "_internal"
+    bundled_bin = bundled_root / "tesseract" / "tesseract.exe"
+    bundled_td = bundled_root / "tesseract" / "tessdata"
+    bundled_td.mkdir(parents=True)
+    bundled_bin.write_bytes(b"")
+
+    pad, scale = OCR_BORDER_PX, 2
+    fake_pt_inner = SimpleNamespace(tesseract_cmd="tesseract")
+    observed: list[dict] = []
+
+    def fake_image_to_data(img, *, lang, output_type, timeout=0, **kw):
+        observed.append({
+            "cmd": fake_pt_inner.tesseract_cmd,
+            "tessdata_prefix": os.environ.get("TESSDATA_PREFIX"),
+            "extra_kw": dict(kw),
+        })
+        return {
+            "level": [5],
+            "page_num": [1],
+            "block_num": [1],
+            "par_num": [1],
+            "line_num": [1],
+            "left": [pad + scale * 4],
+            "top": [pad + scale * 4],
+            "width": [scale * 20],
+            "height": [scale * 10],
+            "conf": [95],
+            "text": ["Hello"],
+        }
+
+    fake_pt = SimpleNamespace(
+        pytesseract=fake_pt_inner,
+        Output=SimpleNamespace(DICT="dict"),
+        image_to_data=fake_image_to_data,
+    )
+    monkeypatch.setitem(sys.modules, "pytesseract", fake_pt)
+    monkeypatch.setattr(_ocr, "PROGRAM_ROOT", bundled_root)
+    monkeypatch.setattr(_ocr, "detect_os", lambda: "windows")
+    monkeypatch.delenv("TESSDATA_PREFIX", raising=False)
+
+    _w, _h, text, blocks = extract_ocr_layout(
+        _png_bytes(Image.new("RGB", (80, 40), "white")),
+        lang="eng",
+        languages_fn=lambda: ["eng"],
+    )
+    assert text == "Hello" and len(blocks) == 1
+    assert observed == [{
+        "cmd": str(bundled_bin),
+        "tessdata_prefix": str(bundled_td),
+        "extra_kw": {},
+    }]
+    assert fake_pt_inner.tesseract_cmd == "tesseract"
+    assert "TESSDATA_PREFIX" not in os.environ

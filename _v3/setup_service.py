@@ -1,6 +1,7 @@
 """设置页业务：把只读探测、安装任务状态与看护层组件快照组合成 SetupCheckResponse。
 
 是否在运行只看看护层上报的组件状态（唯一来源，服务端只缓存）；权重、模型、版本仍按探测事实；
+运行环境变体与硬件探测通过 30s 缓存读取并填充 `AsrSetupStatus.device_label`（异常与损坏清单全吸收，永不 500）；
 下载/安装进度来自安装任务；一键装齐的逐步进度在 install_all。
 """
 from __future__ import annotations
@@ -13,6 +14,8 @@ from _contracts import (
     ComponentName,
     ComponentState,
     ComponentStatus,
+    InstallAllState,
+    InstallStepKind,
     OllamaSetupStatus,
     SetupCapability,
     SetupCheckResponse,
@@ -22,9 +25,17 @@ from _contracts import (
     SetupTaskState,
 )
 from _v3.component_routes import ComponentRegistry
+from _v3.runtime_install import AsrHardwareProbe
 from _v3.setup_probe import AsrWeightsProbe, OllamaProbe
 from _v3.setup_sequence import InstallSequence
 from _v3.setup_tasks import SetupTaskManager
+
+_VARIANT_LABELS = {
+    "cuda": "CUDA GPU",
+    "mps": "Apple MPS",
+    "cpu": "CPU",
+}
+UPGRADE_BUSY_MESSAGE = "正在安装或升级语音识别运行环境，请等待完成后再重试"
 
 
 def size_label(num_bytes: int | None) -> str | None:
@@ -46,6 +57,8 @@ class SetupProbes:
     ollama: Callable[[], OllamaProbe]
     asr_weights: Callable[[], AsrWeightsProbe]
     capabilities: Callable[[str], list[SetupCapability]]
+    asr_variant: Callable[[], str | None] | None = None
+    asr_hardware: Callable[[], AsrHardwareProbe] | None = None
 
 
 def _running(task: SetupTask | None) -> bool:
@@ -92,6 +105,15 @@ class SetupService:
         self.sequence = sequence
         self._components = components
 
+    def asr_runtime_upgrade_busy_reason(self) -> str | None:
+        """Step 4（asr_runtime_install）或识别运行环境安装任务正在执行时返回 409 拒因。"""
+        seq = self.sequence.status()
+        if seq.state == InstallAllState.running and seq.current == InstallStepKind.asr_runtime_install:
+            return UPGRADE_BUSY_MESSAGE
+        if _running(self.tasks.latest(SetupTaskKind.asr_runtime_install)):
+            return UPGRADE_BUSY_MESSAGE
+        return None
+
     def check(self) -> SetupCheckResponse:
         session = self._probes.session()
         return SetupCheckResponse(
@@ -103,6 +125,40 @@ class SetupService:
             install_all=self.sequence.status(),
         )
 
+    def _asr_device_label(self) -> str | None:
+        """只读解析当前运行环境与硬件可升级/旧驱动提示，吸收损坏清单与硬件探测异常，永不抛出 500。"""
+        installed_variant: str | None = None
+        if self._probes.asr_variant is not None:
+            try:
+                installed_variant = self._probes.asr_variant()
+            except (OSError, ValueError):
+                return "运行环境清单损坏，点击「一键装齐」重建"
+
+        hardware: AsrHardwareProbe | None = None
+        hardware_error: str | None = None
+        if self._probes.asr_hardware is not None:
+            try:
+                hardware = self._probes.asr_hardware()
+            except Exception as exc:
+                hardware_error = f"硬件探测异常：{exc}"
+
+        installed_label = _VARIANT_LABELS.get(installed_variant, installed_variant) if installed_variant is not None else None
+        if hardware_error is not None:
+            return f"{installed_label}（{hardware_error}）" if installed_label else hardware_error
+        if hardware is not None and hardware.error is not None:
+            return f"{installed_label}（{hardware.error}）" if installed_label else hardware.error
+        if installed_variant is not None:
+            if hardware is not None and hardware.target_variant == "cuda" and installed_variant == "cpu":
+                gpu_note = f"（{hardware.gpu_name}）" if hardware.gpu_name else ""
+                return f"当前 CPU · 检测到 GPU{gpu_note}，点击「一键装齐」可升级 CUDA GPU 加速"
+            if hardware is not None and hardware.target_variant is not None and hardware.target_variant != installed_variant:
+                target_label = _VARIANT_LABELS.get(hardware.target_variant, hardware.target_variant)
+                return f"当前 {installed_label} · 点击「一键装齐」可切换至 {target_label}"
+            return installed_label
+        if hardware is not None and hardware.target_variant is not None:
+            return _VARIANT_LABELS.get(hardware.target_variant, hardware.target_variant)
+        return None
+
     def _asr_status(self) -> AsrSetupStatus:
         weights = self._probes.asr_weights()
         download = self.tasks.latest(SetupTaskKind.asr_download)
@@ -111,6 +167,7 @@ class SetupService:
             weights_present=weights.complete,
             sidecar_running=_is_running(component),
             size_label=size_label(weights.bytes_on_disk),
+            device_label=self._asr_device_label(),
         )
         if _running(download):
             return AsrSetupStatus(status=SetupComponentState.downloading, progress=download.progress,
@@ -150,4 +207,12 @@ class SetupService:
                                  message=probe.error or "纠错/翻译模型未下载", **base)
 
 
-__all__ = ["ASR_LABEL", "OLLAMA_LABEL", "SetupProbes", "SetupService", "component_message", "size_label"]
+__all__ = [
+    "ASR_LABEL",
+    "OLLAMA_LABEL",
+    "UPGRADE_BUSY_MESSAGE",
+    "SetupProbes",
+    "SetupService",
+    "component_message",
+    "size_label",
+]

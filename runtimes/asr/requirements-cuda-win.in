@@ -1,0 +1,3 @@
+# Windows x64 CUDA 12.8 依赖：torch 取自 PyTorch 官方 cu128 直链轮子，不加 --extra-index-url，其余依赖全部来自 PyPI。
+-r requirements.txt
+torch @ https://download.pytorch.org/whl/cu128/torch-2.9.1%2Bcu128-cp312-cp312-win_amd64.whl

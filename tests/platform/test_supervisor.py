@@ -14,7 +14,7 @@ from _contracts import ComponentName, ComponentState
 from _desktop.supervisor import Supervisor
 from _desktop.ui_bridge import QtUiBridge
 from _paths import AppPaths
-from _supervision.machine import BACKOFF_S, MAX_CONSECUTIVE_FAILURES
+from _supervision.machine import BACKOFF_S, MAX_CONSECUTIVE_FAILURES, UPGRADE_STOP_REASON
 from _supervision.spec import ReadyResult, build_specs
 
 NAMES = list(ComponentName)
@@ -280,3 +280,73 @@ def test_qt_main_thread_keeps_dispatching_while_supervisor_blocks_in_ready_probe
         watchdog.cancel()
         release.set()
         sup.stop(timeout_s=10)  # 线程未结束会抛错
+
+
+def test_stop_component_is_non_blocking_idempotent_and_preserves_terminate_failure(tmp_path):
+    w = World(tmp_path)
+    seen_timeouts: list[float] = []
+
+    class TimeoutTrackHandle(FakeHandle):
+        def terminate_session(self, timeout_s: float):
+            seen_timeouts.append(timeout_s)
+            return super().terminate_session(timeout_s)
+
+    def track_spawn(argv, *, cwd, env, log_path):
+        name = next(s.name.value for s in w.specs() if tuple(argv) == s.argv)
+        w.log.append(("spawn", name))
+        w.handles[name] = TimeoutTrackHandle(w.log, name, 2000 + len(w.log))
+        return w.handles[name]
+
+    def specs_with_custom_timeout():
+        return [replace(s, stop_timeout_s=23.0) if s.name == ComponentName.asr else s for s in w.specs()]
+
+    # 首轮前即入队 stop_component：tick() 先刷 specs 再排空命令，不拉起 asr 且不弹底栏 error
+    sup0 = w.supervisor(specs=specs_with_custom_timeout, spawn=track_spawn)
+    sup0.stop_component("asr")
+    assert w.log == []  # 非阻塞：调用当下不终结、不拉起
+    sup0.tick()
+    asr0 = next(s for s in sup0.snapshot() if s.name == ComponentName.asr)
+    assert (asr0.state, asr0.reason, asr0.pid) == (ComponentState.stopped, UPGRADE_STOP_REASON, None)
+    assert ("spawn", "asr") not in w.log and w.errors == []
+
+    # 正常运行中主动停服：释放会话（使用 spec.stop_timeout_s）、置 stopped 且 pid=None、无底栏 error、可经 retry 重拉起
+    sup = w.supervisor(specs=specs_with_custom_timeout, spawn=track_spawn)
+    sup.tick()
+    w.ready.update(asr=True)
+    w.clock.now += 1
+    sup.tick()
+    assert _states(sup)["asr"] == "running"
+
+    sup.stop_component("asr")
+    assert ("terminate", "asr") not in w.log  # 仅入队
+    w.clock.now += 1
+    sup.tick()
+    asr = next(s for s in sup.snapshot() if s.name == ComponentName.asr)
+    assert (asr.state, asr.reason, asr.pid) == (ComponentState.stopped, UPGRADE_STOP_REASON, None)
+    assert seen_timeouts == [23.0] and w.errors == []
+    w.clock.now += 10
+    sup.tick()
+    assert _states(sup)["asr"] == "stopped"  # 不会自动退避拉起
+
+    # retry 后立刻按最新 spec 重拉起
+    sup.retry("asr")
+    w.clock.now += 1
+    sup.tick()
+    assert _states(sup)["asr"] == "starting" and w.log.count(("spawn", "asr")) == 2
+
+    # 非退出路径 _terminate 失败：保留 pid 与「无法结束组件进程」，且后续重复 stop 幂等不覆写失败态
+    stuck = w.handles["asr"]
+    stuck.stuck = True
+    sup.stop_component("asr")
+    w.clock.now += 1
+    sup.tick()
+    failed = next(s for s in sup.snapshot() if s.name == ComponentName.asr)
+    assert failed.state == ComponentState.stopped and failed.pid == stuck.pid
+    assert failed.reason is not None and "无法结束组件进程" in failed.reason
+
+    sup.stop_component("asr")
+    w.clock.now += 2
+    sup.tick()
+    repeated = next(s for s in sup.snapshot() if s.name == ComponentName.asr)
+    assert repeated.state == ComponentState.stopped and repeated.pid == stuck.pid
+    assert repeated.reason == failed.reason

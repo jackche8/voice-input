@@ -34,9 +34,14 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
 
 
 def kill_own_process_group() -> None:
-    """结束本 worker 派生的子进程（同一进程组），自己不退出。只在 worker 进程（新会话组长）里调用。"""
+    """结束本 worker 派生的子进程（POSIX 同进程组；Windows 递归终止后代进程树），自己不退出。"""
+    if os.name == "nt":
+        from _platform._child_windows import terminate_descendants
+
+        terminate_descendants(os.getpid())
+        return
     if os.name != "posix":
-        return  # Windows：worker 的子进程不在 Job 内，随其自然结束（已知限制）
+        return
     if os.getpgrp() != os.getpid():
         raise RuntimeError("kill_own_process_group 只能在以新会话启动的 worker 里调用")
     signal.signal(signal.SIGTERM, signal.SIG_IGN)
@@ -53,6 +58,7 @@ def run_task(
     owner_identity: str,
     identity: Callable[[int], str | None] = process_identity,
     abort_children: Callable[[], None] = kill_own_process_group,
+    cancel_event: threading.Event | None = None,
     interval_s: float = 1.0,
     clock: Callable[[], str] = now_iso,
 ) -> int:
@@ -95,8 +101,17 @@ def run_task(
         if not worker.is_alive():
             break
         if (identity(owner_pid) or "") != owner_identity:
-            abort_children()
-            cleanup()
+            if cancel_event is not None:
+                cancel_event.set()
+            try:
+                abort_children()
+            except OSError:
+                pass
+            worker.join(0.2)
+            try:
+                cleanup()
+            except OSError:
+                pass
             write(task.model_copy(update={"state": SetupTaskState.interrupted, "message": APP_EXIT_MESSAGE,
                                           "finished_at": clock()}))
             return EXIT_INTERRUPTED
@@ -114,9 +129,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     from _v3.production import setup_worker_kind
 
     args = parse_args(argv)
-    action, cleanup = setup_worker_kind(args.kind, os.environ)
+    action, cleanup, cancel_event = setup_worker_kind(args.kind, os.environ)
     return run_task(task_file=args.task_file, kind=args.kind, action=action, cleanup=cleanup,
-                    owner_pid=args.owner_pid, owner_identity=args.owner_identity)
+                    owner_pid=args.owner_pid, owner_identity=args.owner_identity, cancel_event=cancel_event)
 
 
 if __name__ == "__main__":

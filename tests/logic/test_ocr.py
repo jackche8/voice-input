@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import io
+import os
 import subprocess
+import sys
 from concurrent.futures import ThreadPoolExecutor
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -21,6 +24,8 @@ from _ocr import (
     image_to_text,
     list_tesseract_languages,
     prepare_ocr_image,
+    pytesseract_runtime_context,
+    resolve_tesseract,
 )
 from _ocr_text import clean_cjk_spaces
 from _platform import child_process as cp_mod
@@ -205,7 +210,163 @@ def test_list_tesseract_languages_runs_hidden_and_parses_headers_and_errors(monk
 
     with pytest.raises(LogicError) as missing:
         list_tesseract_languages(run=missing_bin, tesseract_cmd="tesseract")
-    assert missing.value.code == ErrorCode.ocr_failed
+    assert missing.value.code == ErrorCode.ocr_failed and "未找到 Tesseract OCR" in missing.value.message
+
+
+def test_resolve_tesseract_six_level_priority_and_spaced_bundled_path(tmp_path, monkeypatch):
+    # 1. 构造含空格的内置目录与 Windows 标准目录
+    bundled_root = tmp_path / "Ollama Voice Input" / "_internal"
+    bundled_bin = bundled_root / "tesseract" / "tesseract.exe"
+    bundled_tessdata = bundled_root / "tesseract" / "tessdata"
+    bundled_tessdata.mkdir(parents=True)
+    bundled_bin.write_bytes(b"")
+
+    pf64 = tmp_path / "Program Files"
+    pf86 = tmp_path / "Program Files (x86)"
+    std64_bin = pf64 / "Tesseract-OCR" / "tesseract.exe"
+    std64_td = pf64 / "Tesseract-OCR" / "tessdata"
+    std64_td.mkdir(parents=True)
+    std64_bin.write_bytes(b"")
+    std86_bin = pf86 / "Tesseract-OCR" / "tesseract.exe"
+    std86_bin.parent.mkdir(parents=True)
+    std86_bin.write_bytes(b"")
+
+    fake_pt_inner = SimpleNamespace(tesseract_cmd="tesseract")
+    fake_pt = SimpleNamespace(pytesseract=fake_pt_inner)
+    monkeypatch.setitem(sys.modules, "pytesseract", fake_pt)
+
+    env_upper = {"PROGRAMFILES": str(pf64), "PROGRAMFILES(X86)": str(pf86)}
+
+    # 级 1：显式入参最优先
+    assert resolve_tesseract(
+        r"C:\Custom\tesseract.exe",
+        program_root=bundled_root,
+        which=lambda _n: "/usr/bin/tesseract",
+        os_name="windows",
+        environ=env_upper,
+    ) == (r"C:\Custom\tesseract.exe", None)
+
+    # 级 2：显式非默认 pytesseract.tesseract_cmd
+    fake_pt_inner.tesseract_cmd = r"D:\Tools\tesseract.exe"
+    assert resolve_tesseract(
+        program_root=bundled_root,
+        which=lambda _n: "/usr/bin/tesseract",
+        os_name="windows",
+        environ=env_upper,
+    ) == (r"D:\Tools\tesseract.exe", None)
+
+    # 级 3：默认 pytesseract.tesseract_cmd 时优先命中内置 PROGRAM_ROOT/tesseract/tesseract.exe + 同级 tessdata
+    fake_pt_inner.tesseract_cmd = "tesseract"
+    assert resolve_tesseract(
+        program_root=bundled_root,
+        which=lambda _n: "/usr/bin/tesseract",
+        os_name="windows",
+        environ=env_upper,
+    ) == (str(bundled_bin), bundled_tessdata)
+
+    # 级 4：无内置时回落 which("tesseract")
+    empty_root = tmp_path / "empty-root"
+    assert resolve_tesseract(
+        program_root=empty_root,
+        which=lambda _n: r"C:\Bin\tesseract.exe",
+        os_name="windows",
+        environ=env_upper,
+    ) == (r"C:\Bin\tesseract.exe", None)
+
+    # 级 5：which 未命中时查 Windows Program Files → Program Files (x86)
+    assert resolve_tesseract(
+        program_root=empty_root,
+        which=lambda _n: None,
+        os_name="windows",
+        environ=env_upper,
+    ) == (str(std64_bin), std64_td)
+    std64_bin.unlink()
+    assert resolve_tesseract(
+        program_root=empty_root,
+        which=lambda _n: None,
+        os_name="windows",
+        environ=env_upper,
+    ) == (str(std86_bin), None)
+
+    # 级 6：全部未命中时兜底 "tesseract"
+    assert resolve_tesseract(
+        program_root=empty_root,
+        which=lambda _n: None,
+        os_name="windows",
+        environ={},
+    ) == ("tesseract", None)
+
+
+def test_bundled_tessdata_uses_env_var_never_config_flag_and_restores_context(tmp_path, monkeypatch):
+    bundled_root = tmp_path / "Ollama Voice Input" / "_internal"
+    bundled_bin = bundled_root / "tesseract" / "tesseract.exe"
+    bundled_td = bundled_root / "tesseract" / "tessdata"
+    bundled_td.mkdir(parents=True)
+    bundled_bin.write_bytes(b"")
+
+    seen_calls: list[dict] = []
+
+    def spy_run(cmd, **kw):
+        seen_calls.append({"cmd": list(cmd), **kw})
+        return subprocess.CompletedProcess(cmd, 0, "List of available languages (3):\nchi_sim\nchi_tra\neng\n", "")
+
+    fake_pt_inner = SimpleNamespace(tesseract_cmd="tesseract")
+    seen_pt: list[dict] = []
+
+    class TesseractNotFoundError(Exception):
+        pass
+
+    def fake_image_to_string(img, *, lang, timeout=0, **kw):
+        seen_pt.append({
+            "cmd": fake_pt_inner.tesseract_cmd,
+            "tessdata_prefix": os.environ.get("TESSDATA_PREFIX"),
+            "extra_kw": dict(kw),
+        })
+        return "你好 World"
+
+    fake_pt = SimpleNamespace(
+        pytesseract=fake_pt_inner,
+        image_to_string=fake_image_to_string,
+        TesseractNotFoundError=TesseractNotFoundError,
+    )
+    monkeypatch.setitem(sys.modules, "pytesseract", fake_pt)
+    monkeypatch.setattr(_ocr, "PROGRAM_ROOT", bundled_root)
+    monkeypatch.setattr(_ocr, "detect_os", lambda: "windows")
+    monkeypatch.setenv("TESSDATA_PREFIX", "/original/tessdata")
+
+    langs = list_tesseract_languages(run=spy_run, program_root=bundled_root, os_name="windows", environ={})
+    assert langs == ["chi_sim", "chi_tra", "eng"]
+    assert seen_calls[0]["cmd"] == [str(bundled_bin), "--list-langs"]
+    assert "--tessdata-dir" not in " ".join(seen_calls[0]["cmd"])
+    assert seen_calls[0]["env"]["TESSDATA_PREFIX"] == str(bundled_td)
+
+    out = image_to_text(_tiny_png(), lang="chi_sim+eng", get_languages=lambda: ["chi_sim", "eng"])
+    assert out == "你好 World"
+    assert seen_pt == [{
+        "cmd": str(bundled_bin),
+        "tessdata_prefix": str(bundled_td),
+        "extra_kw": {},
+    }]
+    # 退出上下文后必须完整还原 tesseract_cmd 与 TESSDATA_PREFIX（无泄漏）
+    assert fake_pt_inner.tesseract_cmd == "tesseract"
+    assert os.environ.get("TESSDATA_PREFIX") == "/original/tessdata"
+
+    # 异常退出上下文也必须还原且映射中文报错
+    def missing_runner(img, *, lang, timeout=0):
+        raise TesseractNotFoundError("tesseract is not installed or it's not in your PATH")
+
+    fake_pt.image_to_string = missing_runner
+    with pytest.raises(LogicError) as not_found:
+        image_to_text(_tiny_png(), lang="eng", get_languages=lambda: ["eng"])
+    assert not_found.value.code == ErrorCode.ocr_failed and "未找到 Tesseract OCR" in not_found.value.message
+    assert fake_pt_inner.tesseract_cmd == "tesseract"
+    assert os.environ.get("TESSDATA_PREFIX") == "/original/tessdata"
+
+    # 未预设 TESSDATA_PREFIX 时退出后应清空（不残留）
+    monkeypatch.delenv("TESSDATA_PREFIX", raising=False)
+    with pytesseract_runtime_context(fake_pt, program_root=bundled_root, os_name="windows"):
+        assert os.environ.get("TESSDATA_PREFIX") == str(bundled_td)
+    assert "TESSDATA_PREFIX" not in os.environ
 
 
 def test_tesseract_error_maps_language_missing():

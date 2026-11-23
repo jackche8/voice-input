@@ -1,7 +1,11 @@
 """识别运行环境安装动作（在安装 worker 进程里执行）：固定版本 uv → 托管 CPython → venv → 带 hash 的锁定依赖 → 清单。
 
-变体：Linux 且 nvidia-smi 读到至少一张 GPU → cuda；macOS arm64 → mps；其余（含 Windows + NVIDIA，已知限制）→ cpu。
-清单 `paths.asr_manifest` 最后写，存在即「已安装」（看护层与一键装齐都按它判断）；任何一步失败都不写清单。
+变体：
+- Linux 且 nvidia-smi 读到至少一张 GPU → cuda（vLLM）；
+- Windows x64 且满足单源准入（总显存 >= 4608 MiB、计算能力 >= 7.0、驱动 >= 570）→ cuda（PyTorch cu128 + Transformers）；
+  仅 nvidia-smi 不存在或硬件不合格时合法返回 cpu；驱动 < 570 或探测故障显式报错，绝不静默降级 CPU；
+- macOS arm64 → mps（不调用 nvidia-smi）；其余 → cpu。
+清单 `paths.asr_manifest` 最后写，存在且匹配目标变体即「已安装」；支持 cpu → cuda 升级与损坏清单重装。
 """
 from __future__ import annotations
 
@@ -10,7 +14,11 @@ import json
 import os
 import shutil
 import subprocess
+import threading
+import time
+import uuid
 from collections.abc import Callable, Mapping
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -21,17 +29,22 @@ from _contracts import ErrorCode, LogicError, SetupProgress
 from _paths import PROGRAM_ROOT, AppPaths, asr_runtime_root
 from _platform.child_process import windows_subprocess_kwargs
 from _platform.protocol import OsName
-from _supervision.gpu_preflight import query_gpus
+from _supervision.gpu_preflight import (
+    NvidiaSmiNotFoundError,
+    evaluate_windows_cuda_gpu,
+    is_cuda_visible_devices_empty,
+    query_gpus,
+)
 from _v3.release_download import download_verified, extract_archive
+from _v3.setup_probe import asr_variant
 from _v3.setup_tasks import GIB, ProgressFn, SetupAction
 
 UV_VERSION = "0.11.3"
 PYTHON_VERSION = "3.12.13"
 UV_RELEASE_BASE = "https://github.com/astral-sh/uv/releases/download"
 LOCK_DIR = asr_runtime_root(PROGRAM_ROOT) / "runtimes" / "asr"
-# 安装峰值 = venv + uv 下载缓存（装完即清缓存）。cpu 实测 venv 1.6 GB + 缓存 1.7 GB + Python 0.1 GB（八.18）；
-# cuda 按现有 venv-asr 7.2 GB 同比估算；mps 按 cpu 计。
-VARIANT_DISK_BYTES: Mapping[str, int] = {"cuda": 16 * GIB, "cpu": 4 * GIB, "mps": 4 * GIB}
+HARDWARE_PROBE_TTL_S = 30.0
+REMOVING_VENV_PREFIX = ".venv.removing."
 INSTALL_TIMEOUT_S = 3600
 Runner = Callable[..., subprocess.CompletedProcess]
 
@@ -44,22 +57,204 @@ _UV_TARGETS = {
 }
 
 
+@dataclass(frozen=True)
+class AsrHardwareProbe:
+    """ASR 硬件探测结构化结果：仅 error is None 时 target_variant 有效；故障或旧驱动显式置 error，绝不回落 cpu。"""
+
+    target_variant: str | None
+    detail: str
+    gpu_name: str | None = None
+    driver_version: str | None = None
+    error: str | None = None
+
+    @property
+    def ok(self) -> bool:
+        return self.error is None and self.target_variant is not None
+
+
+class CachedHardwareProbe:
+    """线程安全 30s TTL 硬件探测缓存（成功与失败均缓存，支持升级起止主动失效）。"""
+
+    def __init__(
+        self,
+        probe: Callable[[], AsrHardwareProbe],
+        *,
+        ttl_s: float = HARDWARE_PROBE_TTL_S,
+        monotonic: Callable[[], float] = time.monotonic,
+    ) -> None:
+        self._probe = probe
+        self._ttl_s = ttl_s
+        self._monotonic = monotonic
+        self._lock = threading.Lock()
+        self._cached: tuple[float, AsrHardwareProbe] | None = None
+
+    def get(self) -> AsrHardwareProbe:
+        with self._lock:
+            now = self._monotonic()
+            if self._cached is not None and (now - self._cached[0]) < self._ttl_s:
+                return self._cached[1]
+            result = self._probe()
+            self._cached = (self._monotonic(), result)
+            return result
+
+    __call__ = get
+
+    def invalidate(self) -> None:
+        with self._lock:
+            self._cached = None
+
+
 def choose_variant(os_name: OsName, machine: str, *, has_nvidia_gpu: bool) -> str:
+    arch = machine.strip().lower()
     if os_name == "linux" and has_nvidia_gpu:
         return "cuda"
-    if os_name == "macos" and machine.lower() == "arm64":
+    if os_name == "windows" and has_nvidia_gpu and arch in ("amd64", "x86_64"):
+        return "cuda"
+    if os_name == "macos" and arch == "arm64":
         return "mps"
     return "cpu"
 
 
-def detect_variant(os_name: OsName, machine: str, *, run: Runner, which: Callable[[str], str | None]) -> tuple[str, str]:
-    """返回（变体，判定依据）；依据写进任务进度，未检测到 GPU 的原因可见。"""
+def probe_asr_hardware(
+    os_name: OsName,
+    machine: str,
+    *,
+    run: Runner = subprocess.run,
+    which: Callable[[str], str | None] = shutil.which,
+    environ: Mapping[str, str] | None = None,
+) -> AsrHardwareProbe:
+    """结构化探测目标识别变体：macOS 不调 nvidia-smi；Windows 走单源准入；故障/旧驱动绝不静默降 CPU。"""
+    arch = machine.strip().lower()
+    if os_name == "macos":
+        if arch == "arm64":
+            return AsrHardwareProbe(target_variant="mps", detail="Apple Silicon（MPS）")
+        return AsrHardwareProbe(target_variant="cpu", detail=f"macOS {machine} 使用 CPU")
+    if os_name == "windows":
+        if arch not in ("amd64", "x86_64"):
+            return AsrHardwareProbe(target_variant="cpu", detail=f"Windows {machine} 架构不支持 CUDA 加速，使用 CPU")
+        if is_cuda_visible_devices_empty(environ, os_name="windows"):
+            return AsrHardwareProbe(target_variant="cpu", detail="CUDA_VISIBLE_DEVICES 为空，未暴露任何 GPU，使用 CPU")
+        try:
+            gpus = query_gpus(run=run, which=which, os_name="windows", environ=environ)
+        except NvidiaSmiNotFoundError as exc:
+            return AsrHardwareProbe(target_variant="cpu", detail=f"未检测到 NVIDIA GPU（{exc}）")
+        except ValueError as exc:
+            return AsrHardwareProbe(target_variant=None, detail=str(exc), error=f"NVIDIA GPU 探测失败：{exc}")
+        verdict = evaluate_windows_cuda_gpu(gpus, machine=machine, environ=environ, check_free_vram=False)
+        gpu = verdict.gpu
+        gpu_name = None if gpu is None else gpu.name
+        driver_version = (gpu.driver_version or None) if gpu is not None else None
+        if verdict.status == "eligible":
+            return AsrHardwareProbe(
+                target_variant="cuda",
+                detail=verdict.reason,
+                gpu_name=gpu_name,
+                driver_version=driver_version,
+            )
+        if verdict.status == "unsupported_cpu":
+            return AsrHardwareProbe(
+                target_variant="cpu",
+                detail=verdict.reason,
+                gpu_name=gpu_name,
+                driver_version=driver_version,
+            )
+        return AsrHardwareProbe(
+            target_variant=None,
+            detail=verdict.reason,
+            gpu_name=gpu_name,
+            driver_version=driver_version,
+            error=verdict.reason,
+        )
+    if os_name == "linux":
+        if is_cuda_visible_devices_empty(environ, os_name="linux"):
+            return AsrHardwareProbe(target_variant="cpu", detail="CUDA_VISIBLE_DEVICES 为空，未暴露任何 GPU，使用 CPU")
+        try:
+            gpus = query_gpus(run=run, which=which, os_name="linux", environ=environ)
+        except NvidiaSmiNotFoundError as exc:
+            return AsrHardwareProbe(target_variant="cpu", detail=f"未检测到 NVIDIA GPU（{exc}）")
+        except ValueError as exc:
+            return AsrHardwareProbe(target_variant=None, detail=str(exc), error=f"NVIDIA GPU 探测失败：{exc}")
+        names = "、".join(gpu.name for gpu in gpus)
+        return AsrHardwareProbe(
+            target_variant="cuda",
+            detail=f"检测到 GPU：{names}",
+            gpu_name=gpus[0].name,
+            driver_version=gpus[0].driver_version or None,
+        )
+    return AsrHardwareProbe(target_variant="cpu", detail=f"{os_name}/{machine} 使用 CPU")
+
+
+def detect_variant(
+    os_name: OsName,
+    machine: str,
+    *,
+    run: Runner = subprocess.run,
+    which: Callable[[str], str | None] = shutil.which,
+    environ: Mapping[str, str] | None = None,
+) -> tuple[str, str]:
+    """返回（变体，判定依据）；探测故障或驱动 < 570 时显式抛 LogicError，绝不静默回落 CPU。"""
+    probe = probe_asr_hardware(os_name, machine, run=run, which=which, environ=environ)
+    if probe.error is not None or probe.target_variant is None:
+        raise LogicError(ErrorCode.dependency_failed, probe.error or probe.detail)
+    return probe.target_variant, probe.detail
+
+
+def variant_disk_bytes(os_name: OsName, variant: str) -> int:
+    """单源安装峰值磁盘预算（不含 disk_shortfall 自带的 1 GiB 余量）。"""
+    if variant == "cuda":
+        return 12 * GIB if os_name == "windows" else 16 * GIB
+    if variant in ("cpu", "mps"):
+        return 4 * GIB
+    raise ValueError(f"未知的识别运行环境变体：{variant!r}")
+
+
+def _existing_ancestor(path: Path) -> Path:
+    probe = path
+    while not probe.exists() and probe.parent != probe:
+        probe = probe.parent
+    return probe
+
+
+def _same_volume(a: Path, b: Path) -> bool:
     try:
-        gpus = query_gpus(run=run, which=which)
-    except ValueError as exc:
-        return choose_variant(os_name, machine, has_nvidia_gpu=False), f"未检测到 NVIDIA GPU（{exc}）"
-    names = "、".join(gpu.name for gpu in gpus)
-    return choose_variant(os_name, machine, has_nvidia_gpu=True), f"检测到 GPU：{names}"
+        return os.stat(_existing_ancestor(a)).st_dev == os.stat(_existing_ancestor(b)).st_dev
+    except OSError:
+        return False
+
+
+def _dir_bytes(path: Path) -> int:
+    if not path.exists():
+        return 0
+    if path.is_file() or path.is_symlink():
+        try:
+            return os.lstat(path).st_size
+        except OSError:
+            return 0
+    total = 0
+    for root, _dirs, files in os.walk(path, followlinks=False):
+        for name in files:
+            try:
+                total += os.lstat(os.path.join(root, name)).st_size
+            except OSError:
+                continue
+    return total
+
+
+def asr_runtime_disk_budget(paths: AppPaths, os_name: OsName, variant: str) -> tuple[Path, int]:
+    """计算目标变体净磁盘需求：扣减同卷可回收/可复用的旧 asr_venv、.venv.removing* 与 uv/cache，钳制 >= 0。"""
+    gross = variant_disk_bytes(os_name, variant)
+    reclaimable = 0
+    if paths.asr_venv.exists() and _same_volume(paths.asr_venv, paths.asr_venv):
+        reclaimable += _dir_bytes(paths.asr_venv)
+    parent = paths.asr_venv.parent
+    if parent.is_dir() and _same_volume(parent, paths.asr_venv):
+        for entry in parent.iterdir():
+            if entry.name.startswith(REMOVING_VENV_PREFIX):
+                reclaimable += _dir_bytes(entry)
+    uv_cache = paths.uv_dir / "cache"
+    if uv_cache.exists() and _same_volume(uv_cache, paths.asr_venv):
+        reclaimable += _dir_bytes(uv_cache)
+    return paths.asr_venv, max(0, gross - reclaimable)
 
 
 def uv_asset(os_name: OsName, machine: str) -> str:
@@ -69,18 +264,45 @@ def uv_asset(os_name: OsName, machine: str) -> str:
     return f"uv-{target}.zip" if os_name == "windows" else f"uv-{target}.tar.gz"
 
 
-def lock_file(variant: str, *, program_root: Path | None = None, frozen: bool | None = None) -> Path:
+def lock_file(
+    variant: str,
+    *,
+    os_name: OsName | None = None,
+    program_root: Path | None = None,
+    frozen: bool | None = None,
+) -> Path:
+    filename = "requirements-cuda-win.lock" if (variant == "cuda" and os_name == "windows") else f"requirements-{variant}.lock"
     if program_root is None and frozen is None:
-        return LOCK_DIR / f"requirements-{variant}.lock"
+        return LOCK_DIR / filename
     base = PROGRAM_ROOT if program_root is None else program_root
-    return asr_runtime_root(base, frozen=frozen) / "runtimes" / "asr" / f"requirements-{variant}.lock"
+    return asr_runtime_root(base, frozen=frozen) / "runtimes" / "asr" / filename
 
 
-def asr_runtime_cleanup(paths: AppPaths) -> None:
-    """重试前删除整个识别 venv 与清单（托管 Python 与 uv 本身可复用，不删）。"""
-    paths.asr_manifest.unlink(missing_ok=True)
+def asr_runtime_cleanup(paths: AppPaths, *, rename_retries: int = 10, retry_delay_s: float = 0.2) -> None:
+    """原子重命名旧 venv（锁死直接抛 PermissionError 且绝不删清单），成功后删清单并清扫全部 .venv.removing.*。"""
     if paths.asr_venv.exists():
-        shutil.rmtree(paths.asr_venv)
+        staging = paths.asr_venv.parent / f"{REMOVING_VENV_PREFIX}{os.getpid()}.{uuid.uuid4().hex[:8]}"
+        attempts = max(1, int(rename_retries))
+        for attempt in range(attempts):
+            try:
+                os.rename(paths.asr_venv, staging)
+                break
+            except FileNotFoundError:
+                break
+            except PermissionError:
+                if attempt + 1 >= attempts:
+                    raise
+                time.sleep(retry_delay_s)
+    paths.asr_manifest.unlink(missing_ok=True)
+    parent = paths.asr_venv.parent
+    if parent.is_dir():
+        for entry in sorted(parent.iterdir(), key=lambda p: p.name):
+            if not entry.name.startswith(REMOVING_VENV_PREFIX):
+                continue
+            if entry.is_dir() and not entry.is_symlink():
+                shutil.rmtree(entry)
+            else:
+                entry.unlink(missing_ok=True)
 
 
 def _uv_binary(paths: AppPaths, os_name: OsName) -> Path:
@@ -140,13 +362,19 @@ def asr_runtime_install_action(
     client_factory: Callable[[], httpx.Client],
     run: Runner = subprocess.run,
     clock: Callable[[], str] = lambda: datetime.now(timezone.utc).isoformat(),
+    on_replace_start: Callable[[], None] | None = None,
+    cancel_event: threading.Event | None = None,
 ) -> SetupAction:
     def install(report: ProgressFn) -> str:
-        if paths.asr_manifest.is_file():
-            raise LogicError(ErrorCode.conflict, f"识别运行环境已安装（{paths.asr_manifest}），未重复安装")
         chosen, why = variant()
+        try:
+            existing = asr_variant(paths)
+        except ValueError:
+            existing = None  # 清单损坏：允许重装并重建清单
+        if existing == chosen:
+            raise LogicError(ErrorCode.conflict, f"识别运行环境已安装（{chosen}，{paths.asr_manifest}），未重复安装")
         report(SetupProgress(stage=f"识别运行环境变体 {chosen}：{why}"))
-        lock = lock_file(chosen, program_root=paths.program_root)
+        lock = lock_file(chosen, os_name=os_name, program_root=paths.program_root)
         with client_factory() as client:
             uv = _install_uv(paths, os_name, machine, client, report, run)
         # 只用托管 Python、不读用户的 uv/pip 配置（锁文件已写明索引地址）
@@ -154,13 +382,26 @@ def asr_runtime_install_action(
                "UV_PYTHON_PREFERENCE": "only-managed", "UV_NO_CONFIG": "1"}
         report(SetupProgress(stage=f"安装 Python {PYTHON_VERSION}"))
         _run_uv(run, [str(uv), "python", "install", PYTHON_VERSION], env, f"安装 Python {PYTHON_VERSION} ")
+        if cancel_event is not None and cancel_event.is_set():
+            raise LogicError(ErrorCode.dependency_failed, "安装已中止，未替换既有识别运行环境")
+        if on_replace_start is not None:
+            on_replace_start()
+        try:
+            asr_runtime_cleanup(paths)
+        except (PermissionError, OSError) as exc:
+            raise LogicError(
+                ErrorCode.dependency_failed,
+                f"清理旧识别运行环境失败（可能有进程仍占用文件，请关闭占用后重试）：{exc}",
+            ) from exc
         report(SetupProgress(stage="创建识别运行环境"))
-        _run_uv(run, [str(uv), "venv", "--python", PYTHON_VERSION, str(paths.asr_venv)], env, "创建识别运行环境")
+        _run_uv(run, [str(uv), "venv", "--clear", "--python", PYTHON_VERSION, str(paths.asr_venv)], env, "创建识别运行环境")
         report(SetupProgress(stage=f"安装识别依赖（{chosen}）"))
         _run_uv(run, [str(uv), "pip", "install", "--python", str(paths.asr_python), "--require-hashes", "-r", str(lock)],
                 env, f"安装识别依赖（{chosen}）")
         report(SetupProgress(stage="清理下载缓存"))
         _run_uv(run, [str(uv), "cache", "clean"], env, "清理下载缓存")  # 已装进 venv 的文件不受影响；失败重试时缓存保留可续用
+        if cancel_event is not None and cancel_event.is_set():
+            raise LogicError(ErrorCode.dependency_failed, "安装已中止，未写入运行环境清单")
         manifest = {"variant": chosen, "python": PYTHON_VERSION, "uv": UV_VERSION,
                     "lock_sha256": hashlib.sha256(lock.read_bytes()).hexdigest(), "installed_at": clock()}
         atomic_write_bytes(paths.asr_manifest, json.dumps(manifest, ensure_ascii=False).encode("utf-8"), 0o644)
@@ -170,13 +411,19 @@ def asr_runtime_install_action(
 
 
 __all__ = [
+    "HARDWARE_PROBE_TTL_S",
     "PYTHON_VERSION",
+    "REMOVING_VENV_PREFIX",
     "UV_VERSION",
-    "VARIANT_DISK_BYTES",
+    "AsrHardwareProbe",
+    "CachedHardwareProbe",
     "asr_runtime_cleanup",
+    "asr_runtime_disk_budget",
     "asr_runtime_install_action",
     "choose_variant",
     "detect_variant",
     "lock_file",
+    "probe_asr_hardware",
     "uv_asset",
+    "variant_disk_bytes",
 ]

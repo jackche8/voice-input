@@ -9,6 +9,7 @@ import os
 import platform
 import shutil
 import subprocess
+import threading
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -56,7 +57,14 @@ from _v3.auth import AuthSettings
 from _v3.component_routes import ComponentRegistry
 from _v3.lan_access import LanAccessService, list_physical_lan_ipv4
 from _v3.runtime import Runtime
-from _v3.runtime_install import VARIANT_DISK_BYTES, asr_runtime_cleanup, asr_runtime_install_action, detect_variant
+from _v3.runtime_install import (
+    CachedHardwareProbe,
+    asr_runtime_cleanup,
+    asr_runtime_disk_budget,
+    asr_runtime_install_action,
+    detect_variant,
+    probe_asr_hardware,
+)
 from _v3.setup_actions import (
     asr_download_action,
     ollama_asset,
@@ -65,6 +73,7 @@ from _v3.setup_actions import (
     ollama_pull_action,
 )
 from _v3.setup_probe import (
+    asr_variant,
     dbus_portal_version,
     hotkey_conflicts_capability,
     probe_asr_weights,
@@ -74,7 +83,7 @@ from _v3.setup_probe import (
 )
 from _v3.setup_sequence import InstallSequence, SequenceFacts
 from _v3.setup_service import SetupProbes, SetupService
-from _v3.setup_tasks import GIB, SetupAction, SetupTaskManager, Spawn, TaskKindSpec, thread_spawn
+from _v3.setup_tasks import GIB, SetupAction, SetupTaskManager, Spawn, TaskKindSpec, disk_shortfall, thread_spawn
 
 ASR_DOWNLOAD_WORKER = PROGRAM_ROOT / "_v3" / "asr_download_worker.py"
 
@@ -126,11 +135,18 @@ def _ollama_probe(paths: AppPaths, endpoints: ProductionEndpoints, adapters: Sys
     return probe
 
 
+def _noop() -> None:
+    return None
+
+
 def setup_task_actions(
     paths: AppPaths,
     endpoints: ProductionEndpoints,
     adapters: SystemAdapters,
     config: ConfigStore,
+    *,
+    on_replace_start: Callable[[], None] | None = None,
+    cancel_event: threading.Event | None = None,
 ) -> dict[SetupTaskKind, SetupAction]:
     """安装 worker 进程里执行的真实动作表（服务端进程不执行动作，只拉起 worker）。"""
     download_env = dict(adapters.environ)
@@ -158,10 +174,18 @@ def setup_task_actions(
             paths=paths,
             os_name=paths.os_name,
             machine=platform.machine(),
-            variant=lambda: detect_variant(paths.os_name, platform.machine(), run=adapters.run, which=adapters.which),
+            variant=lambda: detect_variant(
+                paths.os_name,
+                platform.machine(),
+                run=adapters.run,
+                which=adapters.which,
+                environ=adapters.environ,
+            ),
             environ=adapters.environ,
             client_factory=release_client,
             run=adapters.run,
+            on_replace_start=on_replace_start,
+            cancel_event=cancel_event,
         ),
         SetupTaskKind.asr_download: asr_download_action(
             python=paths.asr_python,
@@ -176,29 +200,50 @@ def setup_task_actions(
 
 
 def setup_task_kinds(paths: AppPaths, adapters: SystemAdapters) -> dict[SetupTaskKind, TaskKindSpec]:
-    """每类任务的磁盘预检（目标目录、所需字节）与重试前清理。"""
+    """每类任务的磁盘预检（目标目录、所需字节）与服务端重试前清理（asr_runtime_install 清理下沉至 worker 替换阶段）。"""
 
     def runtime_disk() -> tuple[Path, int]:
-        chosen, _why = detect_variant(paths.os_name, platform.machine(), run=adapters.run, which=adapters.which)
-        return paths.asr_venv, VARIANT_DISK_BYTES[chosen]
+        chosen, _why = detect_variant(
+            paths.os_name,
+            platform.machine(),
+            run=adapters.run,
+            which=adapters.which,
+            environ=adapters.environ,
+        )
+        return asr_runtime_disk_budget(paths, paths.os_name, chosen)
 
     return {
         SetupTaskKind.ollama_install: TaskKindSpec(disk=lambda: (paths.ollama_install_dir, 2 * GIB),
                                                    cleanup=lambda: ollama_install_cleanup(paths.ollama_install_dir)),
         SetupTaskKind.ollama_pull: TaskKindSpec(disk=lambda: (paths.ollama_models, 4 * GIB)),
-        SetupTaskKind.asr_runtime_install: TaskKindSpec(disk=runtime_disk, cleanup=lambda: asr_runtime_cleanup(paths)),
+        SetupTaskKind.asr_runtime_install: TaskKindSpec(disk=runtime_disk, cleanup=_noop),
         SetupTaskKind.asr_download: TaskKindSpec(disk=lambda: (paths.asr_model_dir, 5 * GIB)),
     }
 
 
-def setup_worker_kind(kind: SetupTaskKind, environ: Mapping[str, str]) -> tuple[SetupAction, Callable[[], None]]:
-    """安装 worker 进程入口用：按与服务端相同的 environ 定位 live 路径与端口，取该类任务的动作与清理。"""
+def setup_worker_kind(
+    kind: SetupTaskKind,
+    environ: Mapping[str, str],
+) -> tuple[SetupAction, Callable[[], None], threading.Event]:
+    """安装 worker 进程入口用：按与服务端相同的 environ 定位 live 路径与端口，取该类任务的动作、条件清理与取消事件。"""
     paths = default_app_paths(environ)
     ports = local_ports(environ)
     adapters = SystemAdapters(environ=environ)
     endpoints = ProductionEndpoints(port=ports.server, sidecar_url=ports.asr_url, ollama_url=ports.ollama_url)
+    cancel_event = threading.Event()
+    if kind == SetupTaskKind.asr_runtime_install:
+        replacing = threading.Event()
+        action = setup_task_actions(
+            paths,
+            endpoints,
+            adapters,
+            ConfigStore(paths.config),
+            on_replace_start=replacing.set,
+            cancel_event=cancel_event,
+        )[kind]
+        return action, (lambda: asr_runtime_cleanup(paths) if replacing.is_set() else None), cancel_event
     action = setup_task_actions(paths, endpoints, adapters, ConfigStore(paths.config))[kind]
-    return action, setup_task_kinds(paths, adapters)[kind].cleanup
+    return action, setup_task_kinds(paths, adapters)[kind].cleanup, cancel_event
 
 
 def _setup_service(
@@ -207,6 +252,7 @@ def _setup_service(
     adapters: SystemAdapters,
     config: ConfigStore,
     components: ComponentRegistry,
+    events: EventBus | None = None,
 ) -> SetupService:
     ollama_probe = _ollama_probe(paths, endpoints, adapters, config)
 
@@ -243,11 +289,23 @@ def _setup_service(
             hotkey_conflicts_capability(hotkey_scan),
         ]
 
+    def raw_hardware_probe():
+        return probe_asr_hardware(
+            paths.os_name,
+            platform.machine(),
+            run=adapters.run,
+            which=adapters.which,
+            environ=adapters.environ,
+        )
+
+    cached_hardware = CachedHardwareProbe(raw_hardware_probe)
     probes = SetupProbes(
         session=lambda: session_type(adapters.environ, os_name=paths.os_name),
         ollama=ollama_probe,
         asr_weights=lambda: probe_asr_weights(paths.asr_model_dir),
         capabilities=capabilities,
+        asr_variant=lambda: asr_variant(paths),
+        asr_hardware=cached_hardware.get,
     )
     tasks = SetupTaskManager(
         kinds=setup_task_kinds(paths, adapters),
@@ -263,9 +321,20 @@ def _setup_service(
         ollama_has_model=lambda: ollama_probe().has_model,
         asr_runtime_installed=paths.asr_manifest.is_file,
         asr_weights_complete=lambda: probe_asr_weights(paths.asr_model_dir).complete,
+        asr_hardware_probe=raw_hardware_probe,
+        asr_installed_variant=lambda: asr_variant(paths),
+        asr_runtime_on_disk=lambda: paths.asr_manifest.exists() or paths.asr_venv.exists(),
+        asr_disk_shortfall=lambda target: disk_shortfall(*asr_runtime_disk_budget(paths, paths.os_name, target)),
+        invalidate_hardware_cache=cached_hardware.invalidate,
     )
-    sequence = InstallSequence(tasks=tasks, facts=facts, components=components,
-                               state_file=paths.data_root / "setup" / "install_all.json", spawn=adapters.spawn)
+    sequence = InstallSequence(
+        tasks=tasks,
+        facts=facts,
+        components=components,
+        events=events,
+        state_file=paths.data_root / "setup" / "install_all.json",
+        spawn=adapters.spawn,
+    )
     return SetupService(probes=probes, tasks=tasks, sequence=sequence, components=components)
 
 
@@ -354,7 +423,7 @@ def compose_production_runtime(
         ocr_layout=extract_ocr_layout,
         decode_audio=decode_audio_to_pcm16k,
         stream_provider=SidecarStreamProvider(asr),
-        setup=_setup_service(paths, endpoints, adapters, config, components),
+        setup=_setup_service(paths, endpoints, adapters, config, components, events=events),
         components=components,
         lan=LanAccessService(token=token, list_ips=list_ips, port=endpoints.port),
         list_audio_inputs=list_audio_inputs,
