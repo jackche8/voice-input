@@ -50,8 +50,8 @@ bash packaging/macos/build.sh
 - **Dry-run build (no Release published)**: Trigger **Actions → Release → Run workflow (`workflow_dispatch`)** to build all 3 platforms and download the `release-bundle` artifact (including `SHA256SUMS.txt`).
 - **Publish Release**: Push a tag matching `v<_version.APP_VERSION>`, e.g.:
   ```bash
-  git tag v3.4.1
-  git push origin v3.4.1
+  git tag v3.4.2
+  git push origin v3.4.2
   ```
 
 ---

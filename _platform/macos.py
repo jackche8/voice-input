@@ -40,7 +40,7 @@ from _platform.protocol import (
     FocusTarget,
     HotkeyRig,
     PasteResult,
-    VirtualRect,
+    ScreenCapture,
 )
 
 PASTE_RESTORE_DELAY_S = 0.55
@@ -186,13 +186,8 @@ class MacOSPlatformAdapter:
             self._macos_api = RealMacOSSystemApi(mss_factory=self._mss_factory)
         return self._macos_api
 
-    def capture_region(
-        self,
-        region: VirtualRect,
-        *,
-        virtual_rect: VirtualRect | None = None,
-    ) -> bytes:
-        return self._api().capture_region(region, self._temp_dir, virtual_rect=virtual_rect)
+    def capture_screen(self) -> ScreenCapture:
+        return self._api().capture_screen(self._temp_dir)
 
     def current_focus(self) -> FocusTarget:
         api = self._api()

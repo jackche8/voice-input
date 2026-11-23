@@ -1,10 +1,11 @@
 """截屏原位翻译（Ctrl+Alt+X）、纯 OCR（Ctrl+Alt+O）与截屏标注（Ctrl+Alt+A）统一业务编排。
 
-三个入口共用同一框选器与 generation 互斥规则：透明全屏红十字框选（正在框选或截屏时忽略重复触发）→
-松手后只截选区 → 翻译/OCR 打开原位浮窗（后台 `POST /api/v1/ocr-inplace`），标注打开标注浮窗（本地冻结图 +
-工具条复制 PNG / 保存 PNG 到图片目录）。浮窗自己显示加载、结果、复制与保存反馈，本流程不向语音底栏发
-busy/idle；只有没有浮窗可显示的失败（框选器打不开、截屏失败、浮窗打不开）才发 status.error。
-全局 Esc 统一走 `handle_escape()`：框选器取消，浮窗/标注按焦点交由窗口自身 `handle_escape()` 处理；
+三个入口共用同一冻结全屏框选器与 generation 互斥规则：按键先抓全屏（常态 0 等待；仅替换旧浮窗时先静默关旧窗
+并短等退场，防重复触发风暴）→ 打开不透明冻结全屏红十字框选 → 松手 0 延迟直接从内存冻结图裁切选区并先显示
+与立即重绘目标浮窗，再于 `finally` 静默关闭旧框选器并复焦目标浮窗（选区外立即解除冻结恢复真实桌面）。
+浮窗自己显示加载、结果、复制与保存反馈，本流程不向语音底栏发 busy/idle；只有没有浮窗可显示的失败
+（抓屏失败、框选器打不开、裁切失败、浮窗打不开）才发 status.error。
+全局 Esc 统一走 `handle_escape()`：框选器/抓屏中取消，浮窗/标注按焦点交由窗口自身 `handle_escape()` 处理；
 `close_overlay()` 仅用于应用退出或新一次截屏取代（`close_silent`）。
 """
 from __future__ import annotations
@@ -20,11 +21,12 @@ from typing import Any, Literal, Protocol
 from _contracts import DEFAULT_TRANSLATE_LANG_PAIR, ErrorCode, OcrTextBlock
 from _desktop.api import api_error_code, api_error_reason
 from _desktop.status import PlatformStatus
+from _platform.protocol import ScreenCapture, crop_png_region
 
 RectTuple = tuple[int, int, int, int]
 AnnotateStyle = tuple[str, str]
 CaptureMode = Literal["translate", "ocr", "annotate"]
-DEFAULT_CAPTURE_DELAY_S = 0.08
+OLD_OVERLAY_DISMISS_DELAY_S = 0.06
 
 
 @dataclass(frozen=True)
@@ -68,7 +70,7 @@ class AnnotatorHandle(Protocol):
 
 
 OpenSelector = Callable[
-    [RectTuple | None, str, Callable[[RectTuple], None], Callable[[], None]],
+    [bytes, RectTuple | None, str, Callable[[RectTuple], None], Callable[[], None]],
     SelectorHandle,
 ]
 
@@ -114,6 +116,17 @@ def _close_handle(handle: Any) -> None:
         close()
 
 
+def _focus_handle(handle: Any) -> None:
+    if handle is None:
+        return
+    raise_fn = getattr(handle, "raise_", None)
+    if callable(raise_fn):
+        raise_fn()
+    activate_fn = getattr(handle, "activateWindow", None)
+    if callable(activate_fn):
+        activate_fn()
+
+
 def _parse_blocks(raw_blocks: Any) -> list[OcrTextBlock]:
     blocks: list[OcrTextBlock] = []
     for item in raw_blocks or []:
@@ -134,7 +147,7 @@ class CaptureFlow:
     def __init__(
         self,
         *,
-        capture_region: Callable[[RectTuple, RectTuple | None], bytes],
+        capture_screen: Callable[[], ScreenCapture],
         open_selector: OpenSelector,
         open_inplace_overlay: OpenInplaceOverlay,
         copy_clipboard: Callable[[str], bool],
@@ -146,11 +159,11 @@ class CaptureFlow:
         copy_image: Callable[[bytes], str | None] | None = None,
         save_dir: Callable[[], Path] | None = None,
         now: Callable[[], datetime] = datetime.now,
-        capture_delay_s: float = DEFAULT_CAPTURE_DELAY_S,
+        old_overlay_dismiss_delay_s: float = OLD_OVERLAY_DISMISS_DELAY_S,
         sleep: Callable[[float], None] = time.sleep,
         spawn: Callable[[Callable[[], None]], None] | None = None,
     ) -> None:
-        self.capture_region = capture_region
+        self.capture_screen = capture_screen
         self.open_selector = open_selector
         self.open_inplace_overlay = open_inplace_overlay
         self.copy_clipboard = copy_clipboard
@@ -162,7 +175,7 @@ class CaptureFlow:
         self.copy_image = copy_image
         self.save_dir = save_dir
         self._now = now
-        self._capture_delay_s = max(0.0, float(capture_delay_s))
+        self._old_overlay_dismiss_delay_s = max(0.0, float(old_overlay_dismiss_delay_s))
         self._sleep = sleep
         self._spawn = spawn or (lambda fn: threading.Thread(target=fn, name="capture-flow", daemon=True).start())
 
@@ -271,115 +284,226 @@ class CaptureFlow:
 
     def _start_capture(self, mode: CaptureMode, mode_label: str) -> None:
         with self._lock:
-            # 根治防风暴：正在打开框选器、正在拖拽或正在截取选区时直接忽略重复触发
-            if self._selector is not None or self._selector_opening or self._capturing:
+            # 根治防风暴与重入：抓屏、打开框选器、拖拽框选或交接开窗期间直接忽略重复触发
+            if (
+                self._selector is not None
+                or self._selector_opening
+                or self._capturing
+                or self._overlay_opening
+            ):
                 return
             old_overlay = self._overlay
             self._overlay = None
             self._overlay_opening = False
             self._generation += 1
             gen = self._generation
-            self._selector_opening = True
+            self._capturing = True
 
-        def _open_selector_ui() -> None:
-            _close_handle(old_overlay)
-            if not self._is_current(gen):
-                return
+        had_old_overlay = old_overlay is not None
 
-            vrect = self._get_virtual_rect() if self._get_virtual_rect is not None else None
-
-            def _on_cancelled() -> None:
-                with self._lock:
-                    if self._generation != gen:
-                        return
-                    self._selector = None
-                    self._selector_opening = False
-
-            def _on_selected(rect: RectTuple) -> None:
-                with self._lock:
-                    if self._generation != gen:
-                        return
-                    self._selector = None
-                    self._selector_opening = False
-                    self._capturing = True
-                self._spawn(lambda: self._capture_and_process(gen, mode, rect, vrect))
-
+        def _prepare_ui() -> None:
             try:
-                selector = self.open_selector(
-                    vrect,
-                    mode_label,
-                    _on_selected,
-                    _on_cancelled,
-                )
+                _close_handle(old_overlay)
+                if not self._is_current(gen):
+                    return
+                vrect = self._get_virtual_rect() if self._get_virtual_rect is not None else None
+                self._spawn(lambda: self._capture_screen_worker(gen, mode, mode_label, vrect, had_old_overlay))
             except Exception as exc:
                 msg = api_error_reason(exc)
-                print(f"[capture] 框选器无法打开: {msg}", flush=True)
+                print(f"[capture] 截屏准备失败: {msg}", flush=True)
+                should_report = False
                 with self._lock:
                     if self._generation == gen:
-                        self._selector_opening = False
-                if self._is_current(gen):
-                    self.status.error(ErrorCode.dependency_failed, f"框选器无法打开：{msg}")
-                return
+                        self._capturing = False
+                        should_report = True
+                if should_report:
+                    self.status.error(ErrorCode.dependency_failed, f"截屏失败：{msg}")
 
-            stale = False
-            with self._lock:
-                if self._generation != gen:
-                    stale = True
-                else:
-                    self._selector_opening = False
-                    self._selector = selector
-            if stale:
-                _close_handle(selector)
-
-        self.invoke_ui(_open_selector_ui)
-
-    def _capture_and_process(
-        self,
-        gen: int,
-        mode: CaptureMode,
-        rect: RectTuple,
-        virtual_rect: RectTuple | None,
-    ) -> None:
         try:
-            if self._capture_delay_s > 0:
-                self._sleep(self._capture_delay_s)
-            if not self._is_current(gen):
-                return
-            png = self.capture_region(rect, virtual_rect)
+            self.invoke_ui(_prepare_ui)
         except Exception as exc:
             msg = api_error_reason(exc)
-            print(f"[capture] 选区截屏失败: {msg}", flush=True)
-            if self._is_current(gen):
-                self.status.error(ErrorCode.dependency_failed, f"截屏失败：{msg}")
-            return
-        finally:
+            print(f"[capture] 投递截屏准备失败: {msg}", flush=True)
+            should_report = False
             with self._lock:
                 if self._generation == gen:
                     self._capturing = False
+                    should_report = True
+            if should_report:
+                self.status.error(ErrorCode.dependency_failed, f"截屏失败：{msg}")
+
+    def _capture_screen_worker(
+        self,
+        gen: int,
+        mode: CaptureMode,
+        mode_label: str,
+        vrect: RectTuple | None,
+        had_old_overlay: bool,
+    ) -> None:
+        try:
+            if had_old_overlay and self._old_overlay_dismiss_delay_s > 0:
+                self._sleep(self._old_overlay_dismiss_delay_s)
+            if not self._is_current(gen):
+                return
+            shot = self.capture_screen()
+            if not shot.png_bytes:
+                raise RuntimeError("全屏截图 PNG 为空")
+        except Exception as exc:
+            msg = api_error_reason(exc)
+            print(f"[capture] 全屏抓屏失败: {msg}", flush=True)
+            should_report = False
+            with self._lock:
+                if self._generation == gen:
+                    self._capturing = False
+                    should_report = True
+            if should_report:
+                self.status.error(ErrorCode.dependency_failed, f"截屏失败：{msg}")
+            return
 
         with self._lock:
             if self._generation != gen:
                 return
-            self._overlay_opening = True
-        if mode == "annotate":
-            self.invoke_ui(lambda: self._open_annotator(gen, png, rect, virtual_rect))
+            self._capturing = False
+            self._selector_opening = True
+
+        try:
+            self.invoke_ui(lambda: self._open_selector_ui(gen, mode, mode_label, shot, vrect))
+        except Exception as exc:
+            msg = api_error_reason(exc)
+            print(f"[capture] 投递冻结框选器失败: {msg}", flush=True)
+            should_report = False
+            with self._lock:
+                if self._generation == gen:
+                    self._selector_opening = False
+                    should_report = True
+            if should_report:
+                self.status.error(ErrorCode.dependency_failed, f"框选器无法打开：{msg}")
+
+    def _open_selector_ui(
+        self,
+        gen: int,
+        mode: CaptureMode,
+        mode_label: str,
+        shot: ScreenCapture,
+        vrect: RectTuple | None,
+    ) -> None:
+        if not self._is_current(gen):
             return
-        self.invoke_ui(lambda: self._open_overlay(gen, mode, png, rect, virtual_rect))
+
+        ref_rect: RectTuple = vrect if vrect is not None else shot.virtual_rect
+        selector_box: dict[str, SelectorHandle | None] = {"handle": None}
+        selected_called = [False]
+
+        def _on_cancelled() -> None:
+            with self._lock:
+                if self._generation != gen:
+                    return
+                self._selector = None
+                self._selector_opening = False
+
+        def _on_selected(rect: RectTuple) -> None:
+            with self._lock:
+                if self._generation != gen:
+                    return
+                selected_called[0] = True
+                selector = self._selector or selector_box["handle"]
+                self._selector = None
+                self._selector_opening = False
+                self._overlay_opening = True
+
+            target: OverlayHandle | AnnotatorHandle | None = None
+            cropped_png: bytes | None = None
+            try:
+                try:
+                    cropped_png = crop_png_region(shot.png_bytes, ref_rect, rect)
+                except Exception as exc:
+                    msg = api_error_reason(exc)
+                    print(f"[capture] 选区裁切失败: {msg}", flush=True)
+                    should_report = False
+                    with self._lock:
+                        if self._generation == gen:
+                            self._overlay_opening = False
+                            should_report = True
+                    if should_report:
+                        self.status.error(ErrorCode.dependency_failed, f"截屏失败：{msg}")
+                    return
+
+                if mode == "annotate":
+                    target = self._open_annotator(gen, cropped_png, rect, ref_rect)
+                else:
+                    target = self._open_overlay(gen, mode, cropped_png, rect, ref_rect)
+            finally:
+                _close_handle(selector)
+                should_focus = False
+                with self._lock:
+                    should_focus = (
+                        target is not None
+                        and self._generation == gen
+                        and self._overlay is target
+                    )
+                if should_focus:
+                    _focus_handle(target)
+
+            should_spawn_inplace = False
+            with self._lock:
+                should_spawn_inplace = (
+                    target is not None
+                    and mode != "annotate"
+                    and cropped_png is not None
+                    and self._generation == gen
+                    and self._overlay is target
+                )
+            if should_spawn_inplace:
+                assert cropped_png is not None
+                self._spawn(lambda: self._run_inplace(gen, mode, target, cropped_png))  # type: ignore[arg-type]
+
+        try:
+            selector = self.open_selector(
+                shot.png_bytes,
+                ref_rect,
+                mode_label,
+                _on_selected,
+                _on_cancelled,
+            )
+        except Exception as exc:
+            msg = api_error_reason(exc)
+            print(f"[capture] 框选器无法打开: {msg}", flush=True)
+            should_report = False
+            with self._lock:
+                if self._generation == gen:
+                    self._selector_opening = False
+                    should_report = True
+            if should_report:
+                self.status.error(ErrorCode.dependency_failed, f"框选器无法打开：{msg}")
+            return
+
+        selector_box["handle"] = selector
+        stale = False
+        with self._lock:
+            if self._generation != gen or selected_called[0]:
+                stale = True
+            else:
+                self._selector_opening = False
+                self._selector = selector
+        if stale:
+            _close_handle(selector)
 
     def _open_annotator(
         self, gen: int, cropped_png: bytes, rect: RectTuple, virtual_rect: RectTuple | None
-    ) -> None:
+    ) -> AnnotatorHandle | None:
         with self._lock:
             if self._generation != gen:
-                return
+                return None
             remembered = self._annotate_style
         if self.open_annotator is None:
+            should_report = False
             with self._lock:
                 if self._generation == gen:
                     self._overlay_opening = False
-            if self._is_current(gen):
+                    should_report = True
+            if should_report:
                 self.status.error(ErrorCode.dependency_failed, "标注浮窗无法打开：未配置标注视图")
-            return
+            return None
         handle_box: dict[str, AnnotatorHandle | None] = {"handle": None}
 
         def _on_style_changed(style: AnnotateStyle) -> None:
@@ -416,12 +540,14 @@ class CaptureFlow:
         except Exception as exc:
             msg = api_error_reason(exc)
             print(f"[capture] 标注浮窗无法打开: {msg}", flush=True)
+            should_report = False
             with self._lock:
                 if self._generation == gen:
                     self._overlay_opening = False
-            if self._is_current(gen):
+                    should_report = True
+            if should_report:
                 self.status.error(ErrorCode.dependency_failed, f"标注浮窗无法打开：{msg}")
-            return
+            return None
 
         handle_box["handle"] = annotator
         stale = False
@@ -433,12 +559,14 @@ class CaptureFlow:
                 self._overlay = annotator
         if stale:
             _close_handle(annotator)
+            return None
+        return annotator
 
     def _open_overlay(
         self, gen: int, mode: CaptureMode, cropped_png: bytes, rect: RectTuple, virtual_rect: RectTuple | None
-    ) -> None:
+    ) -> OverlayHandle | None:
         if not self._is_current(gen):
-            return
+            return None
         overlay_box: dict[str, OverlayHandle | None] = {"handle": None}
 
         def _on_closed() -> None:
@@ -467,12 +595,14 @@ class CaptureFlow:
         except Exception as exc:
             msg = api_error_reason(exc)
             print(f"[capture] 原位浮窗无法打开: {msg}", flush=True)
+            should_report = False
             with self._lock:
                 if self._generation == gen:
                     self._overlay_opening = False
-            if self._is_current(gen):
+                    should_report = True
+            if should_report:
                 self.status.error(ErrorCode.dependency_failed, f"原位浮窗无法打开：{msg}")
-            return
+            return None
 
         overlay_box["handle"] = overlay
         stale = False
@@ -484,9 +614,8 @@ class CaptureFlow:
                 self._overlay = overlay
         if stale:
             _close_handle(overlay)
-            return
-
-        self._spawn(lambda: self._run_inplace(gen, mode, overlay, cropped_png))
+            return None
+        return overlay
 
     def _run_inplace(self, gen: int, mode: CaptureMode, overlay: OverlayHandle, cropped_png: bytes) -> None:
         """后台：识别（翻译模式再翻译）后把结果或失败原因交给浮窗；浮窗已关或已被新一次截屏取代则丢弃。"""

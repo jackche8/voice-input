@@ -51,16 +51,18 @@ def query_virtual_screen_rect(app) -> RectTuple | None:
     return (vg.x(), vg.y(), vg.width(), vg.height())
 
 
-def open_live_selector(
+def open_frozen_selector(
     app,
     selector_cls,
+    frozen_png: bytes,
     rect: RectTuple | None,
     mode_label: str,
     on_selected: Callable[[RectTuple], None],
     on_cancelled: Callable[[], None],
 ):
-    """直接打开透明全屏红十字框选器（不预抓全屏，单屏使用 showFullScreen 杜绝顶栏/Dock 压扁跳动）。"""
+    """打开冻结全屏红十字框选器（展示已抓拍的整屏静态图，单屏 showFullScreen 杜绝顶栏/Dock 压扁跳动）。"""
     sel = selector_cls(
+        frozen_png=frozen_png,
         virtual_geometry=rect,
         mode_label=mode_label,
         on_selected=on_selected,
@@ -111,13 +113,14 @@ def open_annotator(
 
 
 def _show_over_desktop(app, widget):
-    """单屏 showFullScreen（不被顶栏/Dock 压扁），多屏按虚拟桌面几何 show；置顶并激活。"""
+    """单屏 showFullScreen（不被顶栏/Dock 压扁），多屏按虚拟桌面几何 show；置顶、激活并立即绘出首帧。"""
     if len(app.screens()) <= 1:
         widget.showFullScreen()
     else:
         widget.show()
     widget.raise_()
     widget.activateWindow()
+    widget.repaint()
     return widget
 
 

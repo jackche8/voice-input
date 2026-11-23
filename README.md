@@ -8,11 +8,11 @@
 
 按住快捷键说话 → `Qwen3-ASR 1.7B` 流式识别 → 本地 `qwen3.5:4b` 只纠错不扩写 → 自动输入到任意应用
 
-**简体中文** · [English](README.en.md) &nbsp;|&nbsp; [🌐 产品主页](https://jackche8.github.io/voice-input/) &nbsp;|&nbsp; [⬇️ 免费下载 v3.4.1](https://github.com/jackche8/voice-input/releases) &nbsp;|&nbsp; [📄 商业授权](COMMERCIAL.md)
+**简体中文** · [English](README.en.md) &nbsp;|&nbsp; [🌐 产品主页](https://jackche8.github.io/voice-input/) &nbsp;|&nbsp; [⬇️ 免费下载 v3.4.2](https://github.com/jackche8/voice-input/releases) &nbsp;|&nbsp; [📄 商业授权](COMMERCIAL.md)
 
 <br />
 
-[![Version](https://img.shields.io/badge/Version-3.4.1-2563EB?style=flat-square)](https://github.com/jackche8/voice-input/releases/tag/v3.4.1)
+[![Version](https://img.shields.io/badge/Version-3.4.2-2563EB?style=flat-square)](https://github.com/jackche8/voice-input/releases/tag/v3.4.2)
 [![Website](https://img.shields.io/badge/Website-GitHub%20Pages-0F766E?style=flat-square)](https://jackche8.github.io/voice-input/)
 [![Python](https://img.shields.io/badge/Python-3.11+-3776AB?style=flat-square&logo=python&logoColor=white)](https://python.org)
 [![Ollama](https://img.shields.io/badge/Ollama-0.40.16-111827?style=flat-square&logo=ollama)](https://ollama.com)
@@ -69,12 +69,12 @@
 
 官方安装包由 GitHub Actions 自动构建并发布于 [GitHub Releases](https://github.com/jackche8/voice-input/releases)（[打包与发布详情](packaging/README.md)）：
 
-| 平台 | 安装包（v3.4.1 直链） | 安装方式 / 状态说明 |
+| 平台 | 安装包（v3.4.2 直链） | 安装方式 / 状态说明 |
 |:---|:---|:---|
-| **Linux**（Ubuntu 24.04 amd64，Python 3.12） | [`ollama-voice-input_3.4.1_amd64.deb`](https://github.com/jackche8/voice-input/releases/download/v3.4.1/ollama-voice-input_3.4.1_amd64.deb) | `sudo apt install ./ollama-voice-input_3.4.1_amd64.deb`（独立 venv，内置 `uaccess` 规则免手动加 `input` 组，本地已验证） |
-| **Windows**（x64） | [`Ollama-Voice-Input-3.4.1-windows-x64-setup.exe`](https://github.com/jackche8/voice-input/releases/download/v3.4.1/Ollama-Voice-Input-3.4.1-windows-x64-setup.exe) | Per-user Inno Setup 安装器，**未签名且未经 Windows 真机验收** |
-| **macOS**（Apple Silicon arm64） | [`Ollama-Voice-Input-3.4.1-macos-arm64.dmg`](https://github.com/jackche8/voice-input/releases/download/v3.4.1/Ollama-Voice-Input-3.4.1-macos-arm64.dmg) | 拖入 `Applications`，**未公证且未经 macOS 真机验收** |
-| **完整性校验** | [`SHA256SUMS.txt`](https://github.com/jackche8/voice-input/releases/download/v3.4.1/SHA256SUMS.txt) | 下载后执行 `sha256sum -c SHA256SUMS.txt` 核对哈希 |
+| **Linux**（Ubuntu 24.04 amd64，Python 3.12） | [`ollama-voice-input_3.4.2_amd64.deb`](https://github.com/jackche8/voice-input/releases/download/v3.4.2/ollama-voice-input_3.4.2_amd64.deb) | `sudo apt install ./ollama-voice-input_3.4.2_amd64.deb`（独立 venv，内置 `uaccess` 规则免手动加 `input` 组，本地已验证） |
+| **Windows**（x64） | [`Ollama-Voice-Input-3.4.2-windows-x64-setup.exe`](https://github.com/jackche8/voice-input/releases/download/v3.4.2/Ollama-Voice-Input-3.4.2-windows-x64-setup.exe) | Per-user Inno Setup 安装器，**未签名且未经 Windows 真机验收** |
+| **macOS**（Apple Silicon arm64） | [`Ollama-Voice-Input-3.4.2-macos-arm64.dmg`](https://github.com/jackche8/voice-input/releases/download/v3.4.2/Ollama-Voice-Input-3.4.2-macos-arm64.dmg) | 拖入 `Applications`，**未公证且未经 macOS 真机验收** |
+| **完整性校验** | [`SHA256SUMS.txt`](https://github.com/jackche8/voice-input/releases/download/v3.4.2/SHA256SUMS.txt) | 下载后执行 `sha256sum -c SHA256SUMS.txt` 核对哈希 |
 
 <details>
 <summary>⚠️ Windows SmartScreen / macOS Gatekeeper 未签名安装包首次打开指引</summary>

@@ -81,12 +81,7 @@ class PlatformAdapter(Protocol):
     os_name: OsName
     session_type: str
 
-    def capture_region(
-        self,
-        region: VirtualRect,
-        *,
-        virtual_rect: VirtualRect | None = None,
-    ) -> bytes: ...
+    def capture_screen(self) -> ScreenCapture: ...
 
     def current_focus(self) -> FocusTarget: ...
 
@@ -135,71 +130,35 @@ class PlatformAdapter(Protocol):
     def close(self) -> None: ...
 
 
-def capture_region_mss(
-    region: VirtualRect,
-    mss_factory=None,
-    *,
-    virtual_rect: VirtualRect | None = None,
-) -> bytes:
-    """使用 `mss` 直接截取目标矩形 `(left, top, width, height)` 并编码为 PNG（不先全屏截图）。
+def capture_screen_mss(mss_factory=None) -> ScreenCapture:
+    """使用 `mss` 截取全虚拟桌面（`sct.monitors[0]`）并编码为 PNG，返回 `ScreenCapture`。
 
-    当 `sct.monitors[0]` 宽高有效时：
-    - 若传入 `virtual_rect`，按 `monitors[0]` 与 `virtual_rect` 的宽高比例及原点自动将逻辑坐标映射到
-      `mss` 物理坐标系（Windows / Linux X11 HiDPI 自动缩放，macOS 逻辑点 1:1 等价）；
-    - 无论是否传入 `virtual_rect`，最终抓取框均严格钳制在 `monitors[0]` 边界内且保证宽/高 >= 1，
-      防止 X11 越界 1px 触发 `BadMatch`。
+    当 `sct.monitors` 缺失、首项尺寸非法或 PNG 编码为空时显式抛 `RuntimeError`。
     """
     import mss
     import mss.tools
-
-    rx, ry, rw, rh = (int(v) for v in region)
-    if rw <= 0 or rh <= 0:
-        raise ValueError(f"选区宽高必须大于 0，收到 {region!r}")
-
-    vrect_parsed: VirtualRect | None = None
-    if virtual_rect is not None:
-        vx, vy, vw, vh = (int(v) for v in virtual_rect)
-        if vw <= 0 or vh <= 0:
-            raise ValueError(f"virtual_rect 宽高必须大于 0，收到 {virtual_rect!r}")
-        vrect_parsed = (vx, vy, vw, vh)
 
     factory = mss.mss if mss_factory is None else mss_factory
     with factory() as sct:
         monitors = getattr(sct, "monitors", None)
         mon = monitors[0] if monitors else None
-        mon_left = int(mon.get("left", 0)) if isinstance(mon, dict) else 0
-        mon_top = int(mon.get("top", 0)) if isinstance(mon, dict) else 0
-        mon_w = int(mon.get("width", 0)) if isinstance(mon, dict) else 0
-        mon_h = int(mon.get("height", 0)) if isinstance(mon, dict) else 0
-
-        if mon_w > 0 and mon_h > 0:
-            if vrect_parsed is not None:
-                vx, vy, vw, vh = vrect_parsed
-                scale_x = mon_w / float(vw)
-                scale_y = mon_h / float(vh)
-                raw_x0 = mon_left + int(round((rx - vx) * scale_x))
-                raw_y0 = mon_top + int(round((ry - vy) * scale_y))
-                raw_x1 = mon_left + int(round((rx - vx + rw) * scale_x))
-                raw_y1 = mon_top + int(round((ry - vy + rh) * scale_y))
-            else:
-                raw_x0, raw_y0 = rx, ry
-                raw_x1, raw_y1 = rx + rw, ry + rh
-
-            mon_right = mon_left + mon_w
-            mon_bottom = mon_top + mon_h
-            x0 = max(mon_left, min(mon_right - 1, raw_x0))
-            y0 = max(mon_top, min(mon_bottom - 1, raw_y0))
-            x1 = max(x0 + 1, min(mon_right, raw_x1))
-            y1 = max(y0 + 1, min(mon_bottom, raw_y1))
-            box = {"left": x0, "top": y0, "width": x1 - x0, "height": y1 - y0}
-        else:
-            box = {"left": rx, "top": ry, "width": rw, "height": rh}
-
+        if not isinstance(mon, dict):
+            raise RuntimeError("mss 未返回有效虚拟桌面监视器 monitors[0]")
+        mon_left = int(mon.get("left", 0) or 0)
+        mon_top = int(mon.get("top", 0) or 0)
+        mon_w = int(mon.get("width", 0) or 0)
+        mon_h = int(mon.get("height", 0) or 0)
+        if mon_w <= 0 or mon_h <= 0:
+            raise RuntimeError(f"mss monitors[0] 尺寸非法: {mon!r}")
+        box = {"left": mon_left, "top": mon_top, "width": mon_w, "height": mon_h}
         shot = sct.grab(box)
         png_bytes = mss.tools.to_png(shot.rgb, shot.size)
         if not png_bytes:
-            raise RuntimeError("mss 区域截图编码 PNG 返回空字节")
-        return png_bytes
+            raise RuntimeError("mss 全屏截图编码 PNG 返回空字节")
+        return ScreenCapture(
+            png_bytes=png_bytes,
+            virtual_rect=(mon_left, mon_top, mon_w, mon_h),
+        )
 
 
 def crop_png_region(

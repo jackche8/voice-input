@@ -16,9 +16,10 @@ from pathlib import Path
 from typing import Literal, Protocol
 
 from _hotkey import KEY_TABLE, MACOS_MODIFIERS
+from _platform._common import png_dimensions
 from _platform.protocol import (
-    VirtualRect,
-    capture_region_mss,
+    ScreenCapture,
+    capture_screen_mss,
 )
 
 KVK_ANSI_V = KEY_TABLE["v"].macos_keycode
@@ -40,13 +41,7 @@ class MacOSSystemApi(Protocol):
         """返回 `(bundle_id, pid, app_or_window_name)`。"""
         ...
 
-    def capture_region(
-        self,
-        region: VirtualRect,
-        temp_dir: Path,
-        *,
-        virtual_rect: VirtualRect | None = None,
-    ) -> bytes: ...
+    def capture_screen(self, temp_dir: Path) -> ScreenCapture: ...
 
     def read_clipboard_text(self) -> str: ...
 
@@ -129,29 +124,20 @@ class RealMacOSSystemApi:
                 pass
         return "", 0, ""
 
-    def capture_region(
-        self,
-        region: VirtualRect,
-        temp_dir: Path,
-        *,
-        virtual_rect: VirtualRect | None = None,
-    ) -> bytes:
-        """优先用 `mss` 直抓选区；失败则用 macOS 原生 `screencapture -x -R x,y,w,h` 仅截选区。"""
-        rx, ry, rw, rh = (int(v) for v in region)
-        if rw <= 0 or rh <= 0:
-            raise ValueError(f"选区宽高必须大于 0，收到 {region!r}")
+    def capture_screen(self, temp_dir: Path) -> ScreenCapture:
+        """优先用 `mss` 抓取全虚拟桌面；失败则回退 macOS 原生 `screencapture -x` 整屏抓取。"""
         try:
-            return capture_region_mss((rx, ry, rw, rh), self._mss_factory, virtual_rect=virtual_rect)
+            return capture_screen_mss(self._mss_factory)
         except Exception as mss_err:
             if not self._which("screencapture"):
-                raise RuntimeError(f"macOS 区域抓屏不可用: {mss_err}") from mss_err
+                raise RuntimeError(f"macOS 全屏抓屏不可用: {mss_err}") from mss_err
             temp_dir.mkdir(parents=True, exist_ok=True)
-            fd, tmp_name = tempfile.mkstemp(prefix=".macos-region.", suffix=".png", dir=str(temp_dir))
+            fd, tmp_name = tempfile.mkstemp(prefix=".macos-screen.", suffix=".png", dir=str(temp_dir))
             os.close(fd)
             shot_path = Path(tmp_name)
             try:
                 proc = self._run(
-                    ["screencapture", "-x", f"-R{rx},{ry},{rw},{rh}", str(shot_path)],
+                    ["screencapture", "-x", str(shot_path)],
                     capture_output=True,
                     text=True,
                     timeout=10,
@@ -159,9 +145,13 @@ class RealMacOSSystemApi:
                 )
                 if proc.returncode != 0 or not shot_path.is_file() or shot_path.stat().st_size == 0:
                     raise RuntimeError(
-                        f"screencapture 区域截屏失败 (无录屏权限或已拒绝): {(proc.stderr or '').strip()}"
+                        f"screencapture 全屏截屏失败 (无录屏权限或已拒绝): {(proc.stderr or '').strip()}"
                     )
-                return shot_path.read_bytes()
+                png_bytes = shot_path.read_bytes()
+                width, height = png_dimensions(shot_path)
+                if width <= 0 or height <= 0:
+                    raise RuntimeError(f"screencapture 全屏截屏图像尺寸非法: {(width, height)!r}")
+                return ScreenCapture(png_bytes=png_bytes, virtual_rect=(0, 0, width, height))
             finally:
                 shot_path.unlink(missing_ok=True)
 

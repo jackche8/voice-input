@@ -1,6 +1,6 @@
 """截屏标注浮窗（UI 验收标准 docs/design/v3.5/annotate-icons-b.html 模板 B）。
 
-单一职责：全屏透明窗口，在选区原位显示冻结截图与标注合成画布，选区外覆暗色遮罩，
+单一职责：全屏透明窗口，在选区原位显示冻结截图与标注合成画布（选区外完全透明、恢复真实桌面），
 采用纯矢量图标主条 `AnnotateToolbar` + 按需纯圆点二级样式条 `AnnotateStyleBar`（6 色 + 3 档，
 马赛克藏色，联合高度锁锚保证主条 0px 抖动），支持自由手绘画笔与无修饰 Enter 自动复制；
 点框外不关闭；复制成功立即关闭、失败复制钮亮红框锁宽且右侧提示「复制失败」1.5s 不关；
@@ -71,11 +71,7 @@ class AnnotateOverlay(QWidget):
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
-        if not cropped_png:
-            raise ValueError("cropped_png 不能为空")
-        base = QImage.fromData(cropped_png)
-        if base.isNull() or base.width() <= 0 or base.height() <= 0:
-            raise ValueError("cropped_png 不是有效的图像数据")
+        base = theme.decode_opaque_png(cropped_png, label="cropped_png")
         sx, sy, sw, sh = (int(v) for v in screen_rect)
         if sw <= 0 or sh <= 0:
             raise ValueError(f"screen_rect 宽高必须大于 0，收到 {screen_rect!r}")
@@ -88,7 +84,7 @@ class AnnotateOverlay(QWidget):
                 raise ValueError(f"initial_style 必须是二元组 (color_hex, size_level)，收到 {initial_style!r}")
             color_hex, size_spec = theme.resolve_annotate_style(initial_style[0], initial_style[1])
 
-        self._base = base.convertToFormat(QImage.Format.Format_ARGB32)
+        self._base = base
         self._screen_rect = QRect(sx, sy, sw, sh)
         self._origin = QPoint(vx, vy)
         self._canvas = QRect(sx - vx, sy - vy, sw, sh)
@@ -244,6 +240,7 @@ class AnnotateOverlay(QWidget):
         self._stop_timers()
         self._draft = None
         self._cancel_text()
+        self.hide()
         self.close()
 
     # ------------------------------------------------------------------
@@ -406,25 +403,11 @@ class AnnotateOverlay(QWidget):
         painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
         painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
 
-        self._paint_dim_outside(painter)
         painter.drawImage(QRectF(self._canvas), self._composite)
         if self._draft is not None:
             paint_draft_op(painter, self._draft, self._canvas, self._composite)
         self._paint_outline(painter)
         painter.end()
-
-    def _paint_dim_outside(self, painter: QPainter) -> None:
-        w, h = self.width(), self.height()
-        cx, cy, cw, ch = self._canvas.x(), self._canvas.y(), self._canvas.width(), self._canvas.height()
-        dim = theme.qcolor(theme.DIM_MASK_RGBA)
-        if cy > 0:
-            painter.fillRect(QRect(0, 0, w, cy), dim)
-        if cy + ch < h:
-            painter.fillRect(QRect(0, cy + ch, w, h - (cy + ch)), dim)
-        if cx > 0:
-            painter.fillRect(QRect(0, cy, cx, ch), dim)
-        if cx + cw < w:
-            painter.fillRect(QRect(cx + cw, cy, w - (cx + cw), ch), dim)
 
     def _paint_outline(self, painter: QPainter) -> None:
         width = theme.OVERLAY_OUTLINE_WIDTH_PX

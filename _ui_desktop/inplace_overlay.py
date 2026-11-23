@@ -14,7 +14,6 @@ from PySide6.QtCore import QPoint, QPointF, QRect, QRectF, Qt
 from PySide6.QtGui import (
     QCloseEvent,
     QColor,
-    QImage,
     QKeyEvent,
     QMouseEvent,
     QPainter,
@@ -54,18 +53,14 @@ class InplaceTranslateOverlay(QWidget):
         super().__init__(parent)
         if mode not in MODES:
             raise ValueError(f"mode 只能是 translate / ocr，收到 {mode!r}")
-        if not cropped_png:
-            raise ValueError("cropped_png 不能为空")
-        base = QImage.fromData(cropped_png)
-        if base.isNull() or base.width() <= 0 or base.height() <= 0:
-            raise ValueError("cropped_png 不是有效的图像数据")
+        base = theme.decode_opaque_png(cropped_png, label="cropped_png")
         sx, sy, sw, sh = (int(v) for v in screen_rect)
         if sw <= 0 or sh <= 0:
             raise ValueError(f"screen_rect 宽高必须大于 0，收到 {screen_rect!r}")
         vx, vy, vw, vh = theme.resolve_virtual_geometry(virtual_geometry)
 
         self._mode = mode
-        self._base = self._ensure_opaque_base(base)
+        self._base = base
         self._screen_rect = QRect(sx, sy, sw, sh)
         self._origin = QPoint(vx, vy)
         self._canvas = QRect(sx - vx, sy - vy, sw, sh)
@@ -75,8 +70,7 @@ class InplaceTranslateOverlay(QWidget):
         self._on_closed = on_closed
         self._closed_notified = False
         self._phase = "loading"
-        self._opened_at = self._now()
-        self._phase_at = self._opened_at
+        self._phase_at = self._now()
         self._layouts: list[tuple[OcrTextBlock, BlockLayout]] = []
         self._full_translated_text = ""
         self._full_ocr_text = ""
@@ -93,16 +87,6 @@ class InplaceTranslateOverlay(QWidget):
         self.menu = MiniMenu(mode, on_copy=self._copy, on_retry=self._retry, feedback_ms=copy_feedback_ms, parent=self)
         self._ticker = FrameTicker(self._on_frame, self)
         self.set_loading()
-
-    @staticmethod
-    def _ensure_opaque_base(image: QImage) -> QImage:
-        converted = image.convertToFormat(QImage.Format.Format_ARGB32)
-        opaque = QImage(converted.size(), QImage.Format.Format_ARGB32)
-        opaque.fill(theme.qcolor(theme.DEFAULT_BLOCK_BG_HEX, opaque=True))
-        painter = QPainter(opaque)
-        painter.drawImage(0, 0, converted)
-        painter.end()
-        return opaque
 
     # ------------------------------------------------------------------
     # 公共接口（capture_flow.OverlayHandle）
@@ -157,6 +141,8 @@ class InplaceTranslateOverlay(QWidget):
     def close_silent(self) -> None:
         """关闭但不回调 on_closed（被新一次截屏取代时）。"""
         self._closed_notified = True
+        self._ticker.stop()
+        self.hide()
         self.close()
 
     # ------------------------------------------------------------------
@@ -207,9 +193,7 @@ class InplaceTranslateOverlay(QWidget):
     def _on_frame(self) -> None:
         self.update()
         t = self._now()
-        fading = t < self._opened_at + theme.OVERLAY_OPEN_FADE_MS or (
-            self._phase == "result" and t < self._phase_at + theme.OVERLAY_RESULT_FADE_MS
-        )
+        fading = self._phase == "result" and t < self._phase_at + theme.OVERLAY_RESULT_FADE_MS
         self._ticker.schedule(theme.OVERLAY_FRAME_MS if self._phase == "loading" or fading else None)
 
     def paintEvent(self, _event: QPaintEvent) -> None:
@@ -218,12 +202,11 @@ class InplaceTranslateOverlay(QWidget):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
         painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
-        painter.setOpacity(ease_out(t, self._opened_at, theme.OVERLAY_OPEN_FADE_MS))
         painter.drawImage(QRectF(self._canvas), self._base)
         self._paint_outline(painter, t)
         if self._phase == "result":
             painter.save()
-            painter.setOpacity(painter.opacity() * ease_out(t, self._phase_at, theme.OVERLAY_RESULT_FADE_MS))
+            painter.setOpacity(ease_out(t, self._phase_at, theme.OVERLAY_RESULT_FADE_MS))
             painter.translate(QPointF(self._canvas.topLeft()))
             painter.scale(self._canvas.width() / self._base.width(), self._canvas.height() / self._base.height())
             self._paint_blocks(painter)

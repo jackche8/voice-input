@@ -1,4 +1,4 @@
-"""Linux 平台适配器：组装根治后的 `_linux/*` 能力与 `mss` / Wayland Portal 区域抓屏。"""
+"""Linux 平台适配器：组装根治后的 `_linux/*` 能力与 `mss` / Wayland Portal 全屏抓屏。"""
 from __future__ import annotations
 
 import os
@@ -42,9 +42,7 @@ from _platform.protocol import (
     HotkeyRig,
     PasteResult,
     ScreenCapture,
-    VirtualRect,
-    capture_region_mss,
-    crop_png_region,
+    capture_screen_mss,
 )
 
 
@@ -230,36 +228,24 @@ class LinuxPlatformAdapter:
             )
         return self._paste_backend
 
-    def capture_region(
-        self,
-        region: VirtualRect,
-        *,
-        virtual_rect: VirtualRect | None = None,
-    ) -> bytes:
-        """框选后直接按目标区域截屏：非 Wayland 直走 `mss` 区域抓取；Wayland 优先 Portal 裁切，失败回退 `mss`。"""
-        _rx, _ry, rw, rh = (int(v) for v in region)
-        if rw <= 0 or rh <= 0:
-            raise ValueError(f"选区宽高必须大于 0，收到 {region!r}")
-        if virtual_rect is not None:
-            _vx, _vy, vw, vh = (int(v) for v in virtual_rect)
-            if vw <= 0 or vh <= 0:
-                raise ValueError(f"virtual_rect 宽高必须大于 0，收到 {virtual_rect!r}")
-
+    def capture_screen(self) -> ScreenCapture:
+        """全屏抓屏：非 Wayland 直走 `mss` 抓取虚拟桌面；Wayland 优先 Portal 整屏，失败回退 `mss`。"""
         if self.session_type != "wayland":
-            return capture_region_mss(region, self._mss_factory, virtual_rect=virtual_rect)
+            return capture_screen_mss(self._mss_factory)
 
         portal_err: Exception | None = None
         try:
             shot = self._portal_capture_fn()
-            ref_rect = virtual_rect if virtual_rect is not None else shot.virtual_rect
-            return crop_png_region(shot.png_bytes, ref_rect, region)
+            if not shot.png_bytes:
+                raise RuntimeError("Wayland Portal Screenshot 返回空 PNG")
+            return shot
         except Exception as exc:
             portal_err = exc
         try:
-            return capture_region_mss(region, self._mss_factory, virtual_rect=virtual_rect)
+            return capture_screen_mss(self._mss_factory)
         except Exception as mss_exc:
             raise RuntimeError(
-                f"Wayland 区域抓屏失败：Portal ({portal_err}) 与 mss 回退 ({mss_exc}) 均不可用"
+                f"Wayland 全屏抓屏失败：Portal ({portal_err}) 与 mss 回退 ({mss_exc}) 均不可用"
             ) from mss_exc
 
     def current_focus(self) -> FocusTarget:

@@ -5,6 +5,7 @@ DesktopActions 四键、ProductEventLoop 断线退避与 HUD 映射、跨平台�
 """
 from __future__ import annotations
 
+import io
 import subprocess
 import threading
 import time
@@ -13,12 +14,14 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from PIL import Image
 
 from _capture import FakeAudioSource
 from _contracts import ComponentStatus, ErrorCode, OcrTextBlock
+from _desktop import capture_flow as capture_flow_mod
 from _desktop.actions import DesktopActions
 from _desktop.api import ApiError
-from _desktop.capture_flow import CaptureFlow, SaveResult
+from _desktop.capture_flow import OLD_OVERLAY_DISMISS_DELAY_S, CaptureFlow, SaveResult
 from _desktop.delivery import LastDelivered, RepeatAction
 from _desktop.event_stream import ProductEventLoop, dispatch_product_event
 from _desktop.singleton import try_acquire_singleton_lock
@@ -28,8 +31,22 @@ from _focus import StaticFocusProbe
 from _hotkey import HotkeyBindings
 from _linux.conflicts import ConflictScan, scan_hotkey_conflicts
 from _linux.startup_check import startup_issues
+from _platform.protocol import ScreenCapture
 
 DEFAULTS = HotkeyBindings(voice="ctrl+alt+z", screenshot="ctrl+alt+x", ocr="ctrl+alt+o", repeat="ctrl+alt+r")
+
+
+def _sample_screen_png(
+    width: int = 384,
+    height: int = 216,
+    color: tuple[int, int, int] = (32, 64, 96),
+) -> bytes:
+    buf = io.BytesIO()
+    Image.new("RGB", (width, height), color).save(buf, format="PNG")
+    return buf.getvalue()
+
+
+_DEFAULT_SCREEN_PNG = _sample_screen_png()
 
 
 def _status():
@@ -38,22 +55,30 @@ def _status():
 
 
 class FakeSelector:
-    def __init__(self, rect, mode_label, on_selected, on_cancelled) -> None:
+    def __init__(self, frozen_png, rect, mode_label, on_selected, on_cancelled, *, trace=None) -> None:
+        self.frozen_png = frozen_png
         self.rect = rect
         self.mode_label = mode_label
         self.on_selected = on_selected
         self.on_cancelled = on_cancelled
         self.closed = False
+        self.closed_silent = False
+        self._trace = trace
 
     def close_silent(self) -> None:
         self.closed = True
+        self.closed_silent = True
+        if self._trace is not None:
+            self._trace.append("selector.close_silent")
 
     def close(self) -> None:
         self.closed = True
+        if self._trace is not None:
+            self._trace.append("selector.close")
 
 
 class FakeInplaceOverlay:
-    def __init__(self, png, rect, *, mode, virtual_rect, on_copy_text, on_retry, on_closed) -> None:
+    def __init__(self, png, rect, *, mode, virtual_rect, on_copy_text, on_retry, on_closed, trace=None) -> None:
         self.png = png
         self.rect = rect
         self.mode = mode
@@ -69,6 +94,9 @@ class FakeInplaceOverlay:
         self.closed = False
         self.closed_silent = False
         self.escape_calls = 0
+        self.raised = 0
+        self.activated = 0
+        self._trace = trace
 
     def set_loading(self) -> None:
         self.loading = True
@@ -89,9 +117,21 @@ class FakeInplaceOverlay:
         self.escape_calls += 1
         self.close()
 
+    def raise_(self) -> None:
+        self.raised += 1
+        if self._trace is not None:
+            self._trace.append("overlay.raise_")
+
+    def activateWindow(self) -> None:
+        self.activated += 1
+        if self._trace is not None:
+            self._trace.append("overlay.activateWindow")
+
     def close_silent(self) -> None:
         self.closed = True
         self.closed_silent = True
+        if self._trace is not None:
+            self._trace.append("overlay.close_silent")
 
     def close(self) -> None:
         self.closed = True
@@ -112,6 +152,7 @@ class FakeAnnotator:
         on_save_image,
         on_closed,
         two_step_escape: bool = False,
+        trace=None,
     ) -> None:
         self.png = png
         self.rect = rect
@@ -125,6 +166,9 @@ class FakeAnnotator:
         self.escape_calls = 0
         self.closed = False
         self.closed_silent = False
+        self.raised = 0
+        self.activated = 0
+        self._trace = trace
 
     def handle_escape(self) -> None:
         self.escape_calls += 1
@@ -133,9 +177,21 @@ class FakeAnnotator:
             return
         self.close()
 
+    def raise_(self) -> None:
+        self.raised += 1
+        if self._trace is not None:
+            self._trace.append("annotator.raise_")
+
+    def activateWindow(self) -> None:
+        self.activated += 1
+        if self._trace is not None:
+            self._trace.append("annotator.activateWindow")
+
     def close_silent(self) -> None:
         self.closed = True
         self.closed_silent = True
+        if self._trace is not None:
+            self._trace.append("annotator.close_silent")
 
     def close(self) -> None:
         self.closed = True
@@ -152,26 +208,34 @@ def _make_capture_harness(
     save_dir_fn=None,
     now_fn=None,
     two_step_escape: bool = False,
+    get_virtual_rect_fn=None,
+    old_overlay_dismiss_delay_s: float = OLD_OVERLAY_DISMISS_DELAY_S,
+    sleep_fn=None,
 ):
     status, posted = _status()
     selectors: list[FakeSelector] = []
     overlays: list[FakeInplaceOverlay] = []
     annotators: list[FakeAnnotator] = []
     copied: list[str] = []
-    region_calls: list[tuple[tuple[int, int, int, int], tuple[int, int, int, int] | None]] = []
+    screen_calls: list[int] = []
+    sleep_calls: list[float] = []
+    trace: list[str] = []
 
-    def open_selector(rect, mode_label, on_selected, on_cancelled):
-        sel = FakeSelector(rect, mode_label, on_selected, on_cancelled)
+    def open_selector(frozen_png, rect, mode_label, on_selected, on_cancelled):
+        trace.append("open_selector")
+        sel = FakeSelector(frozen_png, rect, mode_label, on_selected, on_cancelled, trace=trace)
         selectors.append(sel)
         return sel
 
     def open_overlay(png, rect, **kwargs):
-        ov = FakeInplaceOverlay(png, rect, **kwargs)
+        trace.append("open_overlay")
+        ov = FakeInplaceOverlay(png, rect, trace=trace, **kwargs)
         overlays.append(ov)
         return ov
 
     def open_annotator(png, rect, **kwargs):
-        ann = FakeAnnotator(png, rect, two_step_escape=two_step_escape, **kwargs)
+        trace.append("open_annotator")
+        ann = FakeAnnotator(png, rect, two_step_escape=two_step_escape, trace=trace, **kwargs)
         annotators.append(ann)
         return ann
 
@@ -179,12 +243,19 @@ def _make_capture_harness(
         copied.append(text)
         return True
 
-    def default_capture_region(rect, vrect):
-        region_calls.append((rect, vrect))
-        return b"region-png"
+    def default_capture_screen() -> ScreenCapture:
+        trace.append("capture_screen")
+        screen_calls.append(len(screen_calls) + 1)
+        return ScreenCapture(png_bytes=_DEFAULT_SCREEN_PNG, virtual_rect=(0, 0, 1920, 1080))
+
+    def record_sleep(delay: float) -> None:
+        trace.append("sleep")
+        sleep_calls.append(delay)
+        if sleep_fn is not None:
+            sleep_fn(delay)
 
     flow = CaptureFlow(
-        capture_region=capture_fn or default_capture_region,
+        capture_screen=capture_fn or default_capture_screen,
         open_selector=open_selector,
         open_inplace_overlay=open_overlay,
         open_annotator=open_annotator,
@@ -195,11 +266,14 @@ def _make_capture_harness(
         api=api,
         status=status,
         invoke_ui=lambda fn: fn(),
-        get_virtual_rect=lambda: (0, 0, 1920, 1080),
-        capture_delay_s=0.0,
+        get_virtual_rect=get_virtual_rect_fn or (lambda: (0, 0, 1920, 1080)),
+        old_overlay_dismiss_delay_s=old_overlay_dismiss_delay_s,
+        sleep=record_sleep,
         spawn=lambda fn: fn(),
     )
-    flow._test_region_calls = region_calls  # type: ignore[attr-defined]
+    flow._test_screen_calls = screen_calls  # type: ignore[attr-defined]
+    flow._test_sleep_calls = sleep_calls  # type: ignore[attr-defined]
+    flow._test_trace = trace  # type: ignore[attr-defined]
     flow._test_annotators = annotators  # type: ignore[attr-defined]
     return flow, status, posted, selectors, overlays, copied
 
@@ -230,9 +304,11 @@ def _ocr_payload(text: str, mode: str = "raw", lang_pair: str | None = None) -> 
 
 
 def test_capture_flow_translate_reuses_selector_and_renders_inplace_blocks():
+    assert not hasattr(capture_flow_mod, "DEFAULT_CAPTURE_DELAY_S")
+
     class Api:
         def __init__(self) -> None:
-            self.calls: list[tuple[str, str | None, str]] = []
+            self.calls: list[tuple[str, str | None, bytes]] = []
 
         def get_config(self) -> dict:
             # 用非默认语言对验证 CaptureFlow 真实透传配置中的 translate_lang_pair 而非落回默认
@@ -249,7 +325,7 @@ def test_capture_flow_translate_reuses_selector_and_renders_inplace_blocks():
             lang=None,
         ) -> dict:
             del source_lang, target_lang, lang
-            self.calls.append((mode, lang_pair, png.decode("latin1")))
+            self.calls.append((mode, lang_pair, png))
             return {
                 "ok": True,
                 "text": "Hello World",
@@ -278,8 +354,11 @@ def test_capture_flow_translate_reuses_selector_and_renders_inplace_blocks():
 
     flow.trigger_translate()
     assert len(selectors) == 1
+    assert selectors[0].frozen_png == _DEFAULT_SCREEN_PNG
     assert selectors[0].mode_label == "截屏原位翻译"
     assert selectors[0].rect == (0, 0, 1920, 1080)
+    assert flow._test_screen_calls == [1]  # type: ignore[attr-defined]
+    assert flow._test_sleep_calls == []  # type: ignore[attr-defined]  # 常态无旧浮窗 0 等待
     assert flow.overlay_active() is True
 
     selectors[0].on_selected((100, 200, 300, 120))
@@ -291,8 +370,15 @@ def test_capture_flow_translate_reuses_selector_and_renders_inplace_blocks():
     assert ov.rect == (100, 200, 300, 120)
     assert len(ov.blocks) == 1 and isinstance(ov.blocks[0], OcrTextBlock)
     assert ov.blocks[0].bg_color == "#112233" and ov.full_text == "Hello World" and ov.full_ocr == "你好世界"
-    assert flow._test_region_calls == [((100, 200, 300, 120), (0, 0, 1920, 1080))]  # type: ignore[attr-defined]
-    assert api.calls == [("translate", "zh-ja", "region-png")]
+    # 松手后不再二次抓屏，直接从内存冻结图裁出有效选区 PNG（300/1920*384=60, 120/1080*216=24）
+    assert flow._test_screen_calls == [1]  # type: ignore[attr-defined]
+    assert flow._test_sleep_calls == []  # type: ignore[attr-defined]
+    assert len(api.calls) == 1 and api.calls[0][:2] == ("translate", "zh-ja")
+    assert api.calls[0][2].startswith(b"\x89PNG")
+    with Image.open(io.BytesIO(api.calls[0][2])) as cropped:
+        assert cropped.size == (60, 24)
+    assert selectors[0].closed_silent is True
+    assert ov.raised == 1 and ov.activated == 1
 
     # 菜单「复制译文」走平台剪贴板，并把写入结果交回浮窗
     assert ov.on_copy_text(ov.full_text) is True
@@ -419,48 +505,69 @@ def test_capture_flows_send_no_busy_or_idle_and_only_overlay_less_failures_send_
     ]
 
 
-def test_capture_flow_direct_region_capture_and_repeat_storm_guard():
-    """根治回归：先透明框选不预抓全屏、选区期间重复触发热键不产生风暴、松手后仅截取目标区域。"""
+def test_capture_flow_frozen_capture_storm_guard_and_seamless_handoff_order():
+    """根治回归：按键先冻结全屏（常态 0 等待、连按 20 次仅抓 1 次开 1 窗）、松手 0 二次抓屏且严格按
+    crop -> open_overlay -> selector.close_silent -> overlay.raise_ -> overlay.activateWindow 交接。"""
     class Api:
         def __init__(self) -> None:
             self.seen_pngs: list[bytes] = []
 
         def ocr_inplace(self, png: bytes, *, mode: str = "translate", lang_pair: str | None = None, lang=None) -> dict:
             self.seen_pngs.append(png)
-            return _ocr_payload("直接选区OCR", mode=mode, lang_pair=lang_pair)
+            return _ocr_payload("冻结裁切OCR", mode=mode, lang_pair=lang_pair)
 
     api = Api()
     flow, status, posted, selectors, overlays, copied = _make_capture_harness(api)
 
-    # 连续触发 20 次（模拟长按快捷键连发）→ 仅开 1 个框选器、0 次抓屏
+    # 连续触发 20 次（模拟长按快捷键连发）→ 仅抓 1 次全屏、开 1 个冻结框选器、0 次 sleep
     for _ in range(20):
         flow.trigger_ocr()
     assert len(selectors) == 1
-    assert flow._test_region_calls == []  # type: ignore[attr-defined]
+    assert flow._test_screen_calls == [1]  # type: ignore[attr-defined]
+    assert flow._test_sleep_calls == []  # type: ignore[attr-defined]
 
-    # 透明框选器松手仅回传逻辑坐标 → 单路径触发 1 次 capture_region
+    # 松手零延迟从内存冻结图裁切 → 先开浮窗 → finally 静默关旧 selector → 重新 raise_/activateWindow
     selectors[0].on_selected((120, 240, 360, 90))
     status.drain()
-    assert flow._test_region_calls == [((120, 240, 360, 90), (0, 0, 1920, 1080))]  # type: ignore[attr-defined]
-    assert api.seen_pngs == [b"region-png"]
-    assert len(overlays) == 1 and overlays[0].full_ocr == "直接选区OCR"
+    assert flow._test_screen_calls == [1]  # type: ignore[attr-defined]
+    assert flow._test_sleep_calls == []  # type: ignore[attr-defined]
+    assert flow._test_trace == [  # type: ignore[attr-defined]
+        "capture_screen",
+        "open_selector",
+        "open_overlay",
+        "selector.close_silent",
+        "overlay.raise_",
+        "overlay.activateWindow",
+    ]
+    assert len(api.seen_pngs) == 1 and api.seen_pngs[0].startswith(b"\x89PNG")
+    assert len(overlays) == 1 and overlays[0].full_ocr == "冻结裁切OCR"
 
 
 def test_capture_screen_failure_is_visible():
-    def boom(_rect, _vrect):
+    def boom():
         raise RuntimeError("Portal 拒绝授权")
 
     flow, status, posted, selectors, overlays, _copied = _make_capture_harness(api=object(), capture_fn=boom)
     flow.trigger_translate()
-    assert len(selectors) == 1
-    selectors[0].on_selected((10, 20, 200, 100))
     status.drain()
+    assert selectors == []
     assert overlays == []
+    assert flow.overlay_active() is False
     assert posted[-1]["event"] == "error" and "Portal 拒绝授权" in posted[-1]["message"]
+
+    # capture_screen 返回空 PNG 同样可见报错并复位 _capturing
+    flow_empty, status2, posted2, selectors2, overlays2, _c2 = _make_capture_harness(
+        api=object(),
+        capture_fn=lambda: ScreenCapture(png_bytes=b"", virtual_rect=(0, 0, 1920, 1080)),
+    )
+    flow_empty.trigger_ocr()
+    status2.drain()
+    assert selectors2 == [] and overlays2 == [] and flow_empty.overlay_active() is False
+    assert posted2[-1]["event"] == "error" and "空" in posted2[-1]["message"]
 
 
 def test_capture_flow_reentrant_close_no_deadlock_and_generation_isolation():
-    """P1-4 回归：过期 selector/overlay 的 close() 重入回调不死锁，且旧代次不得清零新代次 _selector_opening。"""
+    """P1-4 回归：过期 selector/overlay 的 close() 重入回调不死锁，且 ReentrantSelector 在交接 finally 关闭时不误清目标浮窗。"""
     status, posted = _status()
     ui_queue: list = []
     selector_handles: list = []
@@ -469,7 +576,8 @@ def test_capture_flow_reentrant_close_no_deadlock_and_generation_isolation():
     class ReentrantSelector:
         """故意只提供 close()（无 close_silent），在 close() 内同步回调 on_cancelled 重入 CaptureFlow._lock。"""
 
-        def __init__(self, on_selected, on_cancelled) -> None:
+        def __init__(self, frozen_png, on_selected, on_cancelled) -> None:
+            self.frozen_png = frozen_png
             self.on_selected = on_selected
             self.on_cancelled = on_cancelled
             self.closed = False
@@ -484,6 +592,8 @@ def test_capture_flow_reentrant_close_no_deadlock_and_generation_isolation():
         def __init__(self, on_closed) -> None:
             self.on_closed = on_closed
             self.closed = False
+            self.raised = 0
+            self.activated = 0
 
         def set_loading(self) -> None:
             pass
@@ -494,120 +604,231 @@ def test_capture_flow_reentrant_close_no_deadlock_and_generation_isolation():
         def set_error(self, message: str) -> None:
             pass
 
+        def raise_(self) -> None:
+            self.raised += 1
+
+        def activateWindow(self) -> None:
+            self.activated += 1
+
         def close(self) -> None:
             self.closed = True
             self.on_closed()
 
     selector_stage = {"n": 0}
+    cancel_in_open_overlay = {"enabled": True}
 
-    def open_selector(_rect, _label, on_selected, on_cancelled):
+    def open_selector(frozen_png, _rect, _label, on_selected, on_cancelled):
         selector_stage["n"] += 1
-        sel = ReentrantSelector(on_selected, on_cancelled)
+        sel = ReentrantSelector(frozen_png, on_selected, on_cancelled)
         selector_handles.append(sel)
         if selector_stage["n"] == 1:
-            # 模拟代次 1 打开框选器途中被取消并立刻开启代次 2（代次 2 仍在 ui_queue 中待打开）
+            # 模拟代次 1 打开框选器途中被取消并立刻开启代次 2（代次 2 仍在 ui_queue 中待准备/打开）
             flow.close_overlay()
             flow.trigger_translate()
         return sel
 
     def open_overlay(_png, _rect, *, mode, virtual_rect, on_copy_text, on_retry, on_closed):
         del mode, virtual_rect, on_copy_text, on_retry
+        # 交接开窗期间 _overlay_opening=True，重入触发必须被拦截
+        before_q = len(ui_queue)
+        flow.trigger_ocr()
+        assert len(ui_queue) == before_q
         ov = ReentrantOverlay(on_closed)
         overlay_handles.append(ov)
-        # 模拟浮窗打开途中被 Esc / close_overlay 取消，令当前代次过期
-        flow.close_overlay()
+        if cancel_in_open_overlay["enabled"]:
+            # 模拟浮窗打开途中被 Esc / close_overlay 取消，令当前代次过期
+            flow.close_overlay()
         return ov
 
+    class DummyApi:
+        def get_config(self) -> dict:
+            return {"translate_lang_pair": "zh-en"}
+
+        def ocr_inplace(self, png: bytes, *, mode: str = "translate", lang_pair: str | None = None, lang=None) -> dict:
+            del png, lang
+            return _ocr_payload("OK", mode=mode, lang_pair=lang_pair)
+
     flow = CaptureFlow(
-        capture_region=lambda _r, _v: b"png",
+        capture_screen=lambda: ScreenCapture(png_bytes=_DEFAULT_SCREEN_PNG, virtual_rect=(0, 0, 1920, 1080)),
         open_selector=open_selector,
         open_inplace_overlay=open_overlay,
         copy_clipboard=lambda _t: True,
-        api=object(),
+        api=DummyApi(),
         status=status,
         invoke_ui=ui_queue.append,
         get_virtual_rect=lambda: (0, 0, 1920, 1080),
-        capture_delay_s=0.0,
+        old_overlay_dismiss_delay_s=0.0,
         spawn=lambda fn: fn(),
     )
 
-    # 1. 触发代次 1：尚未落到 UI 线程时 overlay_active() 就应为 True（含 _selector_opening）
+    # 1. 触发代次 1：尚未落到 UI 线程时 overlay_active() 就应为 True（含 _capturing）
     flow.trigger_translate()
     assert flow.overlay_active() is True
     assert len(ui_queue) == 1
+    # 执行 _prepare_ui（抓全屏后排队 _open_selector_ui）
+    ui_queue.pop(0)()
+    assert flow._selector_opening is True
+    assert len(ui_queue) == 1
 
-    # 执行代次 1 的 _open_selector_ui：内部取消代次 1 并启动代次 2 → 代次 1 过期关闭不死锁，且不误清代次 2 的 _selector_opening
+    # 执行代次 1 的 _open_selector_ui：内部取消代次 1 并启动代次 2 → 代次 1 过期关闭不死锁，且不误清代次 2 的 _capturing
     ui_queue.pop(0)()
     assert selector_handles[0].closed is True
-    assert flow._selector_opening is True
+    assert flow._capturing is True
     assert flow.overlay_active() is True
-    assert len(ui_queue) == 1  # 代次 2 待执行的 UI 回调
-    # 代次 2 仍在 _selector_opening 中，重复触发必须被拦住
+    assert len(ui_queue) == 1  # 代次 2 的 _prepare_ui
     flow.trigger_ocr()
     assert len(ui_queue) == 1
 
-    # 2. 执行代次 2 的 _open_selector_ui 并完成框选 → 进入 open_overlay 时被取消 → 过期 overlay.close() 重入 on_closed 不死锁
+    # 2. 执行代次 2 的 _prepare_ui + _open_selector_ui 并完成框选 → open_overlay 内取消 → 过期 overlay 与 selector 均关闭无死锁
+    ui_queue.pop(0)()
     ui_queue.pop(0)()
     assert flow._selector_opening is False
     assert len(selector_handles) == 2 and selector_handles[1].closed is False
 
     selector_handles[1].on_selected((10, 20, 100, 80))
-    assert len(ui_queue) == 1
-    ui_queue.pop(0)()
     assert len(overlay_handles) == 1 and overlay_handles[0].closed is True
+    assert overlay_handles[0].raised == 0 and overlay_handles[0].activated == 0
+    assert selector_handles[1].closed is True
     assert flow.overlay_active() is False
 
+    # 3. 正常松手交接下，ReentrantSelector.close() 同步触发 _on_cancelled 不得清除目标浮窗或代次，且目标浮窗成功复焦
+    cancel_in_open_overlay["enabled"] = False
+    flow.trigger_translate()
+    ui_queue.pop(0)()  # _prepare_ui
+    ui_queue.pop(0)()  # _open_selector_ui
+    selector_handles[-1].on_selected((10, 20, 100, 80))
+    assert selector_handles[-1].closed is True
+    assert overlay_handles[-1].closed is False
+    assert overlay_handles[-1].raised == 1 and overlay_handles[-1].activated == 1
+    assert flow.overlay_active() is True
+    assert flow._overlay is overlay_handles[-1]
 
-def test_capture_flow_close_overlay_during_capturing_drops_the_capture():
-    """P1-4 回归：在 _capturing 延迟等待或抓屏阶段调用 close_overlay，这次截屏作废、不弹浮窗。"""
-    status, posted = _status()
-    selectors: list[FakeSelector] = []
-    overlays: list[FakeInplaceOverlay] = []
-    region_calls: list = []
 
-    def cancel_during_sleep(_delay: float) -> None:
-        assert flow._capturing is True
-        flow.close_overlay()
-
-    flow = CaptureFlow(
-        capture_region=lambda r, v: (region_calls.append((r, v)) or b"png"),
-        open_selector=lambda rect, label, on_sel, on_cancel: (
-            selectors.append(FakeSelector(rect, label, on_sel, on_cancel)) or selectors[-1]
+def test_capture_flow_old_overlay_dismiss_cancellation_and_exception_cleanup():
+    """回归：old_overlay 退场有序等待与取消、抓屏中取消、以及裁切/开窗/准备/派发异常下 selector 必关闭且状态复位。"""
+    # 1. 替换旧浮窗：严格按 old_overlay.close_silent -> sleep(0.06) -> capture_screen 顺序；常态无旧窗 0 sleep
+    flow, status, posted, selectors, overlays, _copied = _make_capture_harness(
+        api=SimpleNamespace(
+            get_config=lambda: {"translate_lang_pair": "zh-en"},
+            ocr_inplace=lambda *a, **kw: _ocr_payload("OK", mode="raw"),
         ),
-        open_inplace_overlay=lambda *a, **kw: (
-            overlays.append(FakeInplaceOverlay(*a, **kw)) or overlays[-1]
-        ),
-        copy_clipboard=lambda _t: True,
-        api=object(),
-        status=status,
-        invoke_ui=lambda fn: fn(),
-        get_virtual_rect=lambda: (0, 0, 1920, 1080),
-        capture_delay_s=0.05,
-        sleep=cancel_during_sleep,
-        spawn=lambda fn: fn(),
+        old_overlay_dismiss_delay_s=OLD_OVERLAY_DISMISS_DELAY_S,
     )
-
-    flow.trigger_translate()
-    selectors[0].on_selected((10, 20, 120, 80))
-    status.drain()
-    assert region_calls == []
-    assert overlays == []
-    assert flow._capturing is False
-
-    # 也在 capture_region 执行中取消，同样不弹出浮窗
-    flow._sleep = lambda _d: None
-    flow.capture_region = lambda r, v: (flow.close_overlay(), b"late-png")[1]
-    flow.trigger_translate()
+    flow.trigger_ocr()
+    assert flow._test_sleep_calls == []  # type: ignore[attr-defined]
     selectors[-1].on_selected((10, 20, 120, 80))
-    assert overlays == []
+    first_ov = overlays[-1]
+    assert first_ov.closed is False
+
+    flow._test_trace.clear()  # type: ignore[attr-defined]
+    flow.trigger_ocr()
+    assert first_ov.closed_silent is True
+    assert flow._test_sleep_calls == [OLD_OVERLAY_DISMISS_DELAY_S]  # type: ignore[attr-defined]
+    assert flow._test_trace == ["overlay.close_silent", "sleep", "capture_screen", "open_selector"]  # type: ignore[attr-defined]
+
+    # 2. 在 old_overlay 退场 sleep 中取消（handle_escape / close_overlay）→ 不调 capture_screen、不开框选器
+    selectors[-1].on_selected((10, 20, 120, 80))
+    cancel_calls: list[int] = []
+
+    def cancel_in_sleep(_delay: float) -> None:
+        assert flow._capturing is True
+        flow.handle_escape()
+
+    flow._sleep = cancel_in_sleep
+    orig_capture = flow.capture_screen
+    flow.capture_screen = lambda: (cancel_calls.append(1) or orig_capture())
+    before_sel_count = len(selectors)
+    flow.trigger_ocr()
+    assert cancel_calls == []
+    assert len(selectors) == before_sel_count
+    assert flow._capturing is False and flow.overlay_active() is False
+
+    # 3. 在 capture_screen 执行中取消 → 丢弃迟到全屏图，不开框选器
+    flow._sleep = lambda _d: None
+    flow.capture_screen = lambda: (flow.close_overlay(), ScreenCapture(_DEFAULT_SCREEN_PNG, (0, 0, 1920, 1080)))[1]
+    flow.trigger_ocr()
+    assert len(selectors) == before_sel_count
+    assert flow.overlay_active() is False
+
+    # 4. 松手交接各异常分支（裁切失败 / open_inplace_overlay 抛错 / open_annotator 抛错或为 None）均在 finally 必关 selector 且报错可见
+    flow.capture_screen = orig_capture
+    # 4a. 裁切失败（非法宽 0 选区）
+    flow.trigger_ocr()
+    bad_sel_crop = selectors[-1]
+    bad_sel_crop.on_selected((10, 20, 0, 80))
+    status.drain()
+    assert bad_sel_crop.closed_silent is True
+    assert flow._overlay_opening is False and flow.overlay_active() is False
+    assert posted[-1]["event"] == "error" and "截屏失败" in posted[-1]["message"]
+
+    # 4b. open_inplace_overlay 抛错
+    orig_open_ov = flow.open_inplace_overlay
+    flow.open_inplace_overlay = lambda *_a, **_kw: (_ for _ in ()).throw(RuntimeError("overlay boom"))
+    flow.trigger_ocr()
+    bad_sel_ov = selectors[-1]
+    bad_sel_ov.on_selected((10, 20, 120, 80))
+    status.drain()
+    assert bad_sel_ov.closed_silent is True
+    assert flow._overlay_opening is False and flow.overlay_active() is False
+    assert posted[-1]["event"] == "error" and "原位浮窗无法打开：overlay boom" == posted[-1]["message"]
+    flow.open_inplace_overlay = orig_open_ov
+
+    # 4c. open_annotator 为 None 或抛错
+    orig_open_ann = flow.open_annotator
+    flow.open_annotator = None
+    flow.trigger_annotate()
+    bad_sel_ann_none = selectors[-1]
+    bad_sel_ann_none.on_selected((10, 20, 120, 80))
+    status.drain()
+    assert bad_sel_ann_none.closed_silent is True
+    assert flow._overlay_opening is False and flow.overlay_active() is False
+    assert "未配置标注视图" in posted[-1]["message"]
+
+    flow.open_annotator = lambda *_a, **_kw: (_ for _ in ()).throw(RuntimeError("ann boom"))
+    flow.trigger_annotate()
+    bad_sel_ann_err = selectors[-1]
+    bad_sel_ann_err.on_selected((10, 20, 120, 80))
+    status.drain()
+    assert bad_sel_ann_err.closed_silent is True
+    assert flow._overlay_opening is False and flow.overlay_active() is False
+    assert "标注浮窗无法打开：ann boom" == posted[-1]["message"]
+    flow.open_annotator = orig_open_ann
+
+    # 5. _prepare_ui（get_virtual_rect 抛错）与后台 invoke_ui(_open_selector_ui) 抛错均复位状态并上报 error
+    orig_vrect = flow._get_virtual_rect
+    flow._get_virtual_rect = lambda: (_ for _ in ()).throw(RuntimeError("screen gone"))
+    flow.trigger_ocr()
+    status.drain()
+    assert flow._capturing is False and flow.overlay_active() is False
+    assert "截屏失败：screen gone" == posted[-1]["message"]
+    flow._get_virtual_rect = orig_vrect
+
+    invoke_count = {"n": 0}
+    orig_invoke = flow.invoke_ui
+
+    def fail_second_invoke(fn):
+        invoke_count["n"] += 1
+        if invoke_count["n"] == 2:
+            raise RuntimeError("bridge closed")
+        return orig_invoke(fn)
+
+    flow.invoke_ui = fail_second_invoke
+    flow.trigger_ocr()
+    status.drain()
+    assert flow._selector_opening is False and flow.overlay_active() is False
+    assert "框选器无法打开：bridge closed" == posted[-1]["message"]
+    flow.invoke_ui = orig_invoke
 
 
-def test_ui_bridge_configure_qt_platform_env_and_open_live_selector(monkeypatch):
-    """P2-4：覆盖 configure_qt_platform_env、open_live_selector 与 open_translate_overlay 的单屏/多屏与参数契约。"""
+def test_ui_bridge_configure_qt_platform_env_and_open_frozen_selector(monkeypatch):
+    """P2-4：覆盖 configure_qt_platform_env、open_frozen_selector 与 open_translate_overlay / open_annotator 的单屏/多屏与 repaint 契约。"""
     import os
     import sys
 
-    from _desktop.ui_bridge import configure_qt_platform_env, open_annotator, open_live_selector, open_translate_overlay
+    from _desktop import ui_bridge as ui_bridge_mod
+    from _desktop.ui_bridge import configure_qt_platform_env, open_annotator, open_frozen_selector, open_translate_overlay
+
+    assert not hasattr(ui_bridge_mod, "open_live_selector")
 
     # 1. Linux + DISPLAY 且未显式指定 QT_QPA_PLATFORM → 自动设为 xcb
     monkeypatch.setattr(sys, "platform", "linux")
@@ -634,13 +855,12 @@ def test_ui_bridge_configure_qt_platform_env_and_open_live_selector(monkeypatch)
     configure_qt_platform_env()
     assert "QT_QPA_PLATFORM" not in os.environ
 
-    # 5. open_live_selector：不传 screenshot_png；单屏 showFullScreen，多屏 show
+    # 5. open_frozen_selector：透传 frozen_png；单屏 showFullScreen、多屏 show，且顺序严格为 show* -> raise_ -> activateWindow -> repaint
     calls: list[str] = []
     seen_kwargs: list[dict] = []
 
     class DummySelector:
         def __init__(self, **kw) -> None:
-            assert "screenshot_png" not in kw
             seen_kwargs.append(kw)
 
         def showFullScreen(self) -> None:
@@ -655,25 +875,30 @@ def test_ui_bridge_configure_qt_platform_env_and_open_live_selector(monkeypatch)
         def activateWindow(self) -> None:
             calls.append("activateWindow")
 
+        def repaint(self) -> None:
+            calls.append("repaint")
+
     single_app = type("SingleApp", (), {"screens": lambda self: [object()]})()
     on_sel = lambda _rect: None
     on_cancel = lambda: None
-    sel1 = open_live_selector(single_app, DummySelector, (0, 0, 1920, 1080), "截屏原位翻译", on_sel, on_cancel)
+    sel1 = open_frozen_selector(single_app, DummySelector, b"frozen-png", (0, 0, 1920, 1080), "截屏原位翻译", on_sel, on_cancel)
     assert isinstance(sel1, DummySelector)
     assert seen_kwargs[-1] == {
+        "frozen_png": b"frozen-png",
         "virtual_geometry": (0, 0, 1920, 1080),
         "mode_label": "截屏原位翻译",
         "on_selected": on_sel,
         "on_cancelled": on_cancel,
     }
-    assert calls == ["showFullScreen", "raise_", "activateWindow"]
+    assert calls == ["showFullScreen", "raise_", "activateWindow", "repaint"]
 
     calls.clear()
     multi_app = type("MultiApp", (), {"screens": lambda self: [object(), object()]})()
-    open_live_selector(multi_app, DummySelector, (-1920, 0, 3840, 1080), "纯 OCR 识别", on_sel, on_cancel)
-    assert calls == ["show", "raise_", "activateWindow"]
+    open_frozen_selector(multi_app, DummySelector, b"frozen-png-2", (-1920, 0, 3840, 1080), "纯 OCR 识别", on_sel, on_cancel)
+    assert seen_kwargs[-1]["frozen_png"] == b"frozen-png-2"
+    assert calls == ["show", "raise_", "activateWindow", "repaint"]
 
-    # 6. open_translate_overlay：全屏透明浮窗与框选器同一显示方式；模式、虚拟桌面几何与回调按契约 D 透传
+    # 6. open_translate_overlay：全屏透明浮窗与框选器同一显示方式；模式、虚拟桌面几何与回调按契约 D 透传并同步 repaint
     class DummyOverlay(DummySelector):
         def __init__(self, png, rect, **kw) -> None:
             seen_kwargs.append({"png": png, "rect": rect, **kw})
@@ -683,11 +908,11 @@ def test_ui_bridge_configure_qt_platform_env_and_open_live_selector(monkeypatch)
         calls.clear()
         ov = open_translate_overlay(app_, DummyOverlay, b"png", (10, 20, 30, 40), mode="ocr",
                                     virtual_rect=(0, 0, 1920, 1080), **callbacks)
-        assert isinstance(ov, DummyOverlay) and calls == [expected, "raise_", "activateWindow"]
+        assert isinstance(ov, DummyOverlay) and calls == [expected, "raise_", "activateWindow", "repaint"]
         assert seen_kwargs[-1] == {"png": b"png", "rect": (10, 20, 30, 40), "mode": "ocr",
                                    "virtual_geometry": (0, 0, 1920, 1080), **callbacks}
 
-    # 7. open_annotator：与原位浮窗同一显示方式，必传并透传 initial_style / on_style_changed / 回调与虚拟桌面几何
+    # 7. open_annotator：与原位浮窗同一显示方式，必传并透传 initial_style / on_style_changed / 回调与虚拟桌面几何并同步 repaint
     ann_cbs = {
         "initial_style": ("#2f81f7", "thick"),
         "on_style_changed": lambda _s: None,
@@ -698,7 +923,7 @@ def test_ui_bridge_configure_qt_platform_env_and_open_live_selector(monkeypatch)
     for app_, expected in ((single_app, "showFullScreen"), (multi_app, "show")):
         calls.clear()
         ann = open_annotator(app_, DummyOverlay, b"png", (15, 25, 35, 45), virtual_rect=(0, 0, 1920, 1080), **ann_cbs)
-        assert isinstance(ann, DummyOverlay) and calls == [expected, "raise_", "activateWindow"]
+        assert isinstance(ann, DummyOverlay) and calls == [expected, "raise_", "activateWindow", "repaint"]
         assert seen_kwargs[-1] == {
             "png": b"png",
             "rect": (15, 25, 35, 45),
@@ -753,7 +978,8 @@ def test_capture_flow_annotate_mode_exclusion_copy_and_save(tmp_path: Path):
     selectors[0].on_selected((20, 30, 400, 300))
     assert len(annotators) == 1 and overlays == [] and api.ocr_calls == 0
     ann = annotators[0]
-    assert ann.png == b"region-png" and ann.rect == (20, 30, 400, 300) and ann.virtual_rect == (0, 0, 1920, 1080)
+    assert ann.png.startswith(b"\x89PNG") and ann.rect == (20, 30, 400, 300) and ann.virtual_rect == (0, 0, 1920, 1080)
+    assert selectors[0].closed_silent is True and ann.raised == 1 and ann.activated == 1
 
     # 2. 复制图片：成功返回 True、失败/异常返回 False，全过程不发 status 事件
     assert [ann.on_copy_image(b"annotated-png") for _ in range(3)] == [True, False, False]
@@ -970,7 +1196,8 @@ def test_capture_flow_annotate_real_save_and_linux_xclip_roundtrip(tmp_path: Pat
     adapter = LinuxPlatformAdapter(environ=os.environ, uinput_factory=None)
     flow, status, posted, selectors, _overlays, _copied = _make_capture_harness(
         api=object(),
-        capture_fn=lambda _r, _v: real_png,
+        capture_fn=lambda: ScreenCapture(png_bytes=real_png, virtual_rect=(0, 0, 24, 16)),
+        get_virtual_rect_fn=lambda: (0, 0, 24, 16),
         copy_image_fn=adapter.write_clipboard_png,
         save_dir_fn=lambda: save_root,
         now_fn=lambda: datetime(2026, 11, 21, 12, 0, 0),

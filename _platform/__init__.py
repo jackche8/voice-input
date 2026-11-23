@@ -17,7 +17,7 @@ from _platform.protocol import (
     PlatformAdapter,
     ScreenCapture,
     VirtualRect,
-    capture_region_mss,
+    capture_screen_mss,
     crop_png_region,
 )
 
@@ -56,7 +56,7 @@ __all__ = [
     "PlatformAdapter",
     "ScreenCapture",
     "VirtualRect",
-    "capture_region_mss",
+    "capture_screen_mss",
     "create_platform_adapter",
     "crop_png_region",
     "detect_os",

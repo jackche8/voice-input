@@ -1,7 +1,7 @@
-"""跨平台全屏红色十字定位框选器（截屏原位翻译与纯 OCR 识别 100% 复用）。
+"""跨平台全屏冻结红色十字定位框选器（截屏原位翻译、纯 OCR 识别与截屏标注 100% 复用）。
 
-纯 UI 组件：透明实时悬浮全屏框选（不预先全屏截图，杜绝屏幕跳动与压扁），选完后只回传全局逻辑
-矩形 `(x, y, w, h)`，由上层按目标选区精确抓屏。不含抓屏命令或网络调用。
+纯 UI 组件：在不透明全屏窗口上展示按键瞬间抓到的冻结原图与未选区暗色遮罩，松手选定后保持选区定格
+并回传全局逻辑矩形 `(x, y, w, h)`，由上层就地裁切并在目标浮窗显示后静默关闭本窗。不含抓屏或网络调用。
 """
 from __future__ import annotations
 
@@ -14,6 +14,7 @@ from PySide6.QtGui import (
     QFont,
     QFontMetrics,
     QGuiApplication,
+    QImage,
     QKeyEvent,
     QMouseEvent,
     QPainter,
@@ -32,10 +33,11 @@ RETICLE_RADIUS_PX = 5
 
 
 class RedCrosshairSelector(QWidget):
-    """全屏透明红色十字准星定位框选窗口。"""
+    """全屏不透明冻结画面红色十字准星定位框选窗口。"""
 
     def __init__(
         self,
+        frozen_png: bytes,
         virtual_geometry: tuple[int, int, int, int] | None = None,
         mode_label: str = "截屏翻译",
         on_selected: Callable[[tuple[int, int, int, int]], None] | None = None,
@@ -43,6 +45,7 @@ class RedCrosshairSelector(QWidget):
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
+        self._frozen_image: QImage = theme.decode_opaque_png(frozen_png, label="frozen_png")
         self.mode_label: str = mode_label or "截屏翻译"
         self._on_selected = on_selected
         self._on_cancelled = on_cancelled
@@ -57,7 +60,7 @@ class RedCrosshairSelector(QWidget):
             | Qt.WindowType.WindowStaysOnTopHint
             | Qt.WindowType.Tool
         )
-        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent, True)
         self.setAttribute(Qt.WidgetAttribute.WA_InputMethodEnabled, False)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setMouseTracking(True)
@@ -169,7 +172,11 @@ class RedCrosshairSelector(QWidget):
             return
 
         painter = QPainter(self)
-        # 1. 未选区暗色半透明遮罩，选区内部完全透明直接透出真实桌面（0 跳动、0 缩放失真）
+        # 1. 不透明全屏绘制冻结原图，避免桌面跳动与切窗闪烁
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+        painter.drawImage(QRectF(0, 0, w, h), self._frozen_image)
+
+        # 2. 未选区叠暗色半透明遮罩，选区内部直接露出清晰冻结原图
         dim_color = theme.qcolor(theme.DIM_MASK_RGBA)
         sel = self.selection_rect()
         if sel is None or sel.width() <= 0 or sel.height() <= 0:
@@ -278,11 +285,15 @@ class RedCrosshairSelector(QWidget):
         painter.drawText(tag_rect, Qt.AlignmentFlag.AlignCenter, tag_text)
 
     def enterEvent(self, event: QEnterEvent) -> None:
+        if self._finished:
+            return
         self._mouse_pos = event.position().toPoint()
         self.update()
         super().enterEvent(event)
 
     def mouseMoveEvent(self, event: QMouseEvent) -> None:
+        if self._finished:
+            return
         pos = event.position().toPoint()
         self._mouse_pos = pos
         if self._drag_start is not None:
@@ -291,6 +302,8 @@ class RedCrosshairSelector(QWidget):
         event.accept()
 
     def mousePressEvent(self, event: QMouseEvent) -> None:
+        if self._finished:
+            return
         pos = event.position().toPoint()
         self._mouse_pos = pos
         if event.button() == Qt.MouseButton.RightButton:
@@ -306,6 +319,8 @@ class RedCrosshairSelector(QWidget):
         super().mousePressEvent(event)
 
     def mouseReleaseEvent(self, event: QMouseEvent) -> None:
+        if self._finished:
+            return
         pos = event.position().toPoint()
         self._mouse_pos = pos
         if event.button() != Qt.MouseButton.LeftButton or self._drag_start is None:
@@ -313,17 +328,20 @@ class RedCrosshairSelector(QWidget):
             return
 
         sel = self._normalized_logical_rect(self._drag_start, pos)
-        self._drag_start = None
-        self._drag_current = None
         if sel.width() < MIN_SELECTION_PX or sel.height() < MIN_SELECTION_PX:
+            self._drag_start = None
+            self._drag_current = None
             self.update()
             event.accept()
             return
 
+        self._drag_current = pos
         self._complete_selection(sel)
         event.accept()
 
     def keyPressEvent(self, event: QKeyEvent) -> None:
+        if self._finished:
+            return
         if event.key() == Qt.Key.Key_Escape:
             self._cancel()
             event.accept()
@@ -346,9 +364,8 @@ class RedCrosshairSelector(QWidget):
                 sel.width(),
                 sel.height(),
             )
+        self.update()
         cb = self._on_selected
-        self.hide()
-        self.close()
         if cb is not None:
             cb(global_rect)
 

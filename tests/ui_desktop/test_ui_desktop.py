@@ -94,6 +94,9 @@ def test_theme_tokens_and_ui_layer_purity() -> None:
     assert not hasattr(theme, "ANNOTATE_MOSAIC_BLOCK_PX")
     assert not hasattr(theme, "ANNOTATE_SIZE_BTN_W_PX")
     assert not hasattr(theme, "ANNOTATE_SIZE_BTN_H_PX")
+    assert not hasattr(theme, "OVERLAY_OPEN_FADE_MS")
+    assert not hasattr(InplaceTranslateOverlay, "_ensure_opaque_base")
+    assert not hasattr(AnnotateOverlay, "_paint_dim_outside")
     assert theme.OK_BRIGHT_HEX == "#56d364"
     assert theme.ANNOTATE_ICON_BTN_PX == 28
     assert theme.ANNOTATE_PRIMARY_BTN_W_PX == 32
@@ -197,13 +200,77 @@ def test_theme_tokens_and_ui_layer_purity() -> None:
                     )
 
 
+def _encode_qimage_png(img: QImage) -> bytes:
+    byte_array = QByteArray()
+    buf = QBuffer(byte_array)
+    assert buf.open(QIODevice.OpenModeFlag.WriteOnly)
+    assert img.save(buf, "PNG")
+    buf.close()
+    return bytes(byte_array.data())
+
+
+def test_decode_opaque_png_fast_path_alpha_backing_and_validation(
+    qapp: QApplication, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """theme.decode_opaque_png：强校验非法输入；无透明通道走零 QPainter 快路径；含透明像素用 DEFAULT_BLOCK_BG_HEX 垫底。"""
+    del qapp
+    with pytest.raises(ValueError, match="frozen_png"):
+        theme.decode_opaque_png(b"", label="frozen_png")
+    with pytest.raises(ValueError, match="cropped_png"):
+        theme.decode_opaque_png(b"not-a-png", label="cropped_png")
+    with pytest.raises(ValueError, match="frozen_png"):
+        theme.decode_opaque_png(None, label="frozen_png")  # type: ignore[arg-type]
+
+    # 1. 无 alpha 通道（Format_RGB888）走快路径：不创建 QPainter 合成，直接返回不透明 Format_ARGB32
+    rgb_img = QImage(4, 4, QImage.Format.Format_RGB888)
+    rgb_img.fill(QColor("#28b478"))
+    rgb_png = _encode_qimage_png(rgb_img)
+    assert QImage.fromData(rgb_png).hasAlphaChannel() is False
+
+    def _forbid_painter(*_args, **_kwargs):
+        raise AssertionError("无 alpha 通道 PNG 应走快路径，不应调用 QPainter")
+
+    with monkeypatch.context() as mp:
+        mp.setattr(theme, "QPainter", _forbid_painter)
+        decoded_rgb = theme.decode_opaque_png(bytearray(rgb_png), label="frozen_png")
+    assert decoded_rgb.format() == QImage.Format.Format_ARGB32
+    px_rgb = decoded_rgb.pixelColor(2, 2)
+    assert (px_rgb.red(), px_rgb.green(), px_rgb.blue(), px_rgb.alpha()) == (0x28, 0xB4, 0x78, 255)
+
+    # 2. 含 alpha 通道（Format_ARGB32）：全透明像素垫成 DEFAULT_BLOCK_BG_HEX，半透明像素与白底混合且 alpha==255
+    rgba_img = QImage(4, 2, QImage.Format.Format_ARGB32)
+    rgba_img.fill(QColor(0, 0, 0, 0))
+    rgba_img.setPixelColor(2, 0, QColor(0, 0, 255, 128))
+    rgba_png = _encode_qimage_png(rgba_img)
+    assert QImage.fromData(rgba_png).hasAlphaChannel() is True
+
+    decoded_rgba = theme.decode_opaque_png(rgba_png, label="cropped_png")
+    assert decoded_rgba.format() == QImage.Format.Format_ARGB32
+    px_clear = decoded_rgba.pixelColor(0, 0)
+    assert px_clear.alpha() == 255
+    assert px_clear.name() == theme.DEFAULT_BLOCK_BG_HEX
+    px_semi = decoded_rgba.pixelColor(2, 0)
+    assert px_semi.alpha() == 255
+    assert abs(px_semi.red() - 127) <= 2
+    assert abs(px_semi.green() - 127) <= 2
+    assert px_semi.blue() == 255
+
+
 # ---------------------------------------------------------------------------
-# 2. RedCrosshairSelector：全屏透明红十字准星、边缘防裁切、负坐标反向拖拽与双模式复用
+# 2. RedCrosshairSelector：全屏不透明冻结图、红十字准星、边缘防裁切、负坐标反向拖拽与三模式复用
 # ---------------------------------------------------------------------------
 def test_selector_window_flags_mouse_tracking_and_red_crosshair_pixels(
     qapp: QApplication,
 ) -> None:
+    # 2× HiDPI 冻结原图（640×440 映射到 320×220 逻辑窗口），选区内含绿色色块 (60..140, 60..120)
+    frozen_png = _make_png(
+        640,
+        440,
+        bg_hex="#c8d2dc",
+        patches=[((120, 120, 160, 120), "#20a060")],
+    )
     selector = RedCrosshairSelector(
+        frozen_png,
         virtual_geometry=(0, 0, 320, 220),
         mode_label="截屏翻译",
     )
@@ -212,7 +279,8 @@ def test_selector_window_flags_mouse_tracking_and_red_crosshair_pixels(
         assert bool(flags & Qt.WindowType.FramelessWindowHint)
         assert bool(flags & Qt.WindowType.WindowStaysOnTopHint)
         assert bool(flags & Qt.WindowType.Tool)
-        assert selector.testAttribute(Qt.WidgetAttribute.WA_TranslucentBackground) is True
+        assert selector.testAttribute(Qt.WidgetAttribute.WA_TranslucentBackground) is False
+        assert selector.testAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent) is True
         assert selector.testAttribute(Qt.WidgetAttribute.WA_InputMethodEnabled) is False
         assert selector.hasMouseTracking() is True
 
@@ -231,17 +299,27 @@ def test_selector_window_flags_mouse_tracking_and_red_crosshair_pixels(
         assert grabbed.pixelColor(110, 15).rgb() == red.rgb()
         assert grabbed.pixelColor(110, 200).rgb() == red.rgb()
 
-        # 未框选时非十字线区域被暗色半透明遮罩覆盖
+        # 未框选时全屏为不透明冻结原图叠 DIM_MASK_RGBA 暗罩
+        dim_factor = 1.0 - theme.DIM_MASK_RGBA[3] / 255.0
         dimmed_px = grabbed.pixelColor(20, 180)
-        assert abs(dimmed_px.alpha() - theme.DIM_MASK_RGBA[3]) <= 2
+        assert dimmed_px.alpha() == 255
+        assert abs(dimmed_px.red() - round(0xC8 * dim_factor)) <= 2
+        assert abs(dimmed_px.green() - round(0xD2 * dim_factor)) <= 2
+        assert abs(dimmed_px.blue() - round(0xDC * dim_factor)) <= 2
 
-        # 按下拖拽产生选区后，选区内部恢复完全透明直接透出桌面，选区外保持暗色遮罩
+        # 按下拖拽产生选区后，选区内部露出不透明清晰冻结原图，选区外保持暗罩
         QTest.mousePress(selector, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, QPoint(40, 40))
         QTest.mouseMove(selector, QPoint(160, 140))
         qapp.processEvents()
         dragging_img = selector.grab().toImage()
-        assert dragging_img.pixelColor(90, 90).alpha() == 0
-        assert abs(dragging_img.pixelColor(20, 180).alpha() - theme.DIM_MASK_RGBA[3]) <= 2
+        inside_px = dragging_img.pixelColor(90, 90)
+        assert inside_px.alpha() == 255
+        assert abs(inside_px.red() - 0x20) <= 1
+        assert abs(inside_px.green() - 0xA0) <= 1
+        assert abs(inside_px.blue() - 0x60) <= 1
+        outside_px = dragging_img.pixelColor(20, 180)
+        assert outside_px.alpha() == 255
+        assert abs(outside_px.red() - round(0xC8 * dim_factor)) <= 2
     finally:
         selector.close_silent()
         selector.deleteLater()
@@ -249,6 +327,7 @@ def test_selector_window_flags_mouse_tracking_and_red_crosshair_pixels(
 
 def test_selector_coord_tag_clamped_at_all_four_edges(qapp: QApplication) -> None:
     selector = RedCrosshairSelector(
+        _make_png(360, 240, bg_hex="#dce4ec"),
         virtual_geometry=(0, 0, 360, 240),
     )
     try:
@@ -267,7 +346,7 @@ def test_selector_coord_tag_clamped_at_all_four_edges(qapp: QApplication) -> Non
         selector.deleteLater()
 
 
-@pytest.mark.parametrize("mode_label", ["截屏翻译", "纯 OCR 识别"])
+@pytest.mark.parametrize("mode_label", ["截屏翻译", "纯 OCR 识别", "截屏标注"])
 def test_selector_reverse_drag_negative_origin_and_dual_mode_reuse(
     qapp: QApplication,
     mode_label: str,
@@ -277,6 +356,7 @@ def test_selector_reverse_drag_negative_origin_and_dual_mode_reuse(
     cancelled: list[bool] = []
 
     selector = RedCrosshairSelector(
+        _make_png(400, 300, bg_hex="#dce4ec"),
         virtual_geometry=(-400, 50, 400, 300),
         mode_label=mode_label,
         on_selected=lambda rect: captured.append(rect),
@@ -284,7 +364,7 @@ def test_selector_reverse_drag_negative_origin_and_dual_mode_reuse(
     )
     try:
         selector.show()
-        # 反向拖拽（右下 -> 左上）同样应正确归一化并回传单参数全局逻辑矩形
+        # 反向拖拽（右下 -> 左上）同样应正确归一化、回传单参数全局逻辑矩形并保持选区定格不提前关窗
         QTest.mousePress(
             selector,
             Qt.MouseButton.LeftButton,
@@ -302,6 +382,8 @@ def test_selector_reverse_drag_negative_origin_and_dual_mode_reuse(
 
         assert cancelled == []
         assert captured == [(-300, 100, 100, 100)]
+        assert selector.isVisible() is True
+        assert selector.selection_rect() == QRect(100, 50, 100, 100)
     finally:
         selector.close_silent()
         selector.deleteLater()
@@ -311,12 +393,19 @@ def test_selector_under_8px_ignored_and_right_click_or_esc_cancels(
     qapp: QApplication,
 ) -> None:
     with pytest.raises(ValueError):
-        RedCrosshairSelector(virtual_geometry=(0, 0, 0, 100))
+        RedCrosshairSelector(b"", virtual_geometry=(0, 0, 300, 200))
+    with pytest.raises(ValueError):
+        RedCrosshairSelector(b"not-a-png", virtual_geometry=(0, 0, 300, 200))
+    with pytest.raises(ValueError):
+        RedCrosshairSelector(None, virtual_geometry=(0, 0, 300, 200))  # type: ignore[arg-type]
+    with pytest.raises(ValueError):
+        RedCrosshairSelector(_make_png(100, 100), virtual_geometry=(0, 0, 0, 100))
 
     selected: list[tuple[int, int, int, int]] = []
     cancelled: list[str] = []
 
     sel1 = RedCrosshairSelector(
+        _make_png(300, 200, bg_hex="#dce4ec"),
         virtual_geometry=(0, 0, 300, 200),
         on_selected=lambda r: selected.append(r),
         on_cancelled=lambda: cancelled.append("right"),
@@ -342,6 +431,7 @@ def test_selector_under_8px_ignored_and_right_click_or_esc_cancels(
         sel1.deleteLater()
 
     sel2 = RedCrosshairSelector(
+        _make_png(300, 200, bg_hex="#dce4ec"),
         virtual_geometry=(0, 0, 300, 200),
         on_cancelled=lambda: cancelled.append("esc"),
     )
@@ -364,8 +454,10 @@ def test_selector_no_initial_crosshair_until_real_pointer_event_and_direct_press
     origin_x = max(4000, cursor.x() + 1000)
     origin_y = max(4000, cursor.y() + 1000)
     red = QColor(theme.CROSSHAIR_HEX)
+    neutral_png = _make_png(320, 220, bg_hex="#dce4ec")
 
     selector = RedCrosshairSelector(
+        neutral_png,
         virtual_geometry=(origin_x, origin_y, 320, 220),
         mode_label="截屏翻译",
     )
@@ -373,19 +465,22 @@ def test_selector_no_initial_crosshair_until_real_pointer_event_and_direct_press
         selector.show()
         qapp.processEvents()
 
-        # 1. 刚打开且未收到任何真实指针事件：查询均为空，仅绘暗色遮罩与顶部提示条，无任何红十字/准星/坐标胶囊像素
+        # 1. 刚打开且未收到任何真实指针事件：查询均为空，仅绘不透明冻结底图+暗色遮罩与顶部提示条，无任何红十字/准星/坐标胶囊像素
         assert selector.mouse_position is None
         assert selector.coord_tag_rect() is None
         assert selector.coord_tag_text() == ""
 
         initial_img = selector.grab().toImage()
-        assert abs(initial_img.pixelColor(20, 180).alpha() - theme.DIM_MASK_RGBA[3]) <= 2
+        init_px = initial_img.pixelColor(20, 180)
+        assert init_px.alpha() == 255
+        assert abs(init_px.red() - round(0xDC * (1.0 - theme.DIM_MASK_RGBA[3] / 255.0))) <= 2
         assert _pixels_of(initial_img, theme.TOP_HINT_TEXT_HEX)
         assert _pixels_of(initial_img, theme.CROSSHAIR_HEX) == []
         assert _pixels_of(initial_img, theme.COORD_TAG_TEXT_HEX) == []
+        # 顶部提示胶囊（y < 50）在不透明窗口启用 RGB 次像素抗锯齿，避开提示带扫描全画布确认无任何红十字/准星/胶囊像素
         assert not any(
             initial_img.pixelColor(x, y).red() - initial_img.pixelColor(x, y).blue() > 20
-            for y in range(initial_img.height())
+            for y in range(50, initial_img.height())
             for x in range(initial_img.width())
         )
 
@@ -437,6 +532,7 @@ def test_selector_no_initial_crosshair_until_real_pointer_event_and_direct_press
     direct_origin_x = origin_x + 1000
     direct_origin_y = origin_y + 1000
     direct = RedCrosshairSelector(
+        neutral_png,
         virtual_geometry=(direct_origin_x, direct_origin_y, 320, 220),
         mode_label="纯 OCR 识别",
         on_selected=captured.append,
@@ -727,6 +823,79 @@ def test_inplace_overlay_mini_menu_modes_placement_close_keys_and_copy_feedback(
     finally:
         tall.close_silent()
         tall.deleteLater()
+
+
+def test_inplace_overlay_first_frame_opaque_result_fade_and_close_silent(
+    qapp: QApplication, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """原位浮窗首帧底图 100% 不透明（无底图淡入）、透明 PNG 白底垫底、选区外透明、保留译文淡入，close_silent 停表+先藏后关。"""
+    clock_ms = [1000.0]
+    monkeypatch.setattr(InplaceTranslateOverlay, "_now", staticmethod(lambda: clock_ms[0]))
+
+    img = QImage(200, 120, QImage.Format.Format_ARGB32)
+    img.fill(QColor("#309050"))
+    painter = QPainter(img)
+    painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Source)
+    painter.fillRect(QRect(150, 80, 30, 20), QColor(0, 0, 0, 0))
+    painter.end()
+    png = _encode_qimage_png(img)
+
+    closed: list[int] = []
+    block = _ocr_block([_ocr_line(20, 20, 100, 20, "Hello")], translated_text="你好", bg="#ffffff", fg="#0f172a")
+    overlay = InplaceTranslateOverlay(
+        png,
+        (60, 50, 200, 120),
+        mode="translate",
+        virtual_geometry=(0, 0, 400, 300),
+        available_screen_rect=(0, 0, 400, 300),
+        on_closed=lambda: closed.append(1),
+    )
+    try:
+        assert not hasattr(overlay, "_opened_at")
+        overlay.show()
+        qapp.processEvents()
+
+        # 1. t==创建时刻（0ms）：首帧底图 100% 不透明，透明区域垫白底，选区外完全透明解除冻结，加载定时器运行中
+        first_frame = overlay.grab().toImage()
+        base_px = first_frame.pixelColor(80, 70)
+        assert (base_px.red(), base_px.green(), base_px.blue(), base_px.alpha()) == (0x30, 0x90, 0x50, 255)
+        backed_px = first_frame.pixelColor(60 + 160, 50 + 90)
+        assert backed_px.alpha() == 255
+        assert backed_px.name() == theme.DEFAULT_BLOCK_BG_HEX
+        assert first_frame.pixelColor(10, 10).alpha() == 0
+        assert overlay._ticker._timer.isActive() is True
+
+        # 2. 保留 OVERLAY_RESULT_FADE_MS 译文贴片淡入，期间底图始终 100% 不透明
+        overlay.set_result([block], "你好", "Hello")
+        frame_t0 = overlay.grab().toImage()
+        patch_t0 = frame_t0.pixelColor(60 + 18, 50 + 30)
+        assert (patch_t0.red(), patch_t0.green(), patch_t0.blue(), patch_t0.alpha()) == (0x30, 0x90, 0x50, 255)
+        clock_ms[0] += theme.OVERLAY_RESULT_FADE_MS
+        frame_t1 = overlay.grab().toImage()
+        patch_t1 = frame_t1.pixelColor(60 + 18, 50 + 30)
+        expected_r = round(theme.OVERLAY_PATCH_ALPHA + (1.0 - theme.OVERLAY_PATCH_ALPHA / 255.0) * 0x30)
+        assert patch_t1.alpha() == 255
+        assert abs(patch_t1.red() - expected_r) <= 3
+
+        # 3. close_silent 按 stop -> hide -> close 顺序执行且不回调 on_closed
+        overlay.set_loading()
+        assert overlay._ticker._timer.isActive() is True
+        order: list[str] = []
+        orig_stop = overlay._ticker.stop
+        orig_hide = overlay.hide
+        orig_close = overlay.close
+        monkeypatch.setattr(overlay._ticker, "stop", lambda: (order.append("stop"), orig_stop())[1])
+        monkeypatch.setattr(overlay, "hide", lambda: (order.append("hide"), orig_hide())[1])
+        monkeypatch.setattr(overlay, "close", lambda: (order.append("close"), orig_close())[1])
+        overlay.close_silent()
+        qapp.processEvents()
+        assert order[:3] == ["stop", "hide", "close"]
+        assert overlay._ticker._timer.isActive() is False
+        assert overlay.isVisible() is False
+        assert closed == []
+    finally:
+        overlay.close_silent()
+        overlay.deleteLater()
 
 
 # ---------------------------------------------------------------------------
@@ -1109,24 +1278,62 @@ def test_tray_icon_appears_when_host_registers_and_reregisters_after_host_restar
         tray.close()
 
 
-def test_selector_transparent_live_mode_and_no_flicker_hud_guards(qapp: QApplication) -> None:
-    """根治回归：透明实时框选不需预抓全屏、选区内部完全透明透出桌面、HUD 关闭输入法且防闪烁。"""
+def test_selector_frozen_release_hold_guards_and_no_flicker_hud_guards(qapp: QApplication) -> None:
+    """冻结框选松手定格不提前关窗（释放前先同步 _drag_current）、完成态拦截全部键鼠、HUD 防闪烁。"""
     selected: list[tuple[int, int, int, int]] = []
+    cancelled: list[int] = []
+    frozen_png = _make_png(
+        320,
+        220,
+        bg_hex="#c8d2dc",
+        patches=[((145, 105, 30, 20), "#20a060")],
+    )
     sel = RedCrosshairSelector(
+        frozen_png,
         virtual_geometry=(0, 0, 320, 220),
         mode_label="纯 OCR 识别",
         on_selected=lambda rect: selected.append(rect),
+        on_cancelled=lambda: cancelled.append(1),
     )
     try:
-        assert sel.testAttribute(Qt.WidgetAttribute.WA_TranslucentBackground) is True
+        assert sel.testAttribute(Qt.WidgetAttribute.WA_TranslucentBackground) is False
+        assert sel.testAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent) is True
         assert sel.testAttribute(Qt.WidgetAttribute.WA_InputMethodEnabled) is False
         sel.show()
         QTest.mousePress(sel, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, QPoint(40, 30))
-        QTest.mouseMove(sel, QPoint(180, 130))
+        QTest.mouseMove(sel, QPoint(140, 100))
         qapp.processEvents()
+        # 故意在较 mouseMove 更靠右下的 (180, 130) 松手，验证先置 _drag_current=pos 再 _complete_selection
         QTest.mouseRelease(sel, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, QPoint(180, 130))
         qapp.processEvents()
         assert selected == [(40, 30, 140, 100)]
+        assert cancelled == []
+        assert sel.isVisible() is True
+        assert sel.selection_rect() == QRect(40, 30, 140, 100)
+        assert sel.mouse_position == QPoint(180, 130)
+
+        # (160, 115) 位于最终松手选区 (40..180, 30..130) 内但不在旧 move 选区 (40..140, 30..100) 内：应定格为清晰绿色原图
+        frozen_px = sel.grab().toImage().pixelColor(160, 115)
+        assert (frozen_px.red(), frozen_px.green(), frozen_px.blue(), frozen_px.alpha()) == (0x20, 0xA0, 0x60, 255)
+
+        # 完成定格后所有键鼠入口均被 _finished 守卫拦截：不改坐标/选区、不重复回调、不自行取消关窗
+        QApplication.sendEvent(sel, QEnterEvent(QPointF(10, 10), QPointF(10, 10), QPointF(10, 10)))
+        QTest.mouseMove(sel, QPoint(12, 12))
+        QTest.mousePress(sel, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, QPoint(15, 15))
+        QTest.mousePress(sel, Qt.MouseButton.RightButton, Qt.KeyboardModifier.NoModifier, QPoint(15, 15))
+        QTest.mouseRelease(sel, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, QPoint(240, 190))
+        QTest.keyClick(sel, Qt.Key.Key_Escape)
+        qapp.processEvents()
+        assert sel.isVisible() is True
+        assert sel.mouse_position == QPoint(180, 130)
+        assert sel.selection_rect() == QRect(40, 30, 140, 100)
+        assert selected == [(40, 30, 140, 100)]
+        assert cancelled == []
+
+        sel.close_silent()
+        qapp.processEvents()
+        assert sel.isVisible() is False
+        assert cancelled == []
     finally:
         sel.close_silent()
         sel.deleteLater()
@@ -1301,11 +1508,30 @@ def test_annotate_overlay_toolbar_placement_no_shift_and_outside_click_stays_ope
         assert sub_heights == {theme.ANNOTATE_SUB_BAR_RESERVE_H_PX}
         assert mid.style_bar.reserved_height() == theme.ANNOTATE_SUB_BAR_RESERVE_H_PX
 
-        # 框外为 DIM_MASK_RGBA 暗罩；点框外消费点击但不关闭浮窗
+        # 框外完全透明（去掉暗罩、解除冻结）；点框外消费点击但不关闭浮窗，文字输入态点框外先提交文字
+        assert not hasattr(AnnotateOverlay, "_paint_dim_outside")
         grabbed = mid.grab().toImage()
-        assert abs(grabbed.pixelColor(20, 20).alpha() - theme.DIM_MASK_RGBA[3]) <= 2
+        assert grabbed.pixelColor(20, 20).alpha() == 0
+        assert grabbed.pixelColor(mid.canvas_rect().center()).alpha() == 255
         QTest.mouseClick(mid, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, QPoint(20, 20))
         qapp.processEvents()
+        assert mid.isVisible() is True
+        assert closed == []
+
+        QTest.mouseClick(mid.toolbar.button("text"), Qt.MouseButton.LeftButton)
+        QTest.mouseClick(
+            mid,
+            Qt.MouseButton.LeftButton,
+            Qt.KeyboardModifier.NoModifier,
+            mid.canvas_rect().topLeft() + QPoint(30, 40),
+        )
+        qapp.processEvents()
+        assert mid.is_editing_text is True and mid._text_edit is not None
+        mid._text_edit.setText("框外先提交")
+        QTest.mouseClick(mid, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, QPoint(20, 20))
+        qapp.processEvents()
+        assert mid.is_editing_text is False
+        assert len(mid.operations) == 1
         assert mid.isVisible() is True
         assert closed == []
 
@@ -1318,11 +1544,20 @@ def test_annotate_overlay_toolbar_placement_no_shift_and_outside_click_stays_ope
         mid.close_silent()
         mid.deleteLater()
 
-    # 贴底翻到框上：主条紧贴选区上缘，二级条翻到主条正上方且切换工具主条 0px 抖动
+    # 贴底翻到框上：主条紧贴选区上缘，二级条翻到主条正上方且切换工具主条 0px 抖动；透明 PNG 垫白底且 close_silent 先 hide 再 close
+    transparent_img = QImage(480, 90, QImage.Format.Format_ARGB32)
+    transparent_img.fill(QColor(0, 0, 0, 0))
     silent_closed: list[int] = []
-    bottom = _open_annotator((200, 700, 480, 90), on_closed=lambda: silent_closed.append(1))
+    bottom = _open_annotator(
+        (200, 700, 480, 90),
+        png=_encode_qimage_png(transparent_img),
+        on_closed=lambda: silent_closed.append(1),
+    )
     try:
         assert bottom.menu_placement == "above"
+        bottom_px = bottom.grab().toImage().pixelColor(bottom.canvas_rect().center())
+        assert bottom_px.alpha() == 255
+        assert bottom_px.name() == theme.DEFAULT_BLOCK_BG_HEX
         bottom_main_before = bottom.toolbar.geometry()
         assert bottom_main_before.bottom() < bottom.canvas_rect().top()
         QTest.mouseClick(bottom.toolbar.button("brush"), Qt.MouseButton.LeftButton)
@@ -1331,6 +1566,15 @@ def test_annotate_overlay_toolbar_placement_no_shift_and_outside_click_stays_ope
         assert bottom.style_bar.isVisible() is True
         assert bottom.style_bar.geometry().bottom() < bottom.toolbar.geometry().top()
         assert bottom.style_bar.geometry().top() >= 0
+
+        close_order: list[str] = []
+        orig_hide = bottom.hide
+        orig_close = bottom.close
+        bottom.hide = lambda: (close_order.append("hide"), orig_hide())[1]  # type: ignore[method-assign]
+        bottom.close = lambda: (close_order.append("close"), orig_close())[1]  # type: ignore[method-assign]
+        bottom.close_silent()
+        assert close_order[:2] == ["hide", "close"]
+        assert bottom.isVisible() is False
     finally:
         bottom.close_silent()
         bottom.deleteLater()
@@ -2056,15 +2300,16 @@ def test_annotate_overlay_enter_copy_modifiers_draft_save_timer_and_inplace_unch
 def test_annotate_real_chain_capture_flow_bridge_overlay_memory_and_enter_copy(
     qapp: QApplication,
 ) -> None:
-    """v3.5 ST5 跨层真实链条：CaptureFlow + 真实 ui_bridge.open_annotator + 真实离屏 AnnotateOverlay。"""
+    """v3.5 ST5 + v3.4.2 跨层真实链条：CaptureFlow + 真实 open_frozen_selector / open_annotator + 真实离屏 AnnotateOverlay。"""
     from _desktop.capture_flow import CaptureFlow
     from _desktop.status import PlatformStatus
     from _desktop.ui_bridge import (
         QtUiBridge,
         open_annotator as bridge_open_annotator,
-        open_live_selector,
+        open_frozen_selector,
         query_virtual_screen_rect,
     )
+    from _platform.protocol import ScreenCapture
 
     vrect = query_virtual_screen_rect(qapp)
     assert vrect is not None
@@ -2073,6 +2318,8 @@ def test_annotate_real_chain_capture_flow_bridge_overlay_memory_and_enter_copy(
     assert QRect(vx, vy, vw, vh).contains(QRect(*screen_rect)), (
         f"选区 {screen_rect} 未落于虚拟桌面可视区 {vrect} 内"
     )
+    # 2× HiDPI 全屏冻结图，确保 crop_png_region 裁切出 480×320 原分辨率选区
+    full_2x_png = _make_png(vw * 2, vh * 2, bg_hex="#ffffff")
 
     bridge = QtUiBridge()
     posted_status: list[dict] = []
@@ -2083,12 +2330,12 @@ def test_annotate_real_chain_capture_flow_bridge_overlay_memory_and_enter_copy(
     )
     created_selectors: list[RedCrosshairSelector] = []
     created_overlays: list[AnnotateOverlay] = []
-    captured_requests: list[tuple[tuple[int, int, int, int], tuple[int, int, int, int] | None]] = []
+    capture_calls: list[int] = []
     copied_pngs: list[bytes] = []
 
     def _make_flow() -> CaptureFlow:
-        def _open_selector(rect, label, on_selected, on_cancelled):
-            sel = open_live_selector(qapp, RedCrosshairSelector, rect, label, on_selected, on_cancelled)
+        def _open_selector(frozen_png, rect, label, on_selected, on_cancelled):
+            sel = open_frozen_selector(qapp, RedCrosshairSelector, frozen_png, rect, label, on_selected, on_cancelled)
             created_selectors.append(sel)
             return sel
 
@@ -2097,17 +2344,16 @@ def test_annotate_real_chain_capture_flow_bridge_overlay_memory_and_enter_copy(
             created_overlays.append(ann)
             return ann
 
-        def _capture_region(rect, virtual_rect):
-            captured_requests.append((rect, virtual_rect))
-            # 2× HiDPI 冻结截图（480×320），验证原分辨率合成导出
-            return _make_png(rect[2] * 2, rect[3] * 2, bg_hex="#ffffff")
+        def _capture_screen() -> ScreenCapture:
+            capture_calls.append(len(capture_calls) + 1)
+            return ScreenCapture(png_bytes=full_2x_png, virtual_rect=(0, 0, vw * 2, vh * 2))
 
         def _copy_image(png: bytes) -> str | None:
             copied_pngs.append(png)
             return None
 
         return CaptureFlow(
-            capture_region=_capture_region,
+            capture_screen=_capture_screen,
             open_selector=_open_selector,
             open_inplace_overlay=lambda *_a, **_kw: (_ for _ in ()).throw(AssertionError("标注模式不应打开原位浮窗")),
             copy_clipboard=lambda _text: True,
@@ -2117,15 +2363,17 @@ def test_annotate_real_chain_capture_flow_bridge_overlay_memory_and_enter_copy(
             get_virtual_rect=lambda: query_virtual_screen_rect(qapp),
             open_annotator=_open_annotator,
             copy_image=_copy_image,
-            capture_delay_s=0.0,
+            old_overlay_dismiss_delay_s=0.0,
             spawn=lambda fn: fn(),
         )
 
     def _trigger_and_open(flow: CaptureFlow) -> AnnotateOverlay:
         prev_sel = len(created_selectors)
         prev_ov = len(created_overlays)
+        prev_caps = len(capture_calls)
         flow.trigger_annotate()
         assert _wait_until(lambda: len(created_selectors) == prev_sel + 1, 2000)
+        assert len(capture_calls) == prev_caps + 1
         sel = created_selectors[-1]
         assert sel.mode_label == CaptureFlow.ANNOTATE_MODE_LABEL
         sx, sy, sw, sh = screen_rect
@@ -2135,19 +2383,21 @@ def test_annotate_real_chain_capture_flow_bridge_overlay_memory_and_enter_copy(
         QTest.mouseMove(sel, p1)
         QTest.mouseRelease(sel, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, p1)
         assert _wait_until(lambda: len(created_overlays) == prev_ov + 1, 2000)
+        assert len(capture_calls) == prev_caps + 1  # 松手 0 次二次抓屏
+        assert sel.isVisible() is False  # 交接 finally 必关旧框选器
         ov = created_overlays[-1]
         qapp.processEvents()
         return ov
 
     try:
-        # 1. 首次触发标注打开真实 AnnotateOverlay：默认红 #ff2d2d + 中档 medium、未选工具仅显主条
+        # 1. 首次触发标注打开真实 AnnotateOverlay：默认红 #ff2d2d + 中档 medium、未选工具仅显主条、选区外完全透明无暗罩
         flow = _make_flow()
         assert flow.annotate_style is None
         ov1 = _trigger_and_open(flow)
         assert isinstance(ov1, AnnotateOverlay)
         assert ov1.isVisible() is True
+        assert ov1.grab().toImage().pixelColor(10, 10).alpha() == 0
         assert flow.overlay_active() is True
-        assert captured_requests[-1] == (screen_rect, vrect)
         assert ov1.canvas_rect() == QRect(screen_rect[0] - vx, screen_rect[1] - vy, screen_rect[2], screen_rect[3])
         assert ov1.current_color == "#ff2d2d"
         assert ov1.current_size_level == "medium"
@@ -2252,6 +2502,175 @@ def test_annotate_real_chain_capture_flow_bridge_overlay_memory_and_enter_copy(
             ov.close_silent()
             ov.deleteLater()
         for sel in created_selectors:
+            sel.close_silent()
+            sel.deleteLater()
+        qapp.processEvents()
+
+
+def test_seamless_frozen_handoff_real_chain_three_entries_and_error_cleanup(
+    qapp: QApplication,
+) -> None:
+    """v3.4.2 跨层三入口真链：2× HiDPI 全屏冻结 → 松手 0 延迟裁切 → 翻译/OCR 首帧不透明与标注无暗罩 + 异常必关 selector。"""
+    from _desktop.capture_flow import CaptureFlow
+    from _desktop.status import PlatformStatus
+    from _desktop.ui_bridge import (
+        QtUiBridge,
+        open_annotator as bridge_open_annotator,
+        open_frozen_selector,
+        open_translate_overlay,
+        query_virtual_screen_rect,
+    )
+    from _platform.protocol import ScreenCapture
+
+    vrect = query_virtual_screen_rect(qapp)
+    assert vrect is not None
+    vx, vy, vw, vh = vrect
+    sel_rect = (vx + 60, vy + 50, 200, 120)
+    assert QRect(vx, vy, vw, vh).contains(QRect(*sel_rect))
+    # 2× HiDPI 全屏冻结图：选区内部涂 #3388cc，外部涂 #223344
+    frozen_2x = _make_png(
+        vw * 2,
+        vh * 2,
+        bg_hex="#223344",
+        patches=[(((sel_rect[0] - vx) * 2, (sel_rect[1] - vy) * 2, sel_rect[2] * 2, sel_rect[3] * 2), "#3388cc")],
+    )
+
+    bridge = QtUiBridge()
+    posted: list[dict] = []
+    status = PlatformStatus(posted.append, post_components=posted.append, start_thread=False)
+    selectors: list[RedCrosshairSelector] = []
+    inplace_overlays: list[InplaceTranslateOverlay] = []
+    annotators: list[AnnotateOverlay] = []
+    capture_calls: list[int] = []
+    api_pngs: list[tuple[str, bytes]] = []
+
+    class FakeApi:
+        def get_config(self) -> dict:
+            return {"translate_lang_pair": "zh-en"}
+
+        def ocr_inplace(self, png: bytes, *, mode: str = "translate", lang_pair: str | None = None, lang=None) -> dict:
+            del lang_pair, lang
+            api_pngs.append((mode, png))
+            return {
+                "ok": True,
+                "text": "译文",
+                "ocr_text": "Source",
+                "mode": mode,
+                "image_width": 400,
+                "image_height": 240,
+                "blocks": [],
+            }
+
+    def _open_sel(frozen_png, rect, label, on_selected, on_cancelled):
+        sel = open_frozen_selector(qapp, RedCrosshairSelector, frozen_png, rect, label, on_selected, on_cancelled)
+        selectors.append(sel)
+        return sel
+
+    def _open_ov(png, rect, **kw):
+        ov = open_translate_overlay(qapp, InplaceTranslateOverlay, png, rect, **kw)
+        inplace_overlays.append(ov)
+        return ov
+
+    def _open_ann(png, rect, **kw):
+        ann = bridge_open_annotator(qapp, AnnotateOverlay, png, rect, **kw)
+        annotators.append(ann)
+        return ann
+
+    flow = CaptureFlow(
+        capture_screen=lambda: (
+            capture_calls.append(len(capture_calls) + 1)
+            or ScreenCapture(png_bytes=frozen_2x, virtual_rect=(0, 0, vw * 2, vh * 2))
+        ),
+        open_selector=_open_sel,
+        open_inplace_overlay=_open_ov,
+        open_annotator=_open_ann,
+        copy_clipboard=lambda _t: True,
+        copy_image=lambda _b: None,
+        api=FakeApi(),
+        status=status,
+        invoke_ui=bridge.post,
+        get_virtual_rect=lambda: query_virtual_screen_rect(qapp),
+        old_overlay_dismiss_delay_s=0.0,
+        spawn=lambda fn: fn(),
+    )
+
+    def _drag_release(sel: RedCrosshairSelector) -> None:
+        p0 = QPoint(60, 50)
+        p1 = QPoint(260, 170)
+        QTest.mousePress(sel, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, p0)
+        QTest.mouseMove(sel, p1)
+        qapp.processEvents()
+        # 框选期间选区内清晰透出冻结色 #3388cc，选区外为不透明暗罩
+        dragging = sel.grab().toImage()
+        assert dragging.pixelColor(160, 110).rgb() == QColor("#3388cc").rgb()
+        assert dragging.pixelColor(15, 15).alpha() == 255
+        QTest.mouseRelease(sel, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, p1)
+
+    try:
+        # 1. 截屏原位翻译 & 纯 OCR：松手 0 二次抓屏、首帧底图 100% 不透明无缝接棒、选区外 alpha=0、旧 selector 已关闭
+        for trigger, expected_mode in ((flow.trigger_translate, "translate"), (flow.trigger_ocr, "raw")):
+            prev_sel = len(selectors)
+            prev_ov = len(inplace_overlays)
+            prev_caps = len(capture_calls)
+            trigger()
+            assert _wait_until(lambda: len(selectors) == prev_sel + 1, 2000)
+            sel = selectors[-1]
+            _drag_release(sel)
+            assert _wait_until(lambda: len(inplace_overlays) == prev_ov + 1, 2000)
+            assert len(capture_calls) == prev_caps + 1
+            assert sel.isVisible() is False
+            ov = inplace_overlays[-1]
+            assert ov.isVisible() is True
+            # 首帧即 100% 不透明（不经 qWait），底图色精确等于冻结选区 #3388cc，选区外完全透明解除冻结
+            shot_ov = ov.grab().toImage()
+            assert shot_ov.pixelColor(160, 110).alpha() == 255
+            assert shot_ov.pixelColor(160, 110).rgb() == QColor("#3388cc").rgb()
+            assert shot_ov.pixelColor(15, 15).alpha() == 0
+            assert api_pngs[-1][0] == expected_mode
+            cropped_img = QImage.fromData(api_pngs[-1][1])
+            assert (cropped_img.width(), cropped_img.height()) == (400, 240)
+            ov.close()
+            qapp.processEvents()
+
+        # 2. 截屏标注：松手 0 二次抓屏、原分辨率 400×240 裁切图、选区外完全透明无暗罩、旧 selector 已关闭
+        prev_sel = len(selectors)
+        prev_caps = len(capture_calls)
+        flow.trigger_annotate()
+        assert _wait_until(lambda: len(selectors) == prev_sel + 1, 2000)
+        sel_ann = selectors[-1]
+        _drag_release(sel_ann)
+        assert _wait_until(lambda: len(annotators) == 1, 2000)
+        assert len(capture_calls) == prev_caps + 1
+        assert sel_ann.isVisible() is False
+        ann = annotators[0]
+        assert ann.isVisible() is True
+        shot_ann = ann.grab().toImage()
+        assert shot_ann.pixelColor(160, 110).rgb() == QColor("#3388cc").rgb()
+        assert shot_ann.pixelColor(15, 15).alpha() == 0
+        assert (ann.export_image().width(), ann.export_image().height()) == (400, 240)
+        ann.close()
+        qapp.processEvents()
+
+        # 3. 异常路径（目标浮窗构造失败）下 finally 仍必关全屏冻结 selector 不卡屏，并上报 error
+        flow.open_inplace_overlay = lambda *_a, **_kw: (_ for _ in ()).throw(RuntimeError("overlay init failed"))
+        prev_sel = len(selectors)
+        flow.trigger_translate()
+        assert _wait_until(lambda: len(selectors) == prev_sel + 1, 2000)
+        sel_err = selectors[-1]
+        _drag_release(sel_err)
+        qapp.processEvents()
+        assert sel_err.isVisible() is False
+        assert flow.overlay_active() is False
+        status.drain()
+        assert posted[-1]["event"] == "error" and "overlay init failed" in posted[-1]["message"]
+    finally:
+        for ov in inplace_overlays:
+            ov.close_silent()
+            ov.deleteLater()
+        for ann in annotators:
+            ann.close_silent()
+            ann.deleteLater()
+        for sel in selectors:
             sel.close_silent()
             sel.deleteLater()
         qapp.processEvents()

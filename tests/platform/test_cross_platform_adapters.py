@@ -140,17 +140,27 @@ def test_detect_os_and_factory_protocol():
     with pytest.raises(RuntimeError):
         detect_os("freebsd99")
 
+    import _platform as platform_pkg
+    from _platform import protocol as protocol_mod
+
     linux_adapter = create_platform_adapter(os_name="linux", environ={"XDG_SESSION_TYPE": "x11"}, uinput_factory=None)
     win_adapter = create_platform_adapter(os_name="windows")
     mac_adapter = create_platform_adapter(os_name="macos")
     for adapter in (linux_adapter, win_adapter, mac_adapter):
         assert isinstance(adapter, PlatformAdapter)
+        assert hasattr(adapter, "capture_screen")
         assert not hasattr(adapter, "capture_fullscreen")
+        assert not hasattr(adapter, "capture_region")
     assert not hasattr(PlatformAdapter, "capture_fullscreen")
+    assert not hasattr(PlatformAdapter, "capture_region")
+    assert hasattr(platform_pkg, "capture_screen_mss")
+    assert hasattr(protocol_mod, "capture_screen_mss")
+    assert not hasattr(platform_pkg, "capture_region_mss")
+    assert not hasattr(protocol_mod, "capture_region_mss")
 
 
 # ---------------------------------------------------------------------------
-# 2. LinuxPlatformAdapter 契约测试（X11 mss 区域抓屏、Wayland Portal 裁切与回退 mss、注入与四键）
+# 2. LinuxPlatformAdapter 契约测试（X11 mss 全屏抓屏、Wayland Portal 整屏与回退 mss、注入与四键）
 # ---------------------------------------------------------------------------
 
 
@@ -161,29 +171,29 @@ def test_linux_adapter_capture_focus_inject_and_hotkeys(tmp_path):
     Image.new("RGB", (64, 36), (12, 34, 56)).save(buf, format="PNG")
     portal_png = buf.getvalue()
 
-    # X11 直接使用 mss 多屏虚拟桌面区域抓屏
+    # X11 直接使用 mss 抓取全虚拟桌面（monitors[0]）
     adapter_x11 = LinuxPlatformAdapter(
         environ={"XDG_SESSION_TYPE": "x11"},
         mss_factory=lambda: _FakeMss({"left": -1920, "top": -120, "width": 3840, "height": 1200}),
         window_probe=lambda: FocusedWindowInfo(window_id=501, wm_class=("kitty", "kitty"), is_terminal=True),
         uinput_factory=None,
     )
-    shot_x11 = adapter_x11.capture_region((-1800, 0, 200, 100), virtual_rect=(-1920, -120, 3840, 1200))
-    assert shot_x11.startswith(b"\x89PNG")
+    shot_x11 = adapter_x11.capture_screen()
+    assert isinstance(shot_x11, ScreenCapture)
+    assert shot_x11.png_bytes.startswith(b"\x89PNG")
+    assert shot_x11.virtual_rect == (-1920, -120, 3840, 1200)
     focus = adapter_x11.current_focus()
     assert focus == FocusTarget(focus_id="501", app_id="kitty", is_terminal=True, is_self=False)
 
-    # Wayland 优先 Portal 截后裁切，Portal 异常自动回退 mss
+    # Wayland 优先 Portal 整屏抓拍，Portal 异常自动回退 mss
     adapter_wl_ok = LinuxPlatformAdapter(
         environ={"XDG_SESSION_TYPE": "wayland"},
         portal_capture_fn=lambda: ScreenCapture(png_bytes=portal_png, virtual_rect=(0, 0, 64, 36)),
         mss_factory=_FakeMss,
         uinput_factory=None,
     )
-    wl_cropped = adapter_wl_ok.capture_region((8, 4, 32, 18), virtual_rect=(0, 0, 64, 36))
-    assert wl_cropped.startswith(b"\x89PNG")
-    with Image.open(io.BytesIO(wl_cropped)) as im:
-        assert im.size == (32, 18)
+    wl_shot = adapter_wl_ok.capture_screen()
+    assert wl_shot == ScreenCapture(png_bytes=portal_png, virtual_rect=(0, 0, 64, 36))
 
     def _fail_portal():
         raise RuntimeError("portal denied")
@@ -194,8 +204,9 @@ def test_linux_adapter_capture_focus_inject_and_hotkeys(tmp_path):
         mss_factory=lambda: _FakeMss({"left": 0, "top": 0, "width": 1920, "height": 1080}),
         uinput_factory=None,
     )
-    shot_fb = adapter_wl_fb.capture_region((10, 20, 100, 50), virtual_rect=(0, 0, 1920, 1080))
-    assert shot_fb.startswith(b"\x89PNG")
+    shot_fb = adapter_wl_fb.capture_screen()
+    assert shot_fb.png_bytes.startswith(b"\x89PNG")
+    assert shot_fb.virtual_rect == (0, 0, 1920, 1080)
 
     # Linux 注入：焦点不匹配拦截、自窗口拦截、以及正常粘贴
     state = {"focus": FocusedWindowInfo(window_id=501, wm_class=("firefox", "Firefox"))}
@@ -387,9 +398,11 @@ def test_windows_adapter_focus_terminals_sendinput_clipboard_hotkeys_and_autosta
         reg_api=_FakeWinReg,
     )
 
-    # 1. 多屏虚拟桌面区域抓屏
-    cap = adapter.capture_region((-1800, 10, 200, 100), virtual_rect=(-1920, 0, 4480, 1440))
-    assert cap.startswith(b"\x89PNG")
+    # 1. 多屏虚拟桌面全屏抓屏
+    cap = adapter.capture_screen()
+    assert isinstance(cap, ScreenCapture)
+    assert cap.png_bytes.startswith(b"\x89PNG")
+    assert cap.virtual_rect == (-1920, 0, 4480, 1440)
 
     # 2. 终端进程名全集识别
     for term_exe in (
@@ -509,7 +522,7 @@ class _FakeMacOSApi:
         self.cmd_v_exc: Exception | None = None
         self.ax_trusted = True
         self.sr_allowed = True
-        self.region_calls: list[tuple[tuple[int, int, int, int], tuple[int, int, int, int] | None]] = []
+        self.screen_calls: list[Path] = []
 
     def get_current_pid(self) -> int:
         return self.self_pid
@@ -517,10 +530,10 @@ class _FakeMacOSApi:
     def frontmost_app(self) -> tuple[str, int, str]:
         return self.bundle_id, self.pid, self.app_name
 
-    def capture_region(self, region, temp_dir: Path, *, virtual_rect=None) -> bytes:
+    def capture_screen(self, temp_dir: Path) -> ScreenCapture:
         assert not str(temp_dir).startswith("/tmp")
-        self.region_calls.append((region, virtual_rect))
-        return b"\x89PNG_MAC_RETINA"
+        self.screen_calls.append(temp_dir)
+        return ScreenCapture(png_bytes=b"\x89PNG_MAC_RETINA", virtual_rect=(0, 0, 1512, 982))
 
     def read_clipboard_text(self) -> str:
         return self.clip.text if self.clip.kind == "text" else ""
@@ -568,11 +581,12 @@ def test_macos_adapter_bundles_paste_hotkeys_plist_and_permissions(tmp_path: Pat
         ocr_languages=lambda: ["chi_sim", "chi_tra", "eng"],
     )
 
-    # 1. 区域抓屏（透传 virtual_rect，且不再存在废弃 capture_fullscreen）
+    # 1. 全屏抓屏（不再存在废弃 capture_fullscreen / capture_region）
     assert not hasattr(adapter, "capture_fullscreen")
-    cap = adapter.capture_region((10, 20, 300, 200), virtual_rect=(0, 0, 1512, 982))
-    assert cap == b"\x89PNG_MAC_RETINA"
-    assert api.region_calls == [((10, 20, 300, 200), (0, 0, 1512, 982))]
+    assert not hasattr(adapter, "capture_region")
+    cap = adapter.capture_screen()
+    assert cap == ScreenCapture(png_bytes=b"\x89PNG_MAC_RETINA", virtual_rect=(0, 0, 1512, 982))
+    assert api.screen_calls == [tmp_path / "mac_tmp"]
 
     # 2. 终端 Bundle ID 识别
     for bid in (
@@ -719,12 +733,14 @@ def test_real_macos_system_api_lsappinfo_and_screencapture_fallback(tmp_path: Pa
         which=lambda name: f"/usr/bin/{name}" if name in {"lsappinfo", "screencapture", "pbcopy", "pbpaste"} else None,
         mss_factory=broken_mss,
     )
-    assert not hasattr(sys_api, "capture_screen")
+    assert not hasattr(sys_api, "capture_region")
     assert sys_api.frontmost_app() == ("com.googlecode.iterm2", 7312, "iTerm2")
     work_tmp = tmp_path / "shot_tmp"
-    shot = sys_api.capture_region((12, 34, 640, 480), work_tmp, virtual_rect=(0, 0, 1512, 982))
-    assert shot.startswith(b"\x89PNG")
-    assert seen_cmds[-1][:3] == ["screencapture", "-x", "-R12,34,640,480"]
+    shot = sys_api.capture_screen(work_tmp)
+    assert isinstance(shot, ScreenCapture)
+    assert shot.png_bytes.startswith(b"\x89PNG")
+    assert shot.virtual_rect == (0, 0, 640, 480)
+    assert seen_cmds[-1][:2] == ["screencapture", "-x"] and len(seen_cmds[-1]) == 3
     assert list(work_tmp.iterdir()) == []
 
 
@@ -1028,9 +1044,9 @@ def test_sound_device_source_single_source_in_platform_common():
     assert lifecycle == ["init", "start", "stop", "close"]
 
 
-def test_capture_region_across_linux_windows_macos(tmp_path):
-    """三端直接区域抓屏契约：X11/Win/Mac 优先 mss 直抓选区，Wayland 经 Portal 截后按逻辑坐标精确裁切，macOS 兜底 screencapture -R。"""
-    import io
+def test_capture_screen_and_crop_across_linux_windows_macos(tmp_path: Path):
+    """三端全屏抓拍与唯一裁切口契约：X11/Win/Mac 优先 mss 抓 monitors[0]，Wayland 优先 Portal 整屏并回退 mss，
+    macOS 兜底 screencapture -x 全屏；crop_png_region 覆盖 200%/150% HiDPI、负坐标多屏与越界钳制。"""
     from types import SimpleNamespace
     from PIL import Image
     from _platform.protocol import ScreenCapture, crop_png_region
@@ -1044,74 +1060,39 @@ def test_capture_region_across_linux_windows_macos(tmp_path):
     img.save(buf, format="PNG")
     full_png = buf.getvalue()
 
-    # 200% HiDPI：逻辑虚拟桌面 (0,0,400,300) 上选 (100,50,100,100) → 精确裁出 200x200 绿色区域
+    # 1a. 200% HiDPI：逻辑虚拟桌面 (0,0,400,300) 上选 (100,50,100,100) → 精确裁出 200x200 绿色区域
     cropped_bytes = crop_png_region(full_png, (0, 0, 400, 300), (100, 50, 100, 100))
     with Image.open(io.BytesIO(cropped_bytes)) as cropped:
         assert cropped.size == (200, 200)
         assert cropped.getpixel((100, 100))[:3] == (18, 171, 86)
 
-    # 2. Linux Wayland capture_region 走 Portal 裁切；X11 / Windows 走 mss 直抓选区
-    grabbed_boxes: list[dict] = []
+    # 1b. 负坐标多屏 150% HiDPI：逻辑 (-400,-100,600,200) 对应物理 900x300，选 (-300,-50,100,50) → 物理 (150,75,150,75)
+    neg_img = Image.new("RGB", (900, 300), (10, 20, 30))
+    for y in range(75, 150):
+        for x in range(150, 300):
+            neg_img.putpixel((x, y), (220, 90, 40))
+    neg_buf = io.BytesIO()
+    neg_img.save(neg_buf, format="PNG")
+    neg_cropped = crop_png_region(neg_buf.getvalue(), (-400, -100, 600, 200), (-300, -50, 100, 50))
+    with Image.open(io.BytesIO(neg_cropped)) as im_neg:
+        assert im_neg.size == (150, 75)
+        assert im_neg.getpixel((75, 35))[:3] == (220, 90, 40)
 
-    class FakeRegionMss:
-        def __enter__(self):
-            return self
+    # 1c. 越界选区（部分越界、完全越界右下与左上）均安全钳制且宽/高 >= 1；非法入参显式抛 ValueError
+    with Image.open(io.BytesIO(crop_png_region(full_png, (0, 0, 400, 300), (350, 260, 100, 80)))) as im_edge:
+        assert im_edge.size == (100, 80)
+    with Image.open(io.BytesIO(crop_png_region(full_png, (0, 0, 400, 300), (500, 400, 50, 50)))) as im_br:
+        assert im_br.size == (1, 1)
+    with Image.open(io.BytesIO(crop_png_region(full_png, (0, 0, 400, 300), (-100, -80, 40, 20)))) as im_tl:
+        assert im_tl.size == (1, 1)
+    with pytest.raises(ValueError):
+        crop_png_region(b"", (0, 0, 400, 300), (10, 10, 20, 20))
+    with pytest.raises(ValueError):
+        crop_png_region(full_png, (0, 0, 0, 300), (10, 10, 20, 20))
+    with pytest.raises(ValueError):
+        crop_png_region(full_png, (0, 0, 400, 300), (10, 10, 0, 20))
 
-        def __exit__(self, *_a):
-            return False
-
-        def grab(self, box):
-            grabbed_boxes.append(dict(box))
-            w, h = int(box["width"]), int(box["height"])
-            return SimpleNamespace(rgb=bytes([90, 120, 150]) * (w * h), size=(w, h))
-
-    linux_x11 = LinuxPlatformAdapter(environ={"XDG_SESSION_TYPE": "x11"}, mss_factory=FakeRegionMss)
-    out_x11 = linux_x11.capture_region((50, 60, 120, 80))
-    assert out_x11.startswith(b"\x89PNG")
-    assert grabbed_boxes[-1] == {"left": 50, "top": 60, "width": 120, "height": 80}
-
-    linux_wl = LinuxPlatformAdapter(
-        environ={"XDG_SESSION_TYPE": "wayland"},
-        portal_capture_fn=lambda: ScreenCapture(png_bytes=full_png, virtual_rect=(0, 0, 800, 600)),
-    )
-    out_wl = linux_wl.capture_region((100, 50, 100, 100), virtual_rect=(0, 0, 400, 300))
-    with Image.open(io.BytesIO(out_wl)) as cropped_wl:
-        assert cropped_wl.size == (200, 200)
-        assert cropped_wl.getpixel((50, 50))[:3] == (18, 171, 86)
-
-    win = WindowsPlatformAdapter(mss_factory=FakeRegionMss)
-    out_win = win.capture_region((10, 20, 64, 32))
-    assert out_win.startswith(b"\x89PNG")
-    assert grabbed_boxes[-1] == {"left": 10, "top": 20, "width": 64, "height": 32}
-
-    # 3. macOS mss 失败时回退 screencapture -x -R x,y,w,h（只截选区）
-    seen_cmds: list[list[str]] = []
-
-    def fake_mac_run(cmd, **_kw):
-        seen_cmds.append(list(cmd))
-        Path(cmd[-1]).write_bytes(cropped_bytes)
-        return subprocess.CompletedProcess(cmd, 0, "", "")
-
-    def broken_mss():
-        raise RuntimeError("mss denied")
-
-    mac_api = RealMacOSSystemApi(
-        run=fake_mac_run,
-        which=lambda name: "/usr/sbin/screencapture" if name == "screencapture" else None,
-        mss_factory=broken_mss,
-    )
-    mac = MacOSPlatformAdapter(macos_api=mac_api, temp_dir=tmp_path / "mac")
-    out_mac = mac.capture_region((15, 25, 200, 120))
-    assert out_mac == cropped_bytes
-    assert seen_cmds[-1][:3] == ["screencapture", "-x", "-R15,25,200,120"]
-
-
-def test_capture_region_mss_hidpi_scaling_and_monitor_bounds_clamping(tmp_path: Path):
-    """P1-2 回归：Windows / Linux X11 / Wayland回退 / macOS 的 HiDPI 逻辑→物理坐标映射与 monitors[0] 边界钳制。"""
-    from types import SimpleNamespace
-
-    from _platform.protocol import capture_region_mss
-
+    # 2. Linux X11 / Windows / macOS 均通过 capture_screen_mss 抓取 monitors[0] 整屏
     grabbed_boxes: list[dict] = []
 
     def _make_mss_factory(mon0: dict):
@@ -1126,69 +1107,65 @@ def test_capture_region_mss_hidpi_scaling_and_monitor_bounds_clamping(tmp_path: 
 
             def grab(self, box):
                 grabbed_boxes.append(dict(box))
-                w, h = int(box["width"]), int(box["height"])
-                return SimpleNamespace(rgb=bytes([20, 40, 60]) * (w * h), size=(w, h))
+                return SimpleNamespace(rgb=bytes([20, 40, 60]) * (16 * 12), size=(16, 12))
 
         return _ScopedMss
 
-    # 1. Windows 150% HiDPI + 副屏负坐标偏移
-    win = WindowsPlatformAdapter(
-        mss_factory=_make_mss_factory({"left": -2880, "top": 0, "width": 5760, "height": 1620})
-    )
-    out_win = win.capture_region((-1820, 100, 200, 100), virtual_rect=(-1920, 0, 3840, 1080))
-    assert out_win.startswith(b"\x89PNG")
-    assert grabbed_boxes[-1] == {"left": -2730, "top": 150, "width": 300, "height": 150}
-
-    # 2. Linux X11 200% HiDPI 缩放
     linux_x11 = LinuxPlatformAdapter(
         environ={"XDG_SESSION_TYPE": "x11"},
         mss_factory=_make_mss_factory({"left": 0, "top": 0, "width": 3840, "height": 2160}),
         uinput_factory=None,
     )
-    out_x11 = linux_x11.capture_region((100, 50, 200, 100), virtual_rect=(0, 0, 1920, 1080))
-    assert out_x11.startswith(b"\x89PNG")
-    assert grabbed_boxes[-1] == {"left": 200, "top": 100, "width": 400, "height": 200}
+    shot_x11 = linux_x11.capture_screen()
+    assert shot_x11.png_bytes.startswith(b"\x89PNG")
+    assert shot_x11.virtual_rect == (0, 0, 3840, 2160)
+    assert grabbed_boxes[-1] == {"left": 0, "top": 0, "width": 3840, "height": 2160}
 
-    # 3. 无 virtual_rect 时同样按 monitors[0] 钳制，防止 X11 越界 1px 触发 BadMatch
-    out_clamp_none = capture_region_mss(
-        (1820, 1000, 101, 85),
-        _make_mss_factory({"left": 0, "top": 0, "width": 1920, "height": 1080}),
+    win = WindowsPlatformAdapter(
+        mss_factory=_make_mss_factory({"left": -2880, "top": 0, "width": 5760, "height": 1620})
     )
-    assert out_clamp_none.startswith(b"\x89PNG")
-    assert grabbed_boxes[-1] == {"left": 1820, "top": 1000, "width": 100, "height": 80}
+    shot_win = win.capture_screen()
+    assert shot_win.png_bytes.startswith(b"\x89PNG")
+    assert shot_win.virtual_rect == (-2880, 0, 5760, 1620)
+    assert grabbed_boxes[-1] == {"left": -2880, "top": 0, "width": 5760, "height": 1620}
 
-    # 4. 完全越界（右下与左上）均钳制在 monitors[0] 内且宽/高 >= 1
-    capture_region_mss(
-        (2000, 1200, 50, 50),
-        _make_mss_factory({"left": 0, "top": 0, "width": 1920, "height": 1080}),
-    )
-    assert grabbed_boxes[-1] == {"left": 1919, "top": 1079, "width": 1, "height": 1}
-
-    capture_region_mss(
-        (-100, -50, 40, 20),
-        _make_mss_factory({"left": 0, "top": 0, "width": 1920, "height": 1080}),
-    )
-    assert grabbed_boxes[-1] == {"left": 0, "top": 0, "width": 1, "height": 1}
-
-    # 5. macOS monitors[0] 为逻辑点（scale=1.0 等价），经 MacOSPlatformAdapter 透传 virtual_rect
-    mac_api = RealMacOSSystemApi(
+    mac_mss_api = RealMacOSSystemApi(
         mss_factory=_make_mss_factory({"left": 0, "top": 0, "width": 1512, "height": 982})
     )
-    mac = MacOSPlatformAdapter(macos_api=mac_api, temp_dir=tmp_path / "mac_hi")
-    out_mac = mac.capture_region((100, 200, 300, 150), virtual_rect=(0, 0, 1512, 982))
-    assert out_mac.startswith(b"\x89PNG")
-    assert grabbed_boxes[-1] == {"left": 100, "top": 200, "width": 300, "height": 150}
+    mac_mss = MacOSPlatformAdapter(macos_api=mac_mss_api, temp_dir=tmp_path / "mac_mss")
+    shot_mac_mss = mac_mss.capture_screen()
+    assert shot_mac_mss.png_bytes.startswith(b"\x89PNG")
+    assert shot_mac_mss.virtual_rect == (0, 0, 1512, 982)
+    assert grabbed_boxes[-1] == {"left": 0, "top": 0, "width": 1512, "height": 982}
 
-    # 6. Wayland Portal 失败回退 mss 时也透传 virtual_rect 进行缩放；两者皆败抛出清晰错误
+    # 3. Linux Wayland：优先 Portal 整屏；Portal 失败或返回空字节回退 mss；双败抛出含 Portal 与 mss 的 RuntimeError
+    linux_wl = LinuxPlatformAdapter(
+        environ={"XDG_SESSION_TYPE": "wayland"},
+        portal_capture_fn=lambda: ScreenCapture(png_bytes=full_png, virtual_rect=(0, 0, 800, 600)),
+        uinput_factory=None,
+    )
+    shot_wl = linux_wl.capture_screen()
+    assert shot_wl == ScreenCapture(png_bytes=full_png, virtual_rect=(0, 0, 800, 600))
+
+    linux_wl_empty = LinuxPlatformAdapter(
+        environ={"XDG_SESSION_TYPE": "wayland"},
+        portal_capture_fn=lambda: ScreenCapture(png_bytes=b"", virtual_rect=(0, 0, 800, 600)),
+        mss_factory=_make_mss_factory({"left": 0, "top": 0, "width": 1920, "height": 1080}),
+        uinput_factory=None,
+    )
+    shot_wl_empty_fb = linux_wl_empty.capture_screen()
+    assert shot_wl_empty_fb.png_bytes.startswith(b"\x89PNG")
+    assert shot_wl_empty_fb.virtual_rect == (0, 0, 1920, 1080)
+
     linux_wl_fb = LinuxPlatformAdapter(
         environ={"XDG_SESSION_TYPE": "wayland"},
         portal_capture_fn=lambda: (_ for _ in ()).throw(RuntimeError("portal denied")),
         mss_factory=_make_mss_factory({"left": 0, "top": 0, "width": 3840, "height": 2160}),
         uinput_factory=None,
     )
-    out_wl_fb = linux_wl_fb.capture_region((10, 20, 50, 40), virtual_rect=(0, 0, 1920, 1080))
-    assert out_wl_fb.startswith(b"\x89PNG")
-    assert grabbed_boxes[-1] == {"left": 20, "top": 40, "width": 100, "height": 80}
+    shot_wl_fb = linux_wl_fb.capture_screen()
+    assert shot_wl_fb.png_bytes.startswith(b"\x89PNG")
+    assert shot_wl_fb.virtual_rect == (0, 0, 3840, 2160)
 
     linux_wl_both_fail = LinuxPlatformAdapter(
         environ={"XDG_SESSION_TYPE": "wayland"},
@@ -1197,13 +1174,74 @@ def test_capture_region_mss_hidpi_scaling_and_monitor_bounds_clamping(tmp_path: 
         uinput_factory=None,
     )
     with pytest.raises(RuntimeError, match="Portal.*mss"):
-        linux_wl_both_fail.capture_region((10, 20, 50, 40), virtual_rect=(0, 0, 1920, 1080))
+        linux_wl_both_fail.capture_screen()
 
-    # 7. 非法 region / virtual_rect 显式抛 ValueError
-    with pytest.raises(ValueError):
-        capture_region_mss((0, 0, 0, 10))
-    with pytest.raises(ValueError):
-        capture_region_mss((0, 0, 10, 10), virtual_rect=(0, 0, 0, 100))
+    # 4. macOS mss 失败时回退 screencapture -x <tmp_png>（全屏抓取、清理临时文件、缺失命令显式报错）
+    seen_cmds: list[list[str]] = []
+
+    def fake_mac_run(cmd, **_kw):
+        seen_cmds.append(list(cmd))
+        Path(cmd[-1]).write_bytes(full_png)
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    def broken_mss():
+        raise RuntimeError("mss denied")
+
+    mac_fb_dir = tmp_path / "mac_fb"
+    mac_api = RealMacOSSystemApi(
+        run=fake_mac_run,
+        which=lambda name: "/usr/sbin/screencapture" if name == "screencapture" else None,
+        mss_factory=broken_mss,
+    )
+    mac = MacOSPlatformAdapter(macos_api=mac_api, temp_dir=mac_fb_dir)
+    out_mac = mac.capture_screen()
+    assert out_mac == ScreenCapture(png_bytes=full_png, virtual_rect=(0, 0, 800, 600))
+    assert seen_cmds[-1][:2] == ["screencapture", "-x"] and len(seen_cmds[-1]) == 3
+    assert list(mac_fb_dir.iterdir()) == []
+
+    mac_no_bin = MacOSPlatformAdapter(
+        macos_api=RealMacOSSystemApi(which=lambda _name: None, mss_factory=broken_mss),
+        temp_dir=tmp_path / "mac_none",
+    )
+    with pytest.raises(RuntimeError, match="macOS 全屏抓屏不可用"):
+        mac_no_bin.capture_screen()
+
+
+def test_capture_screen_mss_monitors_validation_and_empty_png(monkeypatch):
+    """capture_screen_mss 边界校验：monitors 缺失/非法尺寸或 PNG 编码空字节必须显式抛 RuntimeError。"""
+    from types import SimpleNamespace
+    import mss.tools
+
+    from _platform.protocol import capture_screen_mss
+
+    def _bad_mss(monitors_val):
+        class _BadMss:
+            monitors = monitors_val
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_a):
+                return False
+
+            def grab(self, _box):
+                return SimpleNamespace(rgb=b"\x00\x00\x00", size=(1, 1))
+
+        return _BadMss
+
+    for bad_monitors in (
+        None,
+        [],
+        ["not-a-dict"],
+        [{"left": 0, "top": 0, "width": 0, "height": 1080}],
+        [{"left": 0, "top": 0, "width": 1920, "height": -1}],
+    ):
+        with pytest.raises(RuntimeError):
+            capture_screen_mss(_bad_mss(bad_monitors))
+
+    monkeypatch.setattr(mss.tools, "to_png", lambda _rgb, _size: b"")
+    with pytest.raises(RuntimeError, match="空字节"):
+        capture_screen_mss(_bad_mss([{"left": 0, "top": 0, "width": 1920, "height": 1080}]))
 
 
 def test_pynput_hotkeys_modifier_and_own_binding_do_not_close_overlay():

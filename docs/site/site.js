@@ -2,7 +2,7 @@
   "use strict";
 
   var RELEASE = {
-    version: "3.4.1",
+    version: "3.4.2",
     repo: "https://github.com/jackche8/voice-input",
     assets: {
       linux: "ollama-voice-input_{version}_amd64.deb",

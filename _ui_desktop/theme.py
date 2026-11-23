@@ -8,7 +8,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from PySide6.QtCore import QPoint, QRect
-from PySide6.QtGui import QColor, QFont, QGuiApplication
+from PySide6.QtGui import QColor, QFont, QGuiApplication, QImage, QPainter
 
 # ---------------------------------------------------------------------------
 # 1. 红色十字定位框选器（截屏原位翻译 & 纯 OCR 100% 复用）
@@ -68,7 +68,6 @@ OVERLAY_PATCH_RADIUS_PX = 3
 OVERLAY_OUTLINE_WIDTH_PX = 1.5
 OVERLAY_DASH_PATTERN_PX = (6.0, 4.0)
 OVERLAY_ANTS_SPEED_PX_S = 25.0  # 加载中虚线外框流动速度
-OVERLAY_OPEN_FADE_MS = 140
 OVERLAY_RESULT_FADE_MS = 180
 OVERLAY_MENU_GAP_PX = 8
 OVERLAY_MENU_INSIDE_PAD_PX = 6
@@ -295,6 +294,27 @@ def qcolor(spec: ColorSpec, *, opaque: bool = False, fallback: str = "#000000") 
     if opaque:
         color.setAlpha(255)
     return color
+
+
+def decode_opaque_png(png_bytes: bytes, *, label: str = "png") -> QImage:
+    """将图像字节解码为不透明 Format_ARGB32；无透明通道走快路径，含透明通道时用 DEFAULT_BLOCK_BG_HEX 垫底。"""
+    if not isinstance(png_bytes, (bytes, bytearray, memoryview)):
+        raise ValueError(f"{label} 必须是字节流，收到 {type(png_bytes).__name__}")
+    if not png_bytes:
+        raise ValueError(f"{label} 不能为空")
+    raw = png_bytes if isinstance(png_bytes, bytes) else bytes(png_bytes)
+    image = QImage.fromData(raw)
+    if image.isNull() or image.width() <= 0 or image.height() <= 0:
+        raise ValueError(f"{label} 不是有效的图像数据")
+    if not image.hasAlphaChannel():
+        return image.convertToFormat(QImage.Format.Format_ARGB32)
+    converted = image.convertToFormat(QImage.Format.Format_ARGB32)
+    opaque = QImage(converted.size(), QImage.Format.Format_ARGB32)
+    opaque.fill(qcolor(DEFAULT_BLOCK_BG_HEX, opaque=True))
+    painter = QPainter(opaque)
+    painter.drawImage(0, 0, converted)
+    painter.end()
+    return opaque
 
 
 def make_font(

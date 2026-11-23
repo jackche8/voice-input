@@ -68,7 +68,7 @@ def test_daemon_entry_is_thin():
         elif isinstance(node, ast.ImportFrom):
             assert not (node.module or "").startswith("_linux")
     for marker in LEGACY_MARKERS + ("/api/web_input", "TranslationOverlay", "StatusBar(", "import gi", "WebKit2", "sd_notify",
-                                    "open_url_async", "= acquire_singleton_lock("):
+                                    "open_url_async", "= acquire_singleton_lock(", "open_live_selector", "capture_region"):
         assert marker not in src
     for needed in (
         "_desktop.",
@@ -83,6 +83,8 @@ def test_daemon_entry_is_thin():
         "ensure_portal_app_entry(paths, os.environ)",
         "supervisor.stop(",
         "CaptureFlow",
+        "platform.capture_screen",
+        "open_frozen_selector",
         "AnnotateOverlay",
         "open_annotator",
         "platform.write_clipboard_png",

@@ -49,8 +49,8 @@ from _platform.protocol import (
     FocusTarget,
     HotkeyRig,
     PasteResult,
-    VirtualRect,
-    capture_region_mss,
+    ScreenCapture,
+    capture_screen_mss,
 )
 
 PASTE_RESTORE_DELAY_S = 0.55
@@ -210,13 +210,8 @@ class WindowsPlatformAdapter:
             self._win32_api = CtypesWin32Api()
         return self._win32_api
 
-    def capture_region(
-        self,
-        region: VirtualRect,
-        *,
-        virtual_rect: VirtualRect | None = None,
-    ) -> bytes:
-        return capture_region_mss(region, self._mss_factory, virtual_rect=virtual_rect)
+    def capture_screen(self) -> ScreenCapture:
+        return capture_screen_mss(self._mss_factory)
 
     def current_focus(self) -> FocusTarget:
         api = self._win32()

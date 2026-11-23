@@ -30,7 +30,7 @@ from _desktop.singleton import try_acquire_singleton_lock
 from _desktop.status import PlatformStatus
 from _desktop.supervisor import create_supervisor
 from _desktop.ui_bridge import (
-    QtUiBridge, apply_qt_app_icon, configure_qt_platform_env, open_annotator, open_live_selector, open_translate_overlay,
+    QtUiBridge, apply_qt_app_icon, configure_qt_platform_env, open_annotator, open_frozen_selector, open_translate_overlay,
     query_virtual_screen_rect,
 )
 from _desktop.voice import VoiceFlow, build_keywords_context_provider, new_job_id
@@ -86,9 +86,9 @@ def main() -> None:
     last = LastDelivered()
     hud = VoiceHudOverlay()
     capture_flow = CaptureFlow(
-        capture_region=lambda rect, vrect: platform.capture_region(rect, virtual_rect=vrect),
-        open_selector=lambda rect, label, on_sel, on_cancel: open_live_selector(
-            app, RedCrosshairSelector, rect, label, on_sel, on_cancel
+        capture_screen=platform.capture_screen,
+        open_selector=lambda png, rect, label, on_sel, on_cancel: open_frozen_selector(
+            app, RedCrosshairSelector, png, rect, label, on_sel, on_cancel
         ),
         open_inplace_overlay=lambda png, rect, **kw: open_translate_overlay(app, InplaceTranslateOverlay, png, rect, **kw),
         open_annotator=lambda png, rect, **kw: open_annotator(app, AnnotateOverlay, png, rect, **kw),
