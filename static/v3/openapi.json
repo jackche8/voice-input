@@ -1617,10 +1617,385 @@
         },
         "security": []
       }
+    },
+    "/api/v1/logs": {
+      "get": {
+        "tags": [
+          "logs"
+        ],
+        "summary": "List Logs",
+        "operationId": "list_logs_api_v1_logs_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LogSourceListResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "鉴权失败：非本机、对端不是允许的局域网、token 无效、Host/Origin 不可信。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": []
+      }
+    },
+    "/api/v1/logs/diagnostic-summary": {
+      "get": {
+        "tags": [
+          "logs"
+        ],
+        "summary": "Diagnostic Summary",
+        "operationId": "diagnostic_summary_api_v1_logs_diagnostic_summary_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DiagnosticSummaryResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "鉴权失败：非本机、对端不是允许的局域网、token 无效、Host/Origin 不可信。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": []
+      }
+    },
+    "/api/v1/logs/{name}": {
+      "get": {
+        "tags": [
+          "logs"
+        ],
+        "summary": "Read Log",
+        "operationId": "read_log_api_v1_logs__name__get",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Name"
+            }
+          },
+          {
+            "name": "lines",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer",
+                  "maximum": 5000,
+                  "minimum": 1
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Lines"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LogReadResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "鉴权失败：非本机、对端不是允许的局域网、token 无效、Host/Origin 不可信。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": []
+      },
+      "delete": {
+        "tags": [
+          "logs"
+        ],
+        "summary": "Clear Log",
+        "operationId": "clear_log_api_v1_logs__name__delete",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Name"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LogClearResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "鉴权失败：非本机、对端不是允许的局域网、token 无效、Host/Origin 不可信。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": []
+      }
+    },
+    "/api/v1/about": {
+      "get": {
+        "tags": [
+          "logs"
+        ],
+        "summary": "Get About",
+        "operationId": "get_about_api_v1_about_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AboutInfoResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "鉴权失败：非本机、对端不是允许的局域网、token 无效、Host/Origin 不可信。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": []
+      }
     }
   },
   "components": {
     "schemas": {
+      "AboutAsrVariant": {
+        "type": "string",
+        "enum": [
+          "cuda",
+          "mps",
+          "cpu",
+          "corrupt"
+        ],
+        "title": "AboutAsrVariant"
+      },
+      "AboutInfoResponse": {
+        "properties": {
+          "ok": {
+            "type": "boolean",
+            "const": true,
+            "title": "Ok",
+            "default": true
+          },
+          "app_name": {
+            "type": "string",
+            "title": "App Name"
+          },
+          "version": {
+            "type": "string",
+            "title": "Version"
+          },
+          "summary": {
+            "type": "string",
+            "title": "Summary"
+          },
+          "os_name": {
+            "type": "string",
+            "enum": [
+              "linux",
+              "windows",
+              "macos"
+            ],
+            "title": "Os Name"
+          },
+          "platform_detail": {
+            "type": "string",
+            "title": "Platform Detail"
+          },
+          "session_type": {
+            "type": "string",
+            "title": "Session Type"
+          },
+          "python_version": {
+            "type": "string",
+            "title": "Python Version"
+          },
+          "run_mode": {
+            "$ref": "#/components/schemas/RunMode"
+          },
+          "asr_variant": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/AboutAsrVariant"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "asr_detail": {
+            "type": "string",
+            "title": "Asr Detail"
+          },
+          "asr_model": {
+            "type": "string",
+            "title": "Asr Model"
+          },
+          "ollama_model": {
+            "type": "string",
+            "title": "Ollama Model"
+          },
+          "ollama_version": {
+            "type": "string",
+            "title": "Ollama Version"
+          },
+          "data_root": {
+            "type": "string",
+            "title": "Data Root"
+          },
+          "logs_dir": {
+            "type": "string",
+            "title": "Logs Dir"
+          },
+          "config_root": {
+            "type": "string",
+            "title": "Config Root"
+          },
+          "license_title": {
+            "type": "string",
+            "title": "License Title"
+          },
+          "license_note": {
+            "type": "string",
+            "title": "License Note"
+          },
+          "links": {
+            "$ref": "#/components/schemas/AboutLinks"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "app_name",
+          "version",
+          "summary",
+          "os_name",
+          "platform_detail",
+          "session_type",
+          "python_version",
+          "run_mode",
+          "asr_detail",
+          "asr_model",
+          "ollama_model",
+          "ollama_version",
+          "data_root",
+          "logs_dir",
+          "config_root",
+          "license_title",
+          "license_note",
+          "links"
+        ],
+        "title": "AboutInfoResponse"
+      },
+      "AboutLinks": {
+        "properties": {
+          "repo_url": {
+            "type": "string",
+            "title": "Repo Url"
+          },
+          "pages_url": {
+            "type": "string",
+            "title": "Pages Url"
+          },
+          "releases_url": {
+            "type": "string",
+            "title": "Releases Url"
+          },
+          "issues_url": {
+            "type": "string",
+            "title": "Issues Url"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "repo_url",
+          "pages_url",
+          "releases_url",
+          "issues_url"
+        ],
+        "title": "AboutLinks"
+      },
       "AckResult": {
         "type": "string",
         "enum": [
@@ -1805,6 +2180,22 @@
               }
             ],
             "title": "Audio Input Device"
+          },
+          "log_max_lines": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "enum": [
+                  500,
+                  2000,
+                  5000
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Log Max Lines"
           }
         },
         "additionalProperties": false,
@@ -1871,6 +2262,16 @@
             "type": "string",
             "title": "Audio Input Device",
             "default": ""
+          },
+          "log_max_lines": {
+            "type": "integer",
+            "enum": [
+              500,
+              2000,
+              5000
+            ],
+            "title": "Log Max Lines",
+            "default": 2000
           },
           "ollama_model": {
             "type": "string",
@@ -2387,6 +2788,54 @@
         ],
         "title": "ComponentStatus"
       },
+      "DiagnosticSummaryResponse": {
+        "properties": {
+          "ok": {
+            "type": "boolean",
+            "const": true,
+            "title": "Ok",
+            "default": true
+          },
+          "generated_at": {
+            "type": "string",
+            "title": "Generated At"
+          },
+          "log_max_lines": {
+            "type": "integer",
+            "enum": [
+              500,
+              2000,
+              5000
+            ],
+            "title": "Log Max Lines"
+          },
+          "truncated": {
+            "type": "boolean",
+            "title": "Truncated"
+          },
+          "included_files": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Included Files"
+          },
+          "text": {
+            "type": "string",
+            "title": "Text"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "generated_at",
+          "log_max_lines",
+          "truncated",
+          "included_files",
+          "text"
+        ],
+        "title": "DiagnosticSummaryResponse"
+      },
       "ErrorCode": {
         "type": "string",
         "enum": [
@@ -2406,6 +2855,7 @@
           "jobs_io",
           "delivery_failed",
           "config_io",
+          "logs_io",
           "internal"
         ],
         "title": "ErrorCode"
@@ -2966,6 +3416,262 @@
         ],
         "title": "LanAccessResponse",
         "description": "GET /api/v1/lan-access：仅本机。token 只供用户点击复制，不得写入日志或示例。"
+      },
+      "LogClearResponse": {
+        "properties": {
+          "ok": {
+            "type": "boolean",
+            "const": true,
+            "title": "Ok",
+            "default": true
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "cleared": {
+            "type": "boolean",
+            "const": true,
+            "title": "Cleared",
+            "default": true
+          },
+          "bytes_before": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Bytes Before"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "name",
+          "bytes_before"
+        ],
+        "title": "LogClearResponse"
+      },
+      "LogGroup": {
+        "type": "string",
+        "enum": [
+          "runtime",
+          "setup"
+        ],
+        "title": "LogGroup"
+      },
+      "LogLevel": {
+        "type": "string",
+        "enum": [
+          "info",
+          "warn",
+          "error"
+        ],
+        "title": "LogLevel"
+      },
+      "LogLineEntry": {
+        "properties": {
+          "line_no": {
+            "type": "integer",
+            "minimum": 1.0,
+            "title": "Line No"
+          },
+          "text": {
+            "type": "string",
+            "title": "Text"
+          },
+          "level": {
+            "$ref": "#/components/schemas/LogLevel"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "line_no",
+          "text",
+          "level"
+        ],
+        "title": "LogLineEntry"
+      },
+      "LogReadResponse": {
+        "properties": {
+          "ok": {
+            "type": "boolean",
+            "const": true,
+            "title": "Ok",
+            "default": true
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "group": {
+            "$ref": "#/components/schemas/LogGroup"
+          },
+          "exists": {
+            "type": "boolean",
+            "title": "Exists"
+          },
+          "max_lines": {
+            "type": "integer",
+            "maximum": 5000.0,
+            "minimum": 1.0,
+            "title": "Max Lines"
+          },
+          "line_count": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Line Count"
+          },
+          "bytes": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Bytes"
+          },
+          "truncated": {
+            "type": "boolean",
+            "title": "Truncated"
+          },
+          "has_error": {
+            "type": "boolean",
+            "title": "Has Error"
+          },
+          "has_warn": {
+            "type": "boolean",
+            "title": "Has Warn"
+          },
+          "updated_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Updated At"
+          },
+          "entries": {
+            "items": {
+              "$ref": "#/components/schemas/LogLineEntry"
+            },
+            "type": "array",
+            "title": "Entries"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "name",
+          "group",
+          "exists",
+          "max_lines",
+          "line_count",
+          "bytes",
+          "truncated",
+          "has_error",
+          "has_warn",
+          "entries"
+        ],
+        "title": "LogReadResponse"
+      },
+      "LogSourceInfo": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "group": {
+            "$ref": "#/components/schemas/LogGroup"
+          },
+          "exists": {
+            "type": "boolean",
+            "title": "Exists"
+          },
+          "line_count": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Line Count"
+          },
+          "bytes": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Bytes"
+          },
+          "truncated": {
+            "type": "boolean",
+            "title": "Truncated"
+          },
+          "has_error": {
+            "type": "boolean",
+            "title": "Has Error"
+          },
+          "has_warn": {
+            "type": "boolean",
+            "title": "Has Warn"
+          },
+          "updated_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Updated At"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "name",
+          "group",
+          "exists",
+          "line_count",
+          "bytes",
+          "truncated",
+          "has_error",
+          "has_warn"
+        ],
+        "title": "LogSourceInfo"
+      },
+      "LogSourceListResponse": {
+        "properties": {
+          "ok": {
+            "type": "boolean",
+            "const": true,
+            "title": "Ok",
+            "default": true
+          },
+          "log_max_lines": {
+            "type": "integer",
+            "enum": [
+              500,
+              2000,
+              5000
+            ],
+            "title": "Log Max Lines"
+          },
+          "allowed_max_lines": {
+            "items": {
+              "type": "integer"
+            },
+            "type": "array",
+            "title": "Allowed Max Lines"
+          },
+          "sources": {
+            "items": {
+              "$ref": "#/components/schemas/LogSourceInfo"
+            },
+            "type": "array",
+            "title": "Sources"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "log_max_lines",
+          "sources"
+        ],
+        "title": "LogSourceListResponse"
       },
       "OcrInplaceResponse": {
         "properties": {
@@ -3528,6 +4234,15 @@
           "session_id"
         ],
         "title": "RecognizeSessionCreated"
+      },
+      "RunMode": {
+        "type": "string",
+        "enum": [
+          "frozen",
+          "deb",
+          "source"
+        ],
+        "title": "RunMode"
       },
       "SessionClosedEvent": {
         "properties": {
@@ -4142,6 +4857,16 @@
             "default": "",
             "title": "Audio Input Device",
             "type": "string"
+          },
+          "log_max_lines": {
+            "default": 2000,
+            "enum": [
+              500,
+              2000,
+              5000
+            ],
+            "title": "Log Max Lines",
+            "type": "integer"
           },
           "vision_model": {
             "anyOf": [

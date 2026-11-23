@@ -17,7 +17,10 @@ from _platform.child_process import (
     LOG_ROTATE_BYTES,
     SessionRecord,
     kill_recorded_session,
+    open_append_log_binary,
+    open_append_log_text,
     process_identity,
+    rotate_log,
     session_record,
     set_env_var,
     spawn_child,
@@ -294,3 +297,179 @@ def test_set_and_unset_env_var_cross_platform():
         "UV_CONCURRENT_DOWNLOADS": "0",
         "force_color": "1",
     }
+
+
+def test_windows_open_append_log_flags_and_two_stage_cleanup(tmp_path, monkeypatch):
+    import ctypes
+    import io
+
+    # 1) 标志校验：FILE_APPEND_DATA=0x0004 且绝对不含 FILE_WRITE_DATA=0x0002
+    assert _child_windows.FILE_APPEND_DATA == 0x0004
+    assert (_child_windows.FILE_APPEND_DATA & 0x0002) == 0
+
+    # 2) CtypesWinFileApi.create_append_file 实传参数校验（用假 kernel32）
+    create_calls: list[tuple] = []
+
+    class _FakeFn:
+        def __init__(self, impl) -> None:
+            self._impl = impl
+            self.argtypes = None
+            self.restype = None
+
+        def __call__(self, *args):
+            return self._impl(*args)
+
+    class _FakeKernel32:
+        def __init__(self, handle_ret: int) -> None:
+            self.CreateFileW = _FakeFn(lambda *a: (create_calls.append(a) or handle_ret))
+            self.CloseHandle = _FakeFn(lambda _h: 1)
+
+    fake_windll = type("W", (), {"kernel32": _FakeKernel32(1234)})()
+    monkeypatch.setattr(ctypes, "windll", fake_windll, raising=False)
+    win_api = _child_windows.CtypesWinFileApi()
+    assert win_api.create_append_file("C:\\logs\\app.log") == 1234
+    assert create_calls[0][1] == (_child_windows.FILE_APPEND_DATA | _child_windows.SYNCHRONIZE)
+    assert create_calls[0][2] == (
+        _child_windows.FILE_SHARE_READ | _child_windows.FILE_SHARE_WRITE | _child_windows.FILE_SHARE_DELETE
+    )
+    assert create_calls[0][4] == _child_windows.OPEN_ALWAYS
+    assert create_calls[0][5] == _child_windows.FILE_ATTRIBUTE_NORMAL
+
+    # 3) 两阶段无泄露清理：open_osfhandle 失败仅关 handle；fdopen 失败仅关 fd 绝不双关 handle
+    class _FakeWinFileApi:
+        def __init__(self, *, fail_osf: bool = False, fail_fdopen: bool = False) -> None:
+            self.fail_osf = fail_osf
+            self.fail_fdopen = fail_fdopen
+            self.events: list[tuple] = []
+
+        def create_append_file(self, path: str) -> int:
+            self.events.append(("create", path))
+            return 555
+
+        def close_handle(self, handle: int) -> None:
+            self.events.append(("close_handle", handle))
+
+        def open_osfhandle(self, handle: int, flags: int) -> int:
+            self.events.append(("open_osfhandle", handle, flags))
+            if self.fail_osf:
+                raise OSError("osf failed")
+            return 88
+
+        def fdopen(self, fd: int, mode: str, **kwargs):
+            self.events.append(("fdopen", fd, mode, dict(kwargs)))
+            if self.fail_fdopen:
+                raise OSError("fdopen failed")
+            return io.BytesIO() if "b" in mode else io.StringIO()
+
+        def close_fd(self, fd: int) -> None:
+            self.events.append(("close_fd", fd))
+
+    log_path = tmp_path / "win.log"
+    expected_flags = os.O_APPEND | getattr(os, "O_BINARY", 0)
+
+    ok_bin = _FakeWinFileApi()
+    _child_windows.open_append_log_binary(log_path, api=ok_bin)
+    assert ok_bin.events == [
+        ("create", os.fspath(log_path)),
+        ("open_osfhandle", 555, expected_flags),
+        ("fdopen", 88, "ab", {}),
+    ]
+
+    ok_txt = _FakeWinFileApi()
+    _child_windows.open_append_log_text(log_path, api=ok_txt)
+    assert ok_txt.events[-1] == ("fdopen", 88, "a", {"encoding": "utf-8", "buffering": 1})
+
+    fail1 = _FakeWinFileApi(fail_osf=True)
+    with pytest.raises(OSError, match="osf failed"):
+        _child_windows.open_append_log_binary(log_path, api=fail1)
+    assert ("close_handle", 555) in fail1.events
+    assert not any(ev[0] == "close_fd" for ev in fail1.events)
+
+    fail2 = _FakeWinFileApi(fail_fdopen=True)
+    with pytest.raises(OSError, match="fdopen failed"):
+        _child_windows.open_append_log_text(log_path, api=fail2)
+    assert ("close_fd", 88) in fail2.events
+    assert not any(ev[0] == "close_handle" for ev in fail2.events)
+
+
+def test_open_append_log_dispatches_on_sys_platform_not_os_name(tmp_path, monkeypatch):
+    import io
+
+    # 即使 os.name/_is_nt 被 monkeypatch 成 nt/True，Linux 下仍不走 _child_windows（避免触发无 msvcrt 崩溃）
+    monkeypatch.setattr(cp_mod.os, "name", "nt")
+    monkeypatch.setattr(cp_mod, "_is_nt", lambda: True)
+    monkeypatch.setattr(cp_mod.sys, "platform", "linux")
+    called: list[str] = []
+    monkeypatch.setattr(
+        _child_windows,
+        "open_append_log_binary",
+        lambda p: (called.append(f"bin:{p}") or io.BytesIO()),
+    )
+    monkeypatch.setattr(
+        _child_windows,
+        "open_append_log_text",
+        lambda p, **_kw: (called.append(f"txt:{p}") or io.StringIO()),
+    )
+
+    p = tmp_path / "logs" / "a.log"
+    with open_append_log_binary(p) as fh:
+        fh.write(b"hello\n")
+    with open_append_log_text(p) as fh:
+        fh.write("world\n")
+    assert called == []
+    assert p.read_text(encoding="utf-8") == "hello\nworld\n"
+
+    # 真实 sys.platform == "win32" 时才分派到 _child_windows
+    monkeypatch.setattr(cp_mod.sys, "platform", "win32")
+    open_append_log_binary(p)
+    open_append_log_text(p)
+    assert called == [f"bin:{p}", f"txt:{p}"]
+
+
+def test_rotate_log_trims_max_lines_skips_within_limit_and_refuses_symlink(tmp_path):
+    with pytest.raises(ValueError, match="max_lines"):
+        rotate_log(tmp_path / "x.log", max_lines=0)
+
+    # 符号链接绝不跟随，既不按 >10MB 改名 .1 也不按 max_lines 改写目标文件
+    outside = tmp_path / "outside.log"
+    outside.write_bytes(b"l1\nl2\nl3\nl4\n")
+    sym = tmp_path / "sym.log"
+    sym.symlink_to(outside)
+    rotate_log(sym, max_lines=2)
+    assert outside.read_bytes() == b"l1\nl2\nl3\nl4\n" and sym.is_symlink()
+
+    outside_big = tmp_path / "outside_big.log"
+    with open(outside_big, "wb") as fh:
+        fh.truncate(LOG_ROTATE_BYTES + 1)
+    sym_big = tmp_path / "sym_big.log"
+    sym_big.symlink_to(outside_big)
+    rotate_log(sym_big, max_lines=2)
+    assert sym_big.is_symlink() and not sym_big.with_name("sym_big.log.1").exists()
+
+    # 行数未超限（含行内 \r 进度条不计换行）：绝不重写文件（保留 inode 与 mtime_ns）
+    within = tmp_path / "within.log"
+    within.write_bytes(b"p1\rp2\rp3\nline2\n")
+    st_before = within.stat()
+    rotate_log(within, max_lines=2)
+    st_after = within.stat()
+    assert st_after.st_ino == st_before.st_ino and st_after.st_mtime_ns == st_before.st_mtime_ns
+    assert within.read_bytes() == b"p1\rp2\rp3\nline2\n"
+
+    # 超限时按严格 \n 裁剪保留精确尾行（保留 CRLF 与无尾换行）
+    crlf = tmp_path / "crlf.log"
+    crlf.write_bytes(b"a\r\nb\r\nc\r\nd\r\n")
+    rotate_log(crlf, max_lines=2)
+    assert crlf.read_bytes() == b"c\r\nd\r\n"
+
+    no_nl = tmp_path / "no_nl.log"
+    no_nl.write_bytes(b"1\n2\n3\n4")
+    rotate_log(no_nl, max_lines=2)
+    assert no_nl.read_bytes() == b"3\n4"
+
+    # >10MB 轮转优先于按行裁剪
+    huge = tmp_path / "huge.log"
+    with open(huge, "wb") as fh:
+        fh.truncate(LOG_ROTATE_BYTES + 1)
+    rotate_log(huge, max_lines=5)
+    assert not huge.exists()
+    assert huge.with_name("huge.log.1").stat().st_size == LOG_ROTATE_BYTES + 1

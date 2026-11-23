@@ -196,6 +196,10 @@ REQUIRED_API_PATHS = (
     "/api/v1/components",
     "/api/v1/components/{name}/retry",
     "/api/v1/lan-access",
+    "/api/v1/logs",
+    "/api/v1/logs/diagnostic-summary",
+    "/api/v1/logs/{name}",
+    "/api/v1/about",
 )
 
 # 一次切流后必须不存在的旧路径（不保留包装或 redirect）。
@@ -271,6 +275,11 @@ def export_api_openapi(python: Path, gate_dir: Path, *, write_snapshot: bool = F
         "AudioInputListResponse",
         "OcrInplaceResponse",
         "OcrTextBlock",
+        "LogSourceListResponse",
+        "LogReadResponse",
+        "LogClearResponse",
+        "DiagnosticSummaryResponse",
+        "AboutInfoResponse",
     ):
         if required not in schemas:
             raise SystemExit(f"API OpenAPI missing schema {required}")

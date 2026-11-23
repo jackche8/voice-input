@@ -246,6 +246,14 @@ def test_config_api_never_returns_legacy_secrets(tmp_path):
     bad_key = client.post("/api/v1/config", json={"hotkey_voice": "z"}, headers=local_headers())
     assert bad_key.status_code == 400
 
+    # log_max_lines：默认 2000，支持 500/2000/5000 往返持久化，非法值 400 invalid_request
+    assert got["log_max_lines"] == 2000
+    saved_cap = client.post("/api/v1/config", json={"log_max_lines": 5000}, headers=local_headers())
+    assert saved_cap.status_code == 200 and saved_cap.json()["log_max_lines"] == 5000
+    assert json.loads(cfg_path.read_text(encoding="utf-8"))["log_max_lines"] == 5000
+    bad_cap = client.post("/api/v1/config", json={"log_max_lines": 1234}, headers=local_headers())
+    assert bad_cap.status_code == 400 and bad_cap.json()["error"] == "invalid_request"
+
 
 # ---------------------------------------------------------------- audio inputs
 

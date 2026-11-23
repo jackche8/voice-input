@@ -93,7 +93,8 @@ def test_daemon_entry_is_thin():
         "pictures_dir(",
         "on_screenshot_annotate=actions.annotate",
         "on_annotate=actions.annotate",
-        'attach_app_log(paths.logs / "app.log")',
+        'attach_app_log(paths.logs / "app.log", max_lines=read_log_max_lines(paths.config))',
+        "log_max_lines=lambda: read_log_max_lines(paths.config)",
         "DeliveryLoop",
         "VoiceHudOverlay",
         "StudioTrayIcon",
@@ -121,6 +122,45 @@ def test_daemon_load_bindings_includes_fifth_hotkey_annotate(tmp_path: Path):
     cfg_path.write_text(json.dumps({"hotkey_annotate": "ctrl+shift+a"}), encoding="utf-8")
     bindings = daemon.load_bindings(cfg_path)
     assert bindings.annotate == "ctrl+shift+a"
+
+
+def test_main_window_forwards_log_max_lines_only_when_configured(tmp_path: Path):
+    import io
+
+    from _desktop.main_window import MainWindow
+    from _paths import AppPaths
+
+    paths = AppPaths.for_roots(config_root=tmp_path / "c", data_root=tmp_path / "d", runtime_dir=tmp_path / "r")
+    seen: list[dict] = []
+
+    class _StubHandle:
+        pid = 1
+        stdin = io.BytesIO()
+
+        def poll(self):
+            return 0
+
+        def terminate_session(self, _t):
+            return []
+
+    def spy_spawn(_argv, **kw):
+        seen.append(dict(kw))
+        return _StubHandle()
+
+    win_default = MainWindow(paths=paths, origin="https://127.0.0.1:17945", environ={}, on_failed=lambda _m: None, spawn=spy_spawn)
+    win_default.show("/")
+    assert "max_lines" not in seen[-1]
+
+    win_capped = MainWindow(
+        paths=paths,
+        origin="https://127.0.0.1:17945",
+        environ={},
+        on_failed=lambda _m: None,
+        spawn=spy_spawn,
+        log_max_lines=lambda: 500,
+    )
+    win_capped.show("/")
+    assert seen[-1]["max_lines"] == 500
 
 
 def test_build_production_app_binds_environ_roots_and_serves_pages(tmp_path):

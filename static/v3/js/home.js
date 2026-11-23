@@ -1,4 +1,4 @@
-/* 方案 C 侧栏效率工作站主页纯 UI（翻译框 / 图片 OCR / 历史 / 手机扫码 / 模型与热键设置）。
+/* 方案 C 侧栏效率工作站主页纯 UI（翻译框 / 图片 OCR / 历史 / 手机扫码 / 模型与热键设置 / 运行日志 / 关于）。
  * 严守纯展示边界：不发起网络请求、不读写剪贴板或存储、不拼接口路径，所有动作经 hooks 回调通知业务层。
  */
 (function (V3) {
@@ -9,7 +9,9 @@
     ocr: "scan",
     history: "clock",
     lan: "phone",
-    setup: "settings"
+    setup: "settings",
+    logs: "file-text",
+    about: "info"
   };
 
   var PANEL_META = {
@@ -32,6 +34,14 @@
     setup: {
       title: "模型与热键设置",
       sub: ""
+    },
+    logs: {
+      title: "运行日志",
+      sub: "全宽日志阅读与胶囊切源 · 所有敏感令牌与代理密码均由后端脱敏为 ***"
+    },
+    about: {
+      title: "关于",
+      sub: "版本、运行环境、本地目录与双许可信息（由本地服务权威返回）"
     }
   };
 
@@ -172,6 +182,11 @@
     }
     if (state.translate_lang_pair && (!cleanInit || !cleanInit.ocr || !cleanInit.ocr.lang_pair)) {
       state.ocr = Object.assign({}, state.ocr, { lang_pair: state.translate_lang_pair });
+    }
+    if (state.log_max_lines != null && (!cleanInit || !cleanInit.logs || cleanInit.logs.log_max_lines == null)) {
+      state.logs = Object.assign({}, state.logs, { log_max_lines: state.log_max_lines });
+    } else if (state.logs && state.logs.log_max_lines != null && state.log_max_lines == null) {
+      state.log_max_lines = state.logs.log_max_lines;
     }
 
     var ownedPreviewUrl = null;
@@ -723,6 +738,35 @@
         })
       : null;
 
+    var confirmDialog = typeof V3.mountConfirm === "function" ? V3.mountConfirm(root) : null;
+
+    /* ---------- 6. Logs 运行日志面板 ---------- */
+    var logsPanelEl = V3.dom.el("section", {
+      className: "studio-panel",
+      hidden: true,
+      dataset: { panelView: "logs" }
+    });
+    var logsPanel = V3.logsPanel && typeof V3.logsPanel.create === "function"
+      ? V3.logsPanel.create(logsPanelEl, {
+          getState: function () { return state; },
+          hooks: hooks,
+          confirm: confirmDialog
+        })
+      : null;
+
+    /* ---------- 7. About 关于面板 ---------- */
+    var aboutPanelEl = V3.dom.el("section", {
+      className: "studio-panel",
+      hidden: true,
+      dataset: { panelView: "about" }
+    });
+    var aboutPanel = V3.aboutPanel && typeof V3.aboutPanel.create === "function"
+      ? V3.aboutPanel.create(aboutPanelEl, {
+          getState: function () { return state; },
+          hooks: hooks
+        })
+      : null;
+
     var mainEl = V3.dom.el("main", { className: "studio-main" }, [
       V3.dom.el("header", { className: "studio-head" }, [
         V3.dom.el("div", {}, [pageTitleEl, pageSubEl]),
@@ -733,7 +777,9 @@
       ocrPanelEl,
       historyPanelEl,
       lanPanelEl,
-      setupPanelEl
+      setupPanelEl,
+      logsPanelEl,
+      aboutPanelEl
     ]);
 
     var studioWin = V3.dom.el("div", { className: "studio-window" }, [railEl, mainEl]);
@@ -863,112 +909,123 @@
         pageSubEl.textContent = meta.sub;
       }
 
-      V3.dom.empty(headActionsEl);
-      if (panel === "translate") {
-        var trPhase = (state.translate && state.translate.phase) || "empty";
-        var loading = trPhase === "loading";
-        headActionsEl.appendChild(V3.dom.el("button", {
-          type: "button",
-          className: "btn",
-          dataset: { role: "translate-clear" },
-          onClick: function () {
-            srcTextarea.value = "";
-            state = V3.defaults.merge(state, {
-              copyStatus: null,
-              copyKind: null,
-              translate: {
-                phase: "empty",
-                sourceText: "",
-                source_lang: null,
-                target_lang: null,
-                direction_mode: null,
-                chunks: null,
-                debouncePending: false,
-                manualOverride: null,
-                text: "",
-                ocr_text: "",
-                elapsedMs: null,
-                error: null,
-                message: "",
-                details: null,
+      if (panel === "logs") {
+        if (logsPanel && logsPanel.headActionsEl) {
+          if (headActionsEl.firstChild !== logsPanel.headActionsEl || headActionsEl.childNodes.length !== 1) {
+            V3.dom.empty(headActionsEl);
+            headActionsEl.appendChild(logsPanel.headActionsEl);
+          }
+        } else {
+          V3.dom.empty(headActionsEl);
+        }
+      } else {
+        V3.dom.empty(headActionsEl);
+        if (panel === "translate") {
+          var trPhase = (state.translate && state.translate.phase) || "empty";
+          var loading = trPhase === "loading";
+          headActionsEl.appendChild(V3.dom.el("button", {
+            type: "button",
+            className: "btn",
+            dataset: { role: "translate-clear" },
+            onClick: function () {
+              srcTextarea.value = "";
+              state = V3.defaults.merge(state, {
                 copyStatus: null,
-                copyKind: null
-              }
-            });
-            renderTranslatePanel(false);
-            call(hooks, "onClearTranslate");
-          }
-        }, [V3.dom.icon("trash"), document.createTextNode("清空")]));
-        headActionsEl.appendChild(V3.dom.el("button", {
-          type: "button",
-          className: (state.translate_auto_enabled === false && trPhase !== "result") ? "btn primary" : "btn",
-          disabled: loading,
-          dataset: { role: "translate-submit" },
-          text: loading ? "处理中…" : "立即翻译 (Ctrl+Enter)",
-          onClick: submitTranslateText
-        }));
-      } else if (panel === "ocr") {
-        var ocrLoading = state.ocr && state.ocr.phase === "loading";
-        headActionsEl.appendChild(V3.dom.el("button", {
-          type: "button",
-          className: "btn",
-          disabled: ocrLoading,
-          onClick: function () { ocrFileInput.click(); }
-        }, [V3.dom.icon("upload"), document.createTextNode("选择图片")]));
-        headActionsEl.appendChild(V3.dom.el("button", {
-          type: "button",
-          className: "btn primary",
-          disabled: ocrLoading || !currentOcrFile,
-          dataset: { role: "ocr-resubmit" },
-          text: ocrLoading ? "识别中…" : "开始识别",
-          onClick: function () {
-            if (!currentOcrFile) return;
-            var ocrMode = getOcrMode();
-            state = V3.defaults.merge(state, {
-              copyStatus: null,
-              copyKind: null,
-              ocr: { copyStatus: null, error: null, message: "" }
-            });
-            renderOcrPanel();
-            var resubmitPayload = {
-              file: currentOcrFile,
-              mode: ocrMode,
-              panel: "ocr"
-            };
-            if (ocrMode === "translate") {
-              resubmitPayload.lang_pair = getOcrLangPair();
+                copyKind: null,
+                translate: {
+                  phase: "empty",
+                  sourceText: "",
+                  source_lang: null,
+                  target_lang: null,
+                  direction_mode: null,
+                  chunks: null,
+                  debouncePending: false,
+                  manualOverride: null,
+                  text: "",
+                  ocr_text: "",
+                  elapsedMs: null,
+                  error: null,
+                  message: "",
+                  details: null,
+                  copyStatus: null,
+                  copyKind: null
+                }
+              });
+              renderTranslatePanel(false);
+              call(hooks, "onClearTranslate");
             }
-            call(hooks, "onSubmitImage", resubmitPayload);
-          }
-        }));
-      } else if (panel === "history") {
-        headActionsEl.appendChild(V3.dom.el("button", {
-          type: "button",
-          className: "btn",
-          disabled: state.connection === "loading",
-          onClick: function () {
-            if (hooks && typeof hooks.onRefreshHistory === "function") call(hooks, "onRefreshHistory");
-            else call(hooks, "onRefreshStatus");
-          }
-        }, [V3.dom.icon("refresh"), document.createTextNode("刷新记录")]));
-      } else if (panel === "lan") {
-        headActionsEl.appendChild(V3.dom.el("button", {
-          type: "button",
-          className: "btn",
-          disabled: state.connection === "loading",
-          onClick: function () {
-            if (hooks && typeof hooks.onRefreshLan === "function") call(hooks, "onRefreshLan");
-            else call(hooks, "onRefreshStatus");
-          }
-        }, [V3.dom.icon("refresh"), document.createTextNode("刷新入口")]));
-      } else if (panel === "setup") {
-        headActionsEl.appendChild(V3.dom.el("button", {
-          type: "button",
-          className: "btn",
-          dataset: { role: "setup-refresh" },
-          disabled: state.connection === "loading",
-          onClick: function () { call(hooks, "onRefreshStatus"); }
-        }, [V3.dom.icon("refresh"), document.createTextNode("刷新状态")]));
+          }, [V3.dom.icon("trash"), document.createTextNode("清空")]));
+          headActionsEl.appendChild(V3.dom.el("button", {
+            type: "button",
+            className: (state.translate_auto_enabled === false && trPhase !== "result") ? "btn primary" : "btn",
+            disabled: loading,
+            dataset: { role: "translate-submit" },
+            text: loading ? "处理中…" : "立即翻译 (Ctrl+Enter)",
+            onClick: submitTranslateText
+          }));
+        } else if (panel === "ocr") {
+          var ocrLoading = state.ocr && state.ocr.phase === "loading";
+          headActionsEl.appendChild(V3.dom.el("button", {
+            type: "button",
+            className: "btn",
+            disabled: ocrLoading,
+            onClick: function () { ocrFileInput.click(); }
+          }, [V3.dom.icon("upload"), document.createTextNode("选择图片")]));
+          headActionsEl.appendChild(V3.dom.el("button", {
+            type: "button",
+            className: "btn primary",
+            disabled: ocrLoading || !currentOcrFile,
+            dataset: { role: "ocr-resubmit" },
+            text: ocrLoading ? "识别中…" : "开始识别",
+            onClick: function () {
+              if (!currentOcrFile) return;
+              var ocrMode = getOcrMode();
+              state = V3.defaults.merge(state, {
+                copyStatus: null,
+                copyKind: null,
+                ocr: { copyStatus: null, error: null, message: "" }
+              });
+              renderOcrPanel();
+              var resubmitPayload = {
+                file: currentOcrFile,
+                mode: ocrMode,
+                panel: "ocr"
+              };
+              if (ocrMode === "translate") {
+                resubmitPayload.lang_pair = getOcrLangPair();
+              }
+              call(hooks, "onSubmitImage", resubmitPayload);
+            }
+          }));
+        } else if (panel === "history") {
+          headActionsEl.appendChild(V3.dom.el("button", {
+            type: "button",
+            className: "btn",
+            disabled: state.connection === "loading",
+            onClick: function () {
+              if (hooks && typeof hooks.onRefreshHistory === "function") call(hooks, "onRefreshHistory");
+              else call(hooks, "onRefreshStatus");
+            }
+          }, [V3.dom.icon("refresh"), document.createTextNode("刷新记录")]));
+        } else if (panel === "lan") {
+          headActionsEl.appendChild(V3.dom.el("button", {
+            type: "button",
+            className: "btn",
+            disabled: state.connection === "loading",
+            onClick: function () {
+              if (hooks && typeof hooks.onRefreshLan === "function") call(hooks, "onRefreshLan");
+              else call(hooks, "onRefreshStatus");
+            }
+          }, [V3.dom.icon("refresh"), document.createTextNode("刷新入口")]));
+        } else if (panel === "setup") {
+          headActionsEl.appendChild(V3.dom.el("button", {
+            type: "button",
+            className: "btn",
+            dataset: { role: "setup-refresh" },
+            disabled: state.connection === "loading",
+            onClick: function () { call(hooks, "onRefreshStatus"); }
+          }, [V3.dom.icon("refresh"), document.createTextNode("刷新状态")]));
+        }
       }
 
       if (state.connection === "error" || state.connectionError || state.error) {
@@ -1335,6 +1392,14 @@
       if (setupPanel) setupPanel.render(state);
     }
 
+    function renderLogsPanel() {
+      if (logsPanel) logsPanel.render(state);
+    }
+
+    function renderAboutPanel() {
+      if (aboutPanel) aboutPanel.render(state);
+    }
+
     function updatePanelVisibility() {
       var cur = state.activePanel || "translate";
       translatePanelEl.hidden = cur !== "translate";
@@ -1342,6 +1407,8 @@
       historyPanelEl.hidden = cur !== "history";
       lanPanelEl.hidden = cur !== "lan";
       setupPanelEl.hidden = cur !== "setup";
+      logsPanelEl.hidden = cur !== "logs";
+      aboutPanelEl.hidden = cur !== "about";
     }
 
     function renderAll(syncInputText) {
@@ -1354,6 +1421,10 @@
       renderLanPanel();
       if (state.activePanel === "setup") {
         renderSetupPanel();
+      } else if (state.activePanel === "logs") {
+        renderLogsPanel();
+      } else if (state.activePanel === "about") {
+        renderAboutPanel();
       }
     }
 
@@ -1368,6 +1439,8 @@
         if (id === "translate") renderTranslatePanel(false);
         else if (id === "ocr") renderOcrPanel();
         else if (id === "setup") renderSetupPanel();
+        else if (id === "logs") renderLogsPanel();
+        else if (id === "about") renderAboutPanel();
       }
       call(hooks, "onSelectPanel", { panel: id });
     }
@@ -1401,6 +1474,18 @@
           state.ocr = Object.assign({}, state.ocr, { lang_pair: patch.translate_lang_pair });
         }
       }
+      if (
+        Object.prototype.hasOwnProperty.call(patch, "log_max_lines") &&
+        !(patch.logs && Object.prototype.hasOwnProperty.call(patch.logs, "log_max_lines"))
+      ) {
+        state.logs = Object.assign({}, state.logs, { log_max_lines: patch.log_max_lines });
+      } else if (
+        patch.logs &&
+        Object.prototype.hasOwnProperty.call(patch.logs, "log_max_lines") &&
+        !Object.prototype.hasOwnProperty.call(patch, "log_max_lines")
+      ) {
+        state.log_max_lines = patch.logs.log_max_lines;
+      }
       renderAll(syncInput);
     }
 
@@ -1412,6 +1497,15 @@
       }
       if (setupPanel && typeof setupPanel.destroy === "function") {
         setupPanel.destroy();
+      }
+      if (logsPanel && typeof logsPanel.destroy === "function") {
+        logsPanel.destroy();
+      }
+      if (aboutPanel && typeof aboutPanel.destroy === "function") {
+        aboutPanel.destroy();
+      }
+      if (confirmDialog && typeof confirmDialog.destroy === "function") {
+        confirmDialog.destroy();
       }
       currentOcrFile = null;
       releasePreviewUrl();

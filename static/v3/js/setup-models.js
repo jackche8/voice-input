@@ -208,7 +208,6 @@
     var asrBadgeEl = badge("", "");
     var ollamaSubSlot = createProgressSlot();
     var ollamaBadgeEl = badge("", "");
-    var aboutEl = V3.dom.el("p", { className: "setup-about", hidden: true });
 
     var stepsEmpty = V3.dom.el("div", { className: "empty" });
     var stepsEl = V3.dom.el("div", { className: "rows" }, [stepsEmpty]);
@@ -283,8 +282,7 @@
       V3.dom.el("div", { className: "setup-section" }, [
         V3.dom.el("h2", { text: "后台服务" }),
         V3.dom.el("p", { className: "hint", text: "后台服务由本软件启动并看护；已停止的服务可在此重试。" }),
-        serviceRowsEl,
-        aboutEl
+        serviceRowsEl
       ])
     ];
 
@@ -396,8 +394,6 @@
       updateAsrBadge(asrBadgeEl, state.asr || {}, connected);
       updateOllamaSub(ollamaSubSlot, state.ollama || {}, connected);
       updateOllamaBadge(ollamaBadgeEl, state.ollama || {}, connected);
-      aboutEl.hidden = !state.aboutText;
-      aboutEl.textContent = state.aboutText || "";
       updateInstall(state.installAll, connected);
       updateComponents(state.components, connected, state.installAll);
       var auto = state.autostart_enabled;

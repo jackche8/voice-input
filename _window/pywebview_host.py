@@ -175,6 +175,9 @@ def run(
     drawing_icon_cls=None,
 ) -> int:
     webview = _import_webview() if webview_mod is None else webview_mod
+    settings = getattr(webview, "settings", None)
+    if isinstance(settings, dict):
+        settings["OPEN_EXTERNAL_LINKS_IN_BROWSER"] = True
     app_cert_der = load_cert_der(args.cert)
     in_stream = sys.stdin if stdin is None else stdin
     resolved_platform = sys.platform if platform is None else platform

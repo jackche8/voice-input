@@ -38,6 +38,7 @@ from _v3.limits import (
     wrap_limited_receive,
 )
 from _v3.recognize_routes import build_recognize_router
+from _v3.logs_routes import build_logs_router
 from _v3.pages import install_pages
 from _v3.production import compose_production_runtime
 from _v3.runtime import Runtime, build_sandbox_runtime
@@ -256,6 +257,7 @@ def create_app(runtime: Runtime, *, static_v3: Path | None = None) -> FastAPI:
         )
     )
     app.include_router(build_setup_router(runtime))
+    app.include_router(build_logs_router(runtime))
     if static_v3 is not None:
         install_pages(app, static_v3)
     install_openapi(

@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import IO, Protocol, TextIO
 
+from _atomic_file import atomic_write_bytes
 from _platform.detect import detect_os
 from _platform.protocol import OsName
 
@@ -114,10 +115,64 @@ class ChildHandle(Protocol):
     def terminate_session(self, timeout_s: float) -> list[int]: ...
 
 
-def rotate_log(log_path: Path) -> None:
-    """超过 LOG_ROTATE_BYTES（10MB）时将日志改名为 `.1`（只留一份）。"""
+def open_append_log_binary(log_path: Path) -> IO[bytes]:
+    """跨平台真原子追加打开二进制日志：按真实 `sys.platform == "win32"` 分派 Win32 `FILE_APPEND_DATA|SYNCHRONIZE`。"""
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    if sys.platform == "win32":
+        from _platform import _child_windows
+
+        return _child_windows.open_append_log_binary(log_path)
+    return open(log_path, "ab")
+
+
+def open_append_log_text(log_path: Path, *, encoding: str = "utf-8", buffering: int = 1) -> TextIO:
+    """跨平台真原子追加打开文本日志：按真实 `sys.platform == "win32"` 分派 Win32 `FILE_APPEND_DATA|SYNCHRONIZE`。"""
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    if sys.platform == "win32":
+        from _platform import _child_windows
+
+        return _child_windows.open_append_log_text(log_path, encoding=encoding, buffering=buffering)
+    return open(log_path, "a", encoding=encoding, buffering=buffering)
+
+
+def _trim_log_to_max_lines(log_path: Path, max_lines: int) -> None:
+    open_flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(os.fspath(log_path), open_flags)
+    except FileNotFoundError:
+        return
+    with os.fdopen(fd, "rb") as fh:
+        raw = fh.read()
+    if not raw:
+        return
+    end = len(raw) - 1 if raw.endswith(b"\n") else len(raw)
+    found_breaks = 0
+    pos = end
+    cut_offset: int | None = None
+    while pos > 0:
+        idx = raw.rfind(b"\n", 0, pos)
+        if idx == -1:
+            break
+        found_breaks += 1
+        if found_breaks == max_lines:
+            cut_offset = idx + 1
+            break
+        pos = idx
+    if cut_offset is None:
+        return  # 行数未超过上限，绝不重写（保留原 mtime / inode）
+    atomic_write_bytes(log_path, raw[cut_offset:], 0o600)
+
+
+def rotate_log(log_path: Path, *, max_lines: int | None = None) -> None:
+    """启动前日志轮转与按行裁剪：先拒符号链接，再保 >10MB 改名 `.1`，最后按 `max_lines` 裁剪尾行。"""
+    if max_lines is not None and max_lines <= 0:
+        raise ValueError(f"max_lines 必须 > 0，收到 {max_lines}")
+    if log_path.is_symlink():
+        return
     if log_path.is_file() and log_path.stat().st_size > LOG_ROTATE_BYTES:
         os.replace(log_path, log_path.with_name(log_path.name + ".1"))
+    if max_lines is not None and log_path.is_file():
+        _trim_log_to_max_lines(log_path, max_lines)
 
 
 class _TeeTextStream:
@@ -194,11 +249,11 @@ class AppLogHandle:
                 self._sink.close()
 
 
-def attach_app_log(log_path: Path) -> AppLogHandle:
-    """按 rotate_log 轮转后以追加模式打开主进程日志，将 sys.stdout / sys.stderr 同步落盘。"""
+def attach_app_log(log_path: Path, *, max_lines: int | None = None) -> AppLogHandle:
+    """按 rotate_log 轮转/裁剪后以真原子追加模式打开主进程日志，将 sys.stdout / sys.stderr 同步落盘。"""
     log_path.parent.mkdir(parents=True, exist_ok=True)
-    rotate_log(log_path)
-    sink = open(log_path, "a", encoding="utf-8", buffering=1)
+    rotate_log(log_path, max_lines=max_lines)
+    sink = open_append_log_text(log_path, encoding="utf-8", buffering=1)
     lock = threading.Lock()
     orig_stdout, orig_stderr = sys.stdout, sys.stderr
     sys.stdout = _TeeTextStream(orig_stdout, sink, lock)  # type: ignore[assignment]
@@ -214,12 +269,13 @@ def spawn_child(
     log_path: Path,
     stdin_pipe: bool = False,
     os_name: OsName | None = None,
+    max_lines: int | None = None,
 ) -> ChildHandle:
-    """拉起组件：stdout+stderr 追加到 log_path（超过 10MB 先改名为 .1，只留一份）；stdin 默认接空设备。"""
+    """拉起组件：stdout+stderr 真原子追加到 log_path（先轮转/裁剪）；stdin 默认接空设备。"""
     os_name = os_name or detect_os()
     log_path.parent.mkdir(parents=True, exist_ok=True)
-    rotate_log(log_path)
-    with open(log_path, "ab") as log_file:  # 子进程继承后父进程即可关闭
+    rotate_log(log_path, max_lines=max_lines)
+    with open_append_log_binary(log_path) as log_file:  # 子进程继承后父进程即可关闭
         if os_name == "windows":
             from _platform import _child_windows
 
@@ -276,6 +332,8 @@ __all__ = [
     "SessionRecord",
     "attach_app_log",
     "kill_recorded_session",
+    "open_append_log_binary",
+    "open_append_log_text",
     "process_identity",
     "rotate_log",
     "session_record",

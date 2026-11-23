@@ -1285,6 +1285,34 @@ def test_attach_app_log_writes_rotates_and_restores_streams(tmp_path: Path, monk
     assert small.is_file() and not small.with_name("small.log.1").exists()
 
 
+def test_attach_app_log_trims_existing_log_by_max_lines_and_appends_without_nul_holes(tmp_path: Path, monkeypatch):
+    import io
+    import sys
+
+    from _platform.child_process import attach_app_log
+
+    log_path = tmp_path / "logs" / "app.log"
+    log_path.parent.mkdir(parents=True)
+    log_path.write_text("old1\nold2\nold3\nold4\nold5\n", encoding="utf-8")
+
+    monkeypatch.setattr(sys, "stdout", io.StringIO())
+    monkeypatch.setattr(sys, "stderr", io.StringIO())
+    handle = attach_app_log(log_path, max_lines=2)
+    try:
+        print("fresh-line", flush=True)
+        assert log_path.read_text(encoding="utf-8") == "old4\nold5\nfresh-line\n"
+        # 模拟运行期外部原地 truncate(0)，下一次追加写必须落于偏移 0 且不产生 \x00 空洞
+        with open(log_path, "r+b") as fh:
+            fh.truncate(0)
+        print("after-clear", flush=True)
+    finally:
+        handle.close()
+
+    raw = log_path.read_bytes()
+    assert b"\x00" not in raw
+    assert raw == b"after-clear\n"
+
+
 # ------------------------------------------------------------------ VoiceFlow
 
 

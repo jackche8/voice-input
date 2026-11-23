@@ -229,6 +229,7 @@ class _FakePyWebViewModule:
         self._native_factory = native_factory
         self.timeline = timeline
         self._on_start = on_start
+        self.settings: dict[str, object] = {}
         self.created: list[dict] = []
         self.start_calls: list[dict] = []
         self.window: _FakePyWebViewWindow | None = None
@@ -373,6 +374,7 @@ def test_pywebview_windows_defers_navigation_binds_cert_first_and_sets_icon_and_
     )
     assert rc == 0
     assert aumids == [APP_USER_MODEL_ID]
+    assert mod.settings.get("OPEN_EXTERNAL_LINKS_IN_BROWSER") is True
     assert mod.created == [{"title": APP_DISPLAY_NAME, "url": None, "html": "", "width": 1180, "height": 820}]
     assert mod.start_calls == [{"icon": str(ico_path)}]
     assert icon_instances == [str(ico_path)] and isinstance(form.Icon, _FakeDrawingIcon)
@@ -477,6 +479,7 @@ def test_pywebview_macos_untouched_and_missing_backend_and_no_ignore_ssl(tmp_pat
         set_aumid=lambda aid: (aumids.append(aid) or True),
     )
     assert rc == 0 and aumids == []
+    assert mod.settings.get("OPEN_EXTERNAL_LINKS_IN_BROWSER") is True
     assert mod.created == [{"title": APP_DISPLAY_NAME, "url": "https://127.0.0.1:17945/", "html": None, "width": 1180, "height": 820}]
     assert mod.start_calls == [{}]  # macOS 不传 icon
 
@@ -488,3 +491,161 @@ def test_pywebview_macos_untouched_and_missing_backend_and_no_ignore_ssl(tmp_pat
     # 严禁代码使用 IGNORE_SSL_ERRORS
     src = (ROOT / "_window" / "pywebview_host.py").read_text(encoding="utf-8")
     assert "IGNORE_SSL_ERRORS" not in src
+
+
+def test_external_links_policy_and_webkit_gtk_signal_wiring(monkeypatch):
+    import types
+
+    from _window.external_links import open_external_url, should_open_externally
+
+    origin = "https://127.0.0.1:17945/"
+    assert should_open_externally("https://github.com/jackche8/voice-input", origin) is True
+    assert should_open_externally("http://example.com/doc", origin) is True
+    assert should_open_externally("https://127.0.0.1:18000/", origin) is True
+    assert should_open_externally("https://127.0.0.1:17945/about", origin) is False
+    for blocked in ("", "about:blank", "javascript:alert(1)", "file:///etc/passwd", "data:text/html,x", "http://bad:port"):
+        assert should_open_externally(blocked, origin) is False, blocked
+
+    opened: list[str] = []
+    assert open_external_url("https://github.com/jackche8/voice-input", opener=lambda u: (opened.append(u) or True)) is True
+    assert open_external_url("file:///etc/passwd", opener=lambda u: (opened.append(u) or True)) is False
+    assert open_external_url("https://example.com", opener=lambda _u: (_ for _ in ()).throw(RuntimeError("no browser"))) is False
+    assert opened == ["https://github.com/jackche8/voice-input"]
+
+    # 注入假 gi / WebKit2 模块（即使在无 GTK 的隔离环境也能实测 webkit_gtk.wire_external_link_handlers）
+    class _PolicyDecisionType:
+        NAVIGATION_ACTION = 0
+        NEW_WINDOW_ACTION = 1
+        RESPONSE = 2
+
+    fake_webkit = types.SimpleNamespace(PolicyDecisionType=_PolicyDecisionType)
+    fake_repo = types.SimpleNamespace(Gio=object(), GLib=object(), Gtk=object(), WebKit2=fake_webkit)
+    fake_gi = types.ModuleType("gi")
+    fake_gi.require_version = lambda *_a: None  # type: ignore[attr-defined]
+    fake_gi.repository = fake_repo  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "gi", fake_gi)
+    monkeypatch.setitem(sys.modules, "gi.repository", fake_repo)
+    monkeypatch.delitem(sys.modules, "_window.webkit_gtk", raising=False)
+
+    import importlib
+
+    webkit_gtk = importlib.import_module("_window.webkit_gtk")
+
+    signals: dict[str, object] = {}
+
+    class _FakeWebView:
+        def connect(self, name: str, handler) -> None:
+            signals[name] = handler
+
+    class _FakeRequest:
+        def __init__(self, uri: str) -> None:
+            self._uri = uri
+
+        def get_uri(self) -> str:
+            return self._uri
+
+    class _FakeNavAction:
+        def __init__(self, uri: str) -> None:
+            self._req = _FakeRequest(uri)
+
+        def get_request(self):
+            return self._req
+
+    class _FakeDecision:
+        """故意不提供已废弃的 get_request()，强制验证走 get_navigation_action().get_request().get_uri()。"""
+
+        def __init__(self, uri: str) -> None:
+            self._nav = _FakeNavAction(uri)
+            self.ignored = False
+
+        def get_navigation_action(self):
+            return self._nav
+
+        def ignore(self) -> None:
+            self.ignored = True
+
+    browser_opened: list[str] = []
+    view = _FakeWebView()
+    webkit_gtk.wire_external_link_handlers(
+        view,
+        origin,
+        fake_webkit,
+        opener=lambda u: (browser_opened.append(u) or True),
+    )
+    assert set(signals) == {"decide-policy", "create"}
+
+    decide = signals["decide-policy"]
+    create = signals["create"]
+
+    # 1) 外部导航 → 打开系统浏览器 + ignore + 返回 True
+    ext_nav = _FakeDecision("https://github.com/jackche8/voice-input/releases")
+    assert decide(view, ext_nav, _PolicyDecisionType.NAVIGATION_ACTION) is True
+    assert ext_nav.ignored is True
+
+    # 2) 同源导航 → 放行（不 ignore、不开浏览器、返回 False）
+    same_nav = _FakeDecision("https://127.0.0.1:17945/logs")
+    assert decide(view, same_nav, _PolicyDecisionType.NAVIGATION_ACTION) is False
+    assert same_nav.ignored is False
+
+    # 3) NEW_WINDOW_ACTION：外链开浏览器并 ignore；同源也 ignore 禁弹窗
+    ext_new = _FakeDecision("https://jackche8.github.io/voice-input/")
+    assert decide(view, ext_new, _PolicyDecisionType.NEW_WINDOW_ACTION) is True
+    assert ext_new.ignored is True
+
+    same_new = _FakeDecision("https://127.0.0.1:17945/about")
+    assert decide(view, same_new, _PolicyDecisionType.NEW_WINDOW_ACTION) is True
+    assert same_new.ignored is True
+
+    # 4) RESPONSE 策略不拦截
+    resp_dec = _FakeDecision("https://github.com/x")
+    assert decide(view, resp_dec, _PolicyDecisionType.RESPONSE) is False
+    assert resp_dec.ignored is False
+
+    # 5) create 信号：外链开浏览器并返回 None；同源返回 None 且不开浏览器
+    assert create(view, _FakeNavAction("https://github.com/jackche8/voice-input/issues")) is None
+    assert create(view, _FakeNavAction("https://127.0.0.1:17945/")) is None
+    assert browser_opened == [
+        "https://github.com/jackche8/voice-input/releases",
+        "https://jackche8.github.io/voice-input/",
+        "https://github.com/jackche8/voice-input/issues",
+    ]
+
+    # 6) webkit_gtk.run() 必须接入外链拦截信号（防止仅测辅助函数漏测入口接线）
+    import argparse
+
+    run_signals: list[str] = []
+
+    class _RunView:
+        def connect(self, name: str, _handler) -> None:
+            run_signals.append(name)
+
+        def load_uri(self, _uri: str) -> None:
+            run_signals.append("load_uri")
+
+    class _RunContext:
+        def set_cache_model(self, _m) -> None: ...
+        def clear_cache(self) -> None: ...
+        def allow_tls_certificate_for_host(self, _c, _h) -> None: ...
+
+    class _RunWindow:
+        def __init__(self, **_kw) -> None: ...
+        def set_default_size(self, _w, _h) -> None: ...
+        def add(self, _v) -> None: ...
+        def connect(self, _sig, _cb) -> None: ...
+        def show_all(self) -> None: ...
+        def destroy(self) -> None: ...
+
+    fake_webkit.CacheModel = types.SimpleNamespace(DOCUMENT_VIEWER=0)
+    fake_webkit.WebContext = types.SimpleNamespace(get_default=lambda: _RunContext())
+    fake_webkit.WebView = types.SimpleNamespace(new_with_context=lambda _c: _RunView())
+    fake_repo.Gio = types.SimpleNamespace(TlsCertificate=types.SimpleNamespace(new_from_file=lambda _p: object()))
+    fake_repo.GLib = types.SimpleNamespace(idle_add=lambda fn, *a: fn(*a))
+    fake_repo.Gtk = types.SimpleNamespace(Window=_RunWindow, main=lambda: None, main_quit=lambda: None)
+    monkeypatch.setattr(webkit_gtk, "Gio", fake_repo.Gio)
+    monkeypatch.setattr(webkit_gtk, "GLib", fake_repo.GLib)
+    monkeypatch.setattr(webkit_gtk, "Gtk", fake_repo.Gtk)
+    monkeypatch.setattr(sys, "stdin", io.StringIO(""))
+
+    assert webkit_gtk.run(argparse.Namespace(url=origin, cert="c.pem", title="t")) == 0
+    assert "decide-policy" in run_signals and "create" in run_signals
+    assert run_signals.index("decide-policy") < run_signals.index("load_uri")

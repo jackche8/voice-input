@@ -2,16 +2,17 @@
  *
  * 配置字段与 AppConfig 对齐：
  *   ui_theme, audio_input_device, polish_enabled, custom_keywords, translate_lang_pair, translate_auto_enabled,
- *   hotkey_voice, hotkey_screenshot, hotkey_ocr, hotkey_repeat, hotkey_annotate, autostart_enabled
+ *   log_max_lines, hotkey_voice, hotkey_screenshot, hotkey_ocr, hotkey_repeat, hotkey_annotate, autostart_enabled
  * 历史记录字段与 HistoryRecord / HistoryListResponse 对齐：
  *   timestamp, raw_text, final_text, language, mode, source, polish, job_id,
  *   records, total, skipped_malformed
+ * 运行日志与关于字段与 LogSourceListResponse / LogReadResponse / AboutInfoResponse 对齐（1 层扁平态）。
  * 字幕只呈现 stable_text / tail_text（及各产品事件已有字段）。
  * 错误体与 ErrorBody 对齐：ok=false, error, message, details
  *
  * 下列为界面状态标记（apiPaths 由业务层从 OpenAPI 快照派生后注入，缺省为尚未读取）：
- *   connection, asr/ollama 就绪与进度、installAll（一键装齐）、components（看护组件）、lanEntries、capabilities、apiPaths、aboutText 等。
- * 缺省不得显示为已就绪或已下载成功。
+ *   connection, asr/ollama 就绪与进度、installAll（一键装齐）、components（看护组件）、lanEntries、capabilities、apiPaths、logs、about 等。
+ * 缺省不得显示为已就绪、已下载成功或伪造默认保留行数。
  */
 (function (V3) {
   "use strict";
@@ -23,7 +24,6 @@
       error: null,
       message: "",
       statusNotice: null,
-      aboutText: "",
       theme: "light",
       activePanel: "translate",
       setupTab: "models",
@@ -60,6 +60,7 @@
       keywordsSaved: false,
       translate_lang_pair: null,
       translate_auto_enabled: null,
+      log_max_lines: null,
       langPairOptions: null,
       translateSettingsSaved: false,
       hotkey_voice: "",
@@ -117,6 +118,54 @@
         skipped_malformed: 0,
         loading: false,
         message: null
+      },
+      logs: {
+        phase: "idle",
+        log_max_lines: null,
+        allowed_max_lines: null,
+        sources: [],
+        activeFile: null,
+        entries: [],
+        exists: null,
+        max_lines: null,
+        line_count: 0,
+        bytes: 0,
+        truncated: false,
+        updated_at: null,
+        savingCap: false,
+        capSaved: false,
+        capError: "",
+        clearing: false,
+        copyOk: "",
+        copyError: "",
+        error: null,
+        message: ""
+      },
+      about: {
+        phase: "idle",
+        app_name: "",
+        version: "",
+        summary: "",
+        os_name: null,
+        platform_detail: "",
+        session_type: "",
+        python_version: "",
+        run_mode: null,
+        asr_variant: null,
+        asr_detail: "",
+        asr_model: "",
+        ollama_model: "",
+        ollama_version: "",
+        data_root: "",
+        logs_dir: "",
+        config_root: "",
+        license_title: "",
+        license_note: "",
+        links: null,
+        copyOk: "",
+        copyError: "",
+        error: null,
+        message: ""
       },
       lanEntries: null,
       lanMessage: "",

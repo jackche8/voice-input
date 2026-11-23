@@ -65,6 +65,7 @@ class Supervisor:
         mono: Callable[[], float] = time.monotonic,
         wall: Callable[[], float] = time.time,
         tick_s: float = TICK_S,
+        log_max_lines: Callable[[], int | None] | None = None,
     ) -> None:
         self._specs = specs
         self._records_path = records_path
@@ -77,6 +78,7 @@ class Supervisor:
         self._mono = mono
         self._wall = wall
         self._tick_s = tick_s
+        self._log_max_lines = log_max_lines
         self._on_server_running = on_server_running  # 服务端第一次进入 running 时在主线程调用一次（打开主窗口）
         now = mono()
         self._machines: dict[ComponentName, sm.Machine] = {name: sm.initial(name, now) for name in ComponentName}
@@ -184,7 +186,10 @@ class Supervisor:
             prepare = self._before_spawn.get(name)
             if prepare is not None:
                 prepare()
-            handle = self._spawn(spec.argv, cwd=spec.cwd, env=spec.env, log_path=spec.log_path)
+            spawn_kwargs: dict[str, object] = {}
+            if self._log_max_lines is not None:
+                spawn_kwargs["max_lines"] = self._log_max_lines()
+            handle = self._spawn(spec.argv, cwd=spec.cwd, env=spec.env, log_path=spec.log_path, **spawn_kwargs)
         except Exception as exc:  # 拉起本身失败（程序缺失、证书生成失败…）按一次失败处理，原因可见
             machine, intents = sm.failed(self._machines[name], spec, self._mono(), f"无法启动：{type(exc).__name__}: {exc}")
             self._apply(name, machine, intents, spec=spec)
@@ -272,6 +277,7 @@ def create_supervisor(
     tray: TrayLike,
     ui: Callable[[Callable[[], None]], None],
     on_server_running: Callable[[], None] | None = None,
+    log_max_lines: Callable[[], int | None] | None = None,
 ) -> Supervisor:
     """应用入口用：组件规格按 environ 每轮重建；服务端拉起前就地同步本地 CA 与服务端证书（取代单元的 ExecStartPre）。"""
     from _platform.certs import ensure_tls_certificates
@@ -284,6 +290,7 @@ def create_supervisor(
         ui=ui,
         before_spawn={ComponentName.server: lambda: ensure_tls_certificates(paths.cert_dir)},
         on_server_running=on_server_running,
+        log_max_lines=log_max_lines,
     )
 
 

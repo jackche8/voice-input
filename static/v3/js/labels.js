@@ -19,6 +19,7 @@
     jobs_io: "任务读写失败",
     delivery_failed: "投递失败",
     config_io: "配置读写失败",
+    logs_io: "日志读写失败",
     internal: "内部错误"
   };
 
@@ -139,8 +140,29 @@
     { id: "ocr", label: "图片 OCR 识别" },
     { id: "history", label: "语音与翻译历史" },
     { id: "lan", label: "手机扫码语音" },
-    { id: "setup", label: "模型与热键设置" }
+    { id: "setup", label: "模型与热键设置" },
+    { id: "logs", label: "运行日志" },
+    { id: "about", label: "关于" }
   ];
+
+  const LOG_MAX_LINES_OPTIONS = [500, 2000, 5000];
+
+  const LOG_GROUPS = {
+    runtime: "运行服务",
+    setup: "安装过程"
+  };
+
+  const RUN_MODE = {
+    frozen: "打包运行",
+    deb: "安装包运行",
+    source: "源码运行"
+  };
+
+  const OS_NAME = {
+    linux: "Linux",
+    windows: "Windows",
+    macos: "macOS"
+  };
 
   function labelOf(map, value, fallback) {
     if (value == null || value === "") return fallback || "";
@@ -238,6 +260,10 @@
     FIXED_MODELS: FIXED_MODELS,
     HOTKEY_LABELS: HOTKEY_LABELS,
     HOME_NAVS: HOME_NAVS,
+    LOG_MAX_LINES_OPTIONS: LOG_MAX_LINES_OPTIONS,
+    LOG_GROUPS: LOG_GROUPS,
+    RUN_MODE: RUN_MODE,
+    OS_NAME: OS_NAME,
     labelOf: labelOf,
     errorCode: errorCode,
     formatError: formatError,

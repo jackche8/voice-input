@@ -17,7 +17,8 @@
     "hotkey_annotate",
     "autostart_enabled",
     "ui_theme",
-    "audio_input_device"
+    "audio_input_device",
+    "log_max_lines"
   ];
 
   function pickLegalConfig(patch) {
@@ -53,6 +54,9 @@
     }
     if (config.audio_input_device != null) {
       state.audio_input_device = String(config.audio_input_device);
+    }
+    if (typeof config.log_max_lines === "number" && isFinite(config.log_max_lines)) {
+      state.log_max_lines = config.log_max_lines;
     }
     return state;
   }

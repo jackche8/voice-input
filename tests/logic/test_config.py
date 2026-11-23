@@ -6,8 +6,8 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from _config import ConfigStore, apply_config_update, config_view
-from _contracts import AppConfigUpdate, ErrorCode, LogicError
+from _config import ConfigStore, apply_config_update, config_view, read_log_max_lines
+from _contracts import AppConfigUpdate, DEFAULT_LOG_MAX_LINES, ErrorCode, LogicError
 
 
 def test_missing_file_returns_defaults_without_creating(tmp_path: Path):
@@ -178,3 +178,48 @@ def test_ui_theme_and_audio_input_device_roundtrip_and_validation(tmp_path: Path
     with pytest.raises(LogicError) as err:
         ConfigStore(bad_theme).load()
     assert err.value.code == ErrorCode.config_io
+
+
+def test_log_max_lines_config_roundtrip_and_validation(tmp_path: Path):
+    path = tmp_path / "config.json"
+    store = ConfigStore(path)
+
+    initial = config_view(store.load())
+    assert initial.log_max_lines == DEFAULT_LOG_MAX_LINES == 2000
+    assert not path.exists()
+
+    updated = apply_config_update(store, AppConfigUpdate(log_max_lines=5000))
+    assert updated.log_max_lines == 5000
+    assert json.loads(path.read_text(encoding="utf-8"))["log_max_lines"] == 5000
+
+    shrunk = apply_config_update(store, AppConfigUpdate(log_max_lines=500))
+    assert shrunk.log_max_lines == 500
+    assert config_view(store.load()).log_max_lines == 500
+
+    bad = tmp_path / "bad_log_max.json"
+    bad.write_text(json.dumps({"log_max_lines": 1234}), encoding="utf-8")
+    with pytest.raises(LogicError) as err:
+        ConfigStore(bad).load()
+    assert err.value.code == ErrorCode.config_io
+
+
+def test_read_log_max_lines_fail_open(tmp_path: Path):
+    missing = tmp_path / "missing.json"
+    assert read_log_max_lines(missing) == DEFAULT_LOG_MAX_LINES
+    assert not missing.exists()
+
+    valid = tmp_path / "valid.json"
+    valid.write_text(json.dumps({"log_max_lines": 500}), encoding="utf-8")
+    assert read_log_max_lines(valid) == 500
+
+    corrupt = tmp_path / "corrupt.json"
+    corrupt.write_text("{broken json", encoding="utf-8")
+    assert read_log_max_lines(corrupt) == DEFAULT_LOG_MAX_LINES
+
+    invalid = tmp_path / "invalid.json"
+    invalid.write_text(json.dumps({"log_max_lines": 9999}), encoding="utf-8")
+    assert read_log_max_lines(invalid) == DEFAULT_LOG_MAX_LINES
+
+    non_dict = tmp_path / "list.json"
+    non_dict.write_text("[]", encoding="utf-8")
+    assert read_log_max_lines(non_dict) == DEFAULT_LOG_MAX_LINES

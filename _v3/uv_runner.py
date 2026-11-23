@@ -20,6 +20,7 @@ from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 
 from _contracts import ErrorCode, LogicError, SetupProgress
+from _logs import strip_ansi
 from _platform.child_process import windows_subprocess_kwargs
 from _platform.protocol import OsName
 from _platform.system_proxy import format_proxy_hint, redact_url_credentials
@@ -34,7 +35,6 @@ MIN_DISPLAY_RATE_MIB_S = 0.1
 TAIL_BUFFER_LINES = 80
 ERROR_SUMMARY_CHARS = 380
 
-_ANSI_ESCAPE_RE = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\))")
 _DOWNLOADING_RE = re.compile(
     r"^Downloading\s+(\S+)(?:\s+\([^)]*\))*?\s+\((\d+(?:\.\d+)?)\s*([KMGTP]?i?B)\)\s*$",
     re.IGNORECASE,
@@ -56,13 +56,6 @@ _SIZE_MULTIPLIERS = {
     "tb": 1_000_000_000_000,
     "tib": 1024**4,
 }
-
-
-def strip_ansi(text: str) -> str:
-    """剥离 ANSI CSI / OSC 转义序列。"""
-    if not text:
-        return ""
-    return _ANSI_ESCAPE_RE.sub("", text)
 
 
 def _parse_size_bytes(num_text: str, unit_text: str) -> int:

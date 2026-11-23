@@ -6,10 +6,11 @@
 from __future__ import annotations
 
 import ctypes
+import os
 import subprocess
 from collections.abc import Mapping, Sequence
 from pathlib import Path
-from typing import Protocol
+from typing import IO, Any, Protocol, TextIO
 
 from _platform.child_process import (
     CREATE_NEW_PROCESS_GROUP,
@@ -25,6 +26,113 @@ SYNCHRONIZE = 0x00100000
 TH32CS_SNAPPROCESS = 0x00000002
 INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
 TERMINATED_EXIT_CODE = 1
+
+# Win32 真原子追加文件标志：仅申请 FILE_APPEND_DATA|SYNCHRONIZE（绝不带 FILE_WRITE_DATA），
+# 确保另一进程/线程原地 truncate(0) 正在写入的日志时不会产生 \x00 NUL 空洞。
+FILE_APPEND_DATA = 0x0004
+FILE_SHARE_READ = 0x00000001
+FILE_SHARE_WRITE = 0x00000002
+FILE_SHARE_DELETE = 0x00000004
+OPEN_ALWAYS = 4
+FILE_ATTRIBUTE_NORMAL = 0x00000080
+
+
+class WinFileApi(Protocol):
+    def create_append_file(self, path: str) -> int: ...
+    def close_handle(self, handle: int) -> None: ...
+    def open_osfhandle(self, handle: int, flags: int) -> int: ...
+    def fdopen(self, fd: int, mode: str, **kwargs: Any) -> IO[Any]: ...
+    def close_fd(self, fd: int) -> None: ...
+
+
+class CtypesWinFileApi:
+    """基于 Win32 CreateFileW(FILE_APPEND_DATA|SYNCHRONIZE) 与 msvcrt.open_osfhandle 的真原子追加实现。"""
+
+    def __init__(self) -> None:
+        windll = getattr(ctypes, "windll", None)
+        if windll is None:
+            raise RuntimeError("当前系统不支持 ctypes.windll（非 Windows 平台）")
+        self._k = windll.kernel32
+        self._k.CreateFileW.argtypes = [
+            ctypes.c_wchar_p,
+            ctypes.c_uint32,
+            ctypes.c_uint32,
+            ctypes.c_void_p,
+            ctypes.c_uint32,
+            ctypes.c_uint32,
+            ctypes.c_void_p,
+        ]
+        self._k.CreateFileW.restype = ctypes.c_void_p
+        self._k.CloseHandle.argtypes = [ctypes.c_void_p]
+        self._k.CloseHandle.restype = ctypes.c_int
+
+    def create_append_file(self, path: str) -> int:
+        handle = self._k.CreateFileW(
+            path,
+            FILE_APPEND_DATA | SYNCHRONIZE,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            None,
+            OPEN_ALWAYS,
+            FILE_ATTRIBUTE_NORMAL,
+            None,
+        )
+        if not handle or handle == INVALID_HANDLE_VALUE:
+            err = ctypes.WinError()
+            raise OSError(err.errno, f"CreateFileW 打开日志文件失败 ({path})：{err.strerror}")
+        return int(handle)
+
+    def close_handle(self, handle: int) -> None:
+        self._k.CloseHandle(ctypes.c_void_p(handle))
+
+    def open_osfhandle(self, handle: int, flags: int) -> int:
+        import msvcrt
+
+        return int(msvcrt.open_osfhandle(handle, flags))
+
+    def fdopen(self, fd: int, mode: str, **kwargs: Any) -> IO[Any]:
+        return os.fdopen(fd, mode, **kwargs)
+
+    def close_fd(self, fd: int) -> None:
+        os.close(fd)
+
+
+def _open_append_log(
+    path: Path,
+    mode: str,
+    *,
+    api: WinFileApi | None = None,
+    **fdopen_kwargs: Any,
+) -> IO[Any]:
+    file_api = CtypesWinFileApi() if api is None else api
+    handle = file_api.create_append_file(os.fspath(path))
+    flags = os.O_APPEND | getattr(os, "O_BINARY", 0)
+    try:
+        fd = file_api.open_osfhandle(handle, flags)
+    except BaseException:
+        file_api.close_handle(handle)
+        raise
+    # open_osfhandle 成功后内核句柄所有权已转入 CRT fd；后续失败仅关 fd，绝不重复 CloseHandle
+    try:
+        return file_api.fdopen(fd, mode, **fdopen_kwargs)
+    except BaseException:
+        file_api.close_fd(fd)
+        raise
+
+
+def open_append_log_binary(path: Path, *, api: WinFileApi | None = None) -> IO[bytes]:
+    """以 Windows 真原子追加模式（FILE_APPEND_DATA|SYNCHRONIZE）打开二进制日志文件。"""
+    return _open_append_log(path, "ab", api=api)
+
+
+def open_append_log_text(
+    path: Path,
+    *,
+    encoding: str = "utf-8",
+    buffering: int = 1,
+    api: WinFileApi | None = None,
+) -> TextIO:
+    """以 Windows 真原子追加模式（FILE_APPEND_DATA|SYNCHRONIZE）打开文本日志文件。"""
+    return _open_append_log(path, "a", api=api, encoding=encoding, buffering=buffering)
 
 
 class ProcessTreeApi(Protocol):
@@ -274,11 +382,22 @@ __all__ = [
     "CREATE_NO_WINDOW",
     "CtypesJobApi",
     "CtypesProcessTreeApi",
+    "CtypesWinFileApi",
+    "FILE_APPEND_DATA",
+    "FILE_ATTRIBUTE_NORMAL",
+    "FILE_SHARE_DELETE",
+    "FILE_SHARE_READ",
+    "FILE_SHARE_WRITE",
     "JobApi",
+    "OPEN_ALWAYS",
     "ProcessTreeApi",
+    "SYNCHRONIZE",
+    "WinFileApi",
     "WindowsChild",
     "collect_descendant_pids",
     "kill_recorded",
+    "open_append_log_binary",
+    "open_append_log_text",
     "spawn",
     "terminate_descendants",
 ]

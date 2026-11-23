@@ -8,6 +8,7 @@ import threading
 from pathlib import Path
 
 from _contracts import (
+    DEFAULT_LOG_MAX_LINES,
     PRODUCT_OLLAMA_MODEL,
     AppConfig,
     AppConfigUpdate,
@@ -120,8 +121,17 @@ def config_view(config: AppConfig) -> AppConfigView:
         autostart_enabled=config.autostart_enabled,
         ui_theme=config.ui_theme,
         audio_input_device=config.audio_input_device,
+        log_max_lines=config.log_max_lines,
         ollama_model=config.ollama_model,
     )
+
+
+def read_log_max_lines(path: Path) -> int:
+    """启动期尽最大努力读取 log_max_lines；文件缺失、损坏或非法取值时回落默认 2000，避免阻塞日志打开。"""
+    try:
+        return int(ConfigStore(path).load().log_max_lines)
+    except (LogicError, OSError, ValueError):
+        return DEFAULT_LOG_MAX_LINES
 
 
 def _normalized_update(update: AppConfigUpdate) -> dict[str, object]:

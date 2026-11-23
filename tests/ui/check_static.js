@@ -513,22 +513,26 @@ hasAll("UtteranceSource", sourceEnums);
 hasAll("HistoryPolish", polishEnums);
 hasAll("ProductEventType", eventEnums);
 
-for (const field of ["stable_text", "tail_text", "raw_text", "final_text", "ocr_text", "polish_enabled", "custom_keywords", "translate_lang_pair", "translate_auto_enabled", "lang_pair", "source_lang", "direction_mode", "hotkey_voice", "hotkey_screenshot", "hotkey_ocr", "hotkey_repeat", "hotkey_annotate", "ui_theme", "audio_input_device", "job_id", "delivery_unknown"]) {
+for (const field of ["stable_text", "tail_text", "raw_text", "final_text", "ocr_text", "polish_enabled", "custom_keywords", "translate_lang_pair", "translate_auto_enabled", "log_max_lines", "lang_pair", "source_lang", "direction_mode", "hotkey_voice", "hotkey_screenshot", "hotkey_ocr", "hotkey_repeat", "hotkey_annotate", "ui_theme", "audio_input_device", "job_id", "delivery_unknown"]) {
   if (!prodText.includes(field)) fail("生产代码未使用契约字段 " + field);
 }
-pass("关键契约字段（含 ui_theme / audio_input_device / translate_lang_pair / translate_auto_enabled / 方向字段与五热键）已在界面层出现");
+pass("关键契约字段（含 log_max_lines / ui_theme / audio_input_device / translate_lang_pair / translate_auto_enabled / 方向字段与五热键）已在界面层出现");
 
-/* 反向守卫：static/v3/ 全量生产源码与生成快照严禁残留已删除旧字段 translate_target_lang */
+/* 反向守卫：static/v3/ 全量生产源码与生成快照严禁残留已删除旧字段 translate_target_lang 与废弃 aboutText / .setup-about */
 function stripSourceComments(filePath, raw) {
   if (filePath.endsWith(".json")) return raw;
   if (filePath.endsWith(".html")) return raw.replace(/<!--[\s\S]*?-->/g, "");
   return raw.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:\\])\/\/.*$/gm, "$1");
 }
 const legacyTargetLangHits = [];
+const legacyAboutHits = [];
 for (const file of files) {
   const code = stripSourceComments(file, fs.readFileSync(file, "utf8"));
   if (/\btranslate_target_lang\b/.test(code)) {
     legacyTargetLangHits.push(path.relative(repo, file));
+  }
+  if (/\baboutText\b|\.setup-about\b/.test(code)) {
+    legacyAboutHits.push(path.relative(repo, file));
   }
 }
 if (legacyTargetLangHits.length) {
@@ -536,16 +540,45 @@ if (legacyTargetLangHits.length) {
 } else {
   pass("static/v3/ 生产源码已彻底清除已废弃字段 translate_target_lang（零出现反向守卫）");
 }
+if (legacyAboutHits.length) {
+  fail("static/v3/ 生产源码仍残留已废弃 aboutText / .setup-about：" + legacyAboutHits.join(", "));
+} else {
+  pass("static/v3/ 生产源码已彻底清除已废弃 aboutText 与 .setup-about（零出现反向守卫）");
+}
+
+for (const panelFile of ["js/logs-panel.js", "js/about-panel.js"]) {
+  const fullPanelPath = path.join(v3, panelFile);
+  const panelCode = stripSourceComments(fullPanelPath, fs.readFileSync(fullPanelPath, "utf8"));
+  if (/\binnerHTML\b/.test(panelCode)) {
+    fail("static/v3/" + panelFile + " 严禁使用 innerHTML 渲染日志或关于内容");
+  }
+}
+if (!failures.some((m) => m.includes("innerHTML"))) {
+  pass("logs-panel.js 与 about-panel.js 严格零 innerHTML（纯 DOM 渲染）");
+}
 
 const indexHtml = fs.readFileSync(path.join(v3, "index.html"), "utf8");
-if (!/css\/studio\.css/.test(indexHtml) || !/js\/setup-panel\.js/.test(indexHtml) || !/js\/home\.js/.test(indexHtml) || !/js\/business\/setup-actions\.js/.test(indexHtml) || !/js\/business\/home-controller\.js/.test(indexHtml) || !/data-page=["']home["']/.test(indexHtml)) {
-  fail("index.html 未正确挂载方案 C 统一工作台脚本与样式");
-} else pass("index.html 已加载 studio.css / setup-panel.js / home.js / setup-actions.js / home-controller.js / bootstrap(home)");
+if (
+  !/css\/studio\.css/.test(indexHtml) ||
+  !/js\/confirm\.js/.test(indexHtml) ||
+  !/js\/setup-panel\.js/.test(indexHtml) ||
+  !/js\/logs-panel\.js/.test(indexHtml) ||
+  !/js\/about-panel\.js/.test(indexHtml) ||
+  !/js\/home\.js/.test(indexHtml) ||
+  !/js\/business\/setup-actions\.js/.test(indexHtml) ||
+  !/js\/business\/logs-actions\.js/.test(indexHtml) ||
+  !/js\/business\/home-controller\.js/.test(indexHtml) ||
+  !/data-page=["']home["']/.test(indexHtml)
+) {
+  fail("index.html 未正确挂载方案 C 统一工作台脚本与样式（含 confirm / logs-panel / about-panel / logs-actions）");
+} else pass("index.html 已加载 studio.css / confirm.js / setup-panel.js / logs-panel.js / about-panel.js / home.js / setup-actions.js / logs-actions.js / home-controller.js / bootstrap(home)");
 if (!/hotkey-capture\.js[\s\S]*js\/setup-panel\.js[\s\S]*js\/home\.js/.test(indexHtml)) {
   fail("index.html 未按 hotkey-capture.js → setup-panel.js → home.js 顺序加载");
 } else pass("index.html 先加载 hotkey-capture.js 再加载 setup-panel.js 与 home.js");
+if (!/js\/confirm\.js[\s\S]*js\/logs-panel\.js[\s\S]*js\/about-panel\.js[\s\S]*js\/home\.js[\s\S]*js\/business\/logs-actions\.js[\s\S]*js\/business\/home-controller\.js/.test(indexHtml)) {
+  fail("index.html 未按 confirm.js → logs-panel.js → about-panel.js → home.js → logs-actions.js → home-controller.js 顺序加载");
+} else pass("index.html 按 confirm.js → logs-panel.js → about-panel.js → home.js → logs-actions.js → home-controller.js 依赖顺序加载");
 const redundantHomeScripts = [
-  "js/confirm.js",
   "js/business/job-id.js",
   "js/business/sse.js",
   "js/business/audio.js",
@@ -553,7 +586,7 @@ const redundantHomeScripts = [
 ];
 const leftoverHomeScripts = redundantHomeScripts.filter((src) => indexHtml.includes(src));
 if (leftoverHomeScripts.length) fail("index.html 仍加载未使用的冗余脚本：" + leftoverHomeScripts.join(", "));
-else pass("index.html 已清理未使用的 5 个冗余脚本");
+else pass("index.html 已清理未使用的 4 个冗余脚本（保留已挂载的 confirm.js）");
 
 const homeJs = fs.readFileSync(path.join(v3, "js/home.js"), "utf8");
 if (

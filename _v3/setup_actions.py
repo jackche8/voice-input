@@ -16,6 +16,7 @@ import subprocess
 import sys
 import threading
 import time
+from collections import deque
 from collections.abc import Callable
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -345,7 +346,7 @@ def asr_download_action(
     worker: Path,
     repo_id: str,
     model_dir: Path,
-    log_path: Path,
+    log_path: Path | None = None,
     env: dict[str, str],
     popen: Callable[..., subprocess.Popen] = subprocess.Popen,
     interval_s: float = 1.0,
@@ -354,20 +355,15 @@ def asr_download_action(
     def download(report: ProgressFn) -> str:
         if not python.is_file():
             raise LogicError(ErrorCode.dependency_failed, f"识别运行环境未安装: {python}")
-        log_path.parent.mkdir(parents=True, exist_ok=True)
         total = {"bytes": 0}
-        with log_path.open("w", encoding="utf-8") as log:
-            proc = popen(
-                [str(python), str(worker), repo_id, str(model_dir)],
-                stdout=subprocess.PIPE,
-                stderr=log,
-                text=True,
-                env={**env, "PYTHONUTF8": "1"},
-                **windows_subprocess_kwargs(encoding="utf-8", errors="replace"),
-            )
+        stderr_tail: deque[str] = deque(maxlen=400)
 
+        def _make_stdout_reader(proc: subprocess.Popen) -> threading.Thread:
             def read_stdout() -> None:
-                for line in proc.stdout:
+                stream = getattr(proc, "stdout", None)
+                if stream is None:
+                    return
+                for line in stream:
                     try:
                         item = json.loads(line)
                     except json.JSONDecodeError:
@@ -375,17 +371,77 @@ def asr_download_action(
                     if "total_bytes" in item:
                         total["bytes"] = int(item["total_bytes"])
 
-            reader = threading.Thread(target=read_stdout, daemon=True)
-            reader.start()
-            while proc.poll() is None:
-                done = probe_asr_weights(model_dir).bytes_on_disk if model_dir.exists() else 0
-                report(SetupProgress(completed_bytes=done, total_bytes=total["bytes"] or None,
-                                     percent=percent(done, total["bytes"]), stage="下载识别模型权重"))
-                sleep(interval_s)
-            reader.join(timeout=5)
-        if proc.returncode != 0:
-            tail = log_path.read_text(encoding="utf-8", errors="replace")[-400:]
-            raise LogicError(ErrorCode.dependency_failed, f"识别模型下载失败（退出码 {proc.returncode}）: {tail}")
+            return threading.Thread(target=read_stdout, daemon=True)
+
+        def _make_stderr_reader(proc: subprocess.Popen) -> threading.Thread:
+            def read_stderr() -> None:
+                stream = getattr(proc, "stderr", None)
+                if stream is None:
+                    return
+                for chunk in stream:
+                    if not chunk:
+                        continue
+                    err_sink = sys.stderr
+                    if err_sink is not None:
+                        try:
+                            err_sink.write(chunk)
+                            err_sink.flush()
+                        except OSError:
+                            pass
+                    stderr_tail.extend(chunk)
+
+            return threading.Thread(target=read_stderr, daemon=True)
+
+        argv = [str(python), str(worker), repo_id, str(model_dir)]
+        proc_env = {**env, "PYTHONUTF8": "1"}
+        win_kw = windows_subprocess_kwargs(encoding="utf-8", errors="replace")
+
+        if log_path is not None:
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            with log_path.open("w", encoding="utf-8") as log:
+                proc = popen(argv, stdout=subprocess.PIPE, stderr=log, text=True, env=proc_env, **win_kw)
+                stdout_reader = _make_stdout_reader(proc)
+                stdout_reader.start()
+                while proc.poll() is None:
+                    done = probe_asr_weights(model_dir).bytes_on_disk if model_dir.exists() else 0
+                    report(SetupProgress(completed_bytes=done, total_bytes=total["bytes"] or None,
+                                         percent=percent(done, total["bytes"]), stage="下载识别模型权重"))
+                    sleep(interval_s)
+                stdout_reader.join(timeout=5)
+                if getattr(proc, "stdout", None) is not None:
+                    try:
+                        proc.stdout.close()
+                    except OSError:
+                        pass
+            if proc.returncode != 0:
+                tail = log_path.read_text(encoding="utf-8", errors="replace")[-400:]
+                raise LogicError(ErrorCode.dependency_failed, f"识别模型下载失败（退出码 {proc.returncode}）: {tail}")
+        else:
+            # log_path=None：stderr 经独立守护线程与 stdout 并发排空并安全 tee 到 worker sys.stderr（统一落盘 setup-asr_download.log）
+            proc = popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=proc_env, **win_kw)
+            stdout_reader = _make_stdout_reader(proc)
+            stderr_reader = _make_stderr_reader(proc)
+            stdout_reader.start()
+            stderr_reader.start()
+            try:
+                while proc.poll() is None:
+                    done = probe_asr_weights(model_dir).bytes_on_disk if model_dir.exists() else 0
+                    report(SetupProgress(completed_bytes=done, total_bytes=total["bytes"] or None,
+                                         percent=percent(done, total["bytes"]), stage="下载识别模型权重"))
+                    sleep(interval_s)
+            finally:
+                stdout_reader.join(timeout=5)
+                stderr_reader.join(timeout=5)
+                for stream_name in ("stdout", "stderr"):
+                    stream = getattr(proc, stream_name, None)
+                    if stream is not None:
+                        try:
+                            stream.close()
+                        except OSError:
+                            pass
+            if proc.returncode != 0:
+                tail = "".join(stderr_tail)
+                raise LogicError(ErrorCode.dependency_failed, f"识别模型下载失败（退出码 {proc.returncode}）: {tail}")
         probe = probe_asr_weights(model_dir)
         if not probe.complete:
             raise LogicError(ErrorCode.dependency_failed, "下载进程结束但权重不完整: " + "、".join(probe.missing))

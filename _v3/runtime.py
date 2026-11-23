@@ -14,6 +14,7 @@ from _audio_codec import decode_audio_to_pcm16k, is_pcm16le_silent
 from _config import ConfigStore
 from _contracts import (
     DEFAULT_TRANSLATE_LANG_PAIR,
+    AboutInfoResponse,
     AppConfig,
     AudioInputListResponse,
     ErrorCode,
@@ -31,8 +32,10 @@ from _history import HistoryStore
 from _history_service import HistoryService
 from _jobs import JobStore
 from _jobs_service import JobsService
+from _logs import LogService
 from _ocr_text import block_segments, block_translated_text
-from _paths import default_app_paths
+from _paths import AppPaths, default_app_paths
+from _platform.detect import detect_os
 from _ports import DEFAULT_SERVER_PORT
 from _session_finals import SessionFinalIndex
 from _translate import has_translatable_language
@@ -51,6 +54,7 @@ OcrFn = Callable[..., str]
 OcrLayoutFn = Callable[..., tuple[int, int, str, list[OcrTextBlock]]]
 DecodeAudioFn = Callable[..., bytes]
 ListAudioInputsFn = Callable[[], AudioInputListResponse]
+AboutProviderFn = Callable[[], AboutInfoResponse]
 
 
 def _default_translate_blocks(translate: TranslateFn) -> TranslateBlocksFn:
@@ -146,6 +150,8 @@ class Runtime:
     setup: SetupService | None = None
     lan: LanAccessService | None = None
     list_audio_inputs: ListAudioInputsFn | None = None
+    logs: LogService | None = None
+    about: AboutProviderFn | None = None
     components: ComponentRegistry = field(default_factory=ComponentRegistry)
     max_upload_bytes: int = 15 * 1024 * 1024
     max_chunk_bytes: int = 160_000
@@ -172,6 +178,8 @@ def build_sandbox_runtime(
     setup: SetupService | None = None,
     lan_ips: Callable[[], list[str]] | None = None,
     list_audio_inputs: ListAudioInputsFn | None = None,
+    logs: LogService | None = None,
+    about: AboutProviderFn | None = None,
     port: int = DEFAULT_SERVER_PORT,
     polish_enabled: bool = False,
     max_upload_bytes: int | None = None,
@@ -206,12 +214,15 @@ def build_sandbox_runtime(
     )
     upload_tmp = assert_sandbox_path(root / "upload-tmp")
     upload_tmp.mkdir(parents=True, exist_ok=True)
+    sandbox_logs_dir = assert_sandbox_path(root / "logs")
+    sandbox_logs_dir.mkdir(parents=True, exist_ok=True)
+    components = ComponentRegistry()
     effective_translate_blocks = (
         translate_blocks
         if translate_blocks is not None
         else (_default_translate_blocks(translate) if translate is not None else None)
     )
-    return Runtime(
+    runtime = Runtime(
         config=config,
         history=history,
         jobs=jobs,
@@ -230,6 +241,7 @@ def build_sandbox_runtime(
         setup=setup,
         lan=None if lan_ips is None else LanAccessService(token=token, list_ips=lan_ips, port=port),
         list_audio_inputs=list_audio_inputs,
+        components=components,
         max_upload_bytes=15 * 1024 * 1024 if max_upload_bytes is None else max_upload_bytes,
         max_chunk_bytes=160_000 if max_chunk_bytes is None else max_chunk_bytes,
         upload_tmp=upload_tmp,
@@ -238,3 +250,29 @@ def build_sandbox_runtime(
         session_idle_open_s=180.0 if session_idle_open_s is None else session_idle_open_s,
         clock=time.monotonic if clock is None else clock,
     )
+    if logs is None:
+        sandbox_paths = AppPaths(
+            config_root=root,
+            data_root=root,
+            runtime_dir=root,
+            os_name=detect_os(),
+            live=False,
+        )
+
+        def _active_setup_logs() -> set[str]:
+            from _v3.logs_routes import active_setup_log_names_for
+
+            return active_setup_log_names_for(runtime.setup)
+
+        logs = LogService(
+            paths=sandbox_paths,
+            get_log_max_lines=lambda: config.load().log_max_lines,
+            get_secret_tokens=lambda: (token,),
+            get_components=components.snapshot,
+            get_active_setup_logs=_active_setup_logs,
+            get_ollama_model=lambda: config.load().ollama_model,
+            session_type="sandbox",
+        )
+    runtime.logs = logs
+    runtime.about = logs.about if about is None else about
+    return runtime

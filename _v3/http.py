@@ -31,6 +31,7 @@ ERROR_STATUS: dict[ErrorCode, int] = {
     ErrorCode.history_io: 500,
     ErrorCode.jobs_io: 500,
     ErrorCode.config_io: 500,
+    ErrorCode.logs_io: 500,
     ErrorCode.internal: 500,
 }
 

@@ -5,6 +5,12 @@ from pydantic import ValidationError
 
 from _contracts import (
     ASR_STREAMING_BLOCKERS,
+    DEFAULT_LOG_MAX_LINES,
+    LOG_MAX_LINES_CHOICES,
+    LOG_READ_MAX_BYTES,
+    AboutAsrVariant,
+    AboutInfoResponse,
+    AboutLinks,
     AckResult,
     AppConfig,
     AppConfigUpdate,
@@ -15,6 +21,7 @@ from _contracts import (
     ComponentReport,
     ComponentState,
     ComponentStatus,
+    DiagnosticSummaryResponse,
     ErrorBody,
     ErrorCode,
     HistoryPolish,
@@ -25,6 +32,13 @@ from _contracts import (
     JobQueryUnknown,
     JobRecord,
     JobState,
+    LogClearResponse,
+    LogGroup,
+    LogLevel,
+    LogLineEntry,
+    LogReadResponse,
+    LogSourceInfo,
+    LogSourceListResponse,
     PolishResponse,
     ProductBusyEvent,
     ProductComponentCommandEvent,
@@ -39,6 +53,7 @@ from _contracts import (
     ProductRecordingEvent,
     ProductSSEEventEnvelope,
     ProductTypedEvent,
+    RunMode,
     SessionClosedEvent,
     SessionClosedReason,
     SessionPartialEvent,
@@ -455,3 +470,144 @@ def test_ui_theme_and_audio_input_contracts():
     assert resp.ok is True and resp.default_device is None and resp.devices == []
     with pytest.raises(ValidationError):
         AudioInputListResponse.model_validate({"ok": True, "devices": [], "error": "boom"})
+
+
+def test_log_max_lines_and_logs_io_contracts():
+    assert LOG_MAX_LINES_CHOICES == (500, 2000, 5000)
+    assert DEFAULT_LOG_MAX_LINES == 2000
+    assert LOG_READ_MAX_BYTES == 4 * 1024 * 1024
+    assert ErrorCode.logs_io.value == "logs_io"
+    assert ErrorBody(error=ErrorCode.logs_io, message="io").model_dump()["error"] == "logs_io"
+
+    cfg = AppConfig()
+    assert cfg.log_max_lines == 2000
+    assert AppConfig(log_max_lines=500).log_max_lines == 500
+    assert AppConfig(log_max_lines=5000).log_max_lines == 5000
+    with pytest.raises(ValidationError):
+        AppConfig(log_max_lines=1000)  # type: ignore[arg-type]
+
+    upd = AppConfigUpdate(log_max_lines=5000)
+    assert upd.log_max_lines == 5000
+    with pytest.raises(ValidationError):
+        AppConfigUpdate(log_max_lines=100)  # type: ignore[arg-type]
+
+    view = AppConfigView(
+        polish_enabled=False,
+        custom_keywords=[],
+        translate_lang_pair="zh-en",
+        translate_auto_enabled=True,
+        hotkey_voice="ctrl+alt+z",
+        hotkey_screenshot="ctrl+alt+x",
+        hotkey_repeat="ctrl+alt+r",
+        hotkey_annotate="ctrl+alt+a",
+        autostart_enabled=True,
+        ollama_model="qwen3.5:4b",
+    )
+    assert view.log_max_lines == 2000
+
+
+def test_logs_and_about_models_and_openapi_registration():
+    entry = LogLineEntry(line_no=1, text="started", level=LogLevel.info)
+    assert entry.model_dump() == {"line_no": 1, "text": "started", "level": "info"}
+    with pytest.raises(ValidationError):
+        LogLineEntry(line_no=0, text="bad", level=LogLevel.info)
+    with pytest.raises(ValidationError):
+        LogLineEntry.model_validate({"line_no": 1, "text": "x", "level": "info", "extra": 1})
+
+    source = LogSourceInfo(
+        name="app.log",
+        group=LogGroup.runtime,
+        exists=True,
+        line_count=10,
+        bytes=128,
+        truncated=False,
+        has_error=False,
+        has_warn=True,
+        updated_at="2026-11-23T00:00:00+00:00",
+    )
+    listed = LogSourceListResponse(log_max_lines=2000, sources=[source])
+    assert listed.ok is True and listed.allowed_max_lines == [500, 2000, 5000]
+    with pytest.raises(ValidationError):
+        LogSourceInfo.model_validate({**source.model_dump(), "bytes": -1})
+
+    read = LogReadResponse(
+        name="app.log",
+        group=LogGroup.runtime,
+        exists=True,
+        max_lines=2000,
+        line_count=1,
+        bytes=12,
+        truncated=False,
+        has_error=False,
+        has_warn=False,
+        entries=[entry],
+    )
+    assert read.ok is True and read.entries[0].line_no == 1
+    with pytest.raises(ValidationError):
+        LogReadResponse.model_validate({**read.model_dump(), "max_lines": 5001})
+    with pytest.raises(ValidationError):
+        LogReadResponse.model_validate({**read.model_dump(), "max_lines": 0})
+
+    cleared = LogClearResponse(name="app.log", bytes_before=12)
+    assert cleared.ok is True and cleared.cleared is True and cleared.bytes_before == 12
+
+    summary = DiagnosticSummaryResponse(
+        generated_at="2026-11-23T00:00:00+00:00",
+        log_max_lines=2000,
+        truncated=False,
+        included_files=["app.log"],
+        text="summary",
+    )
+    assert summary.ok is True and summary.included_files == ["app.log"]
+
+    links = AboutLinks(
+        repo_url="https://github.com/jackche8/voice-input",
+        pages_url="https://jackche8.github.io/voice-input/",
+        releases_url="https://github.com/jackche8/voice-input/releases",
+        issues_url="https://github.com/jackche8/voice-input/issues",
+    )
+    about = AboutInfoResponse(
+        app_name="Ollama Voice Input",
+        version="3.4.6",
+        summary="本地语音输入工具",
+        os_name="linux",
+        platform_detail="Ubuntu 24.04",
+        session_type="wayland",
+        python_version="3.12.3",
+        run_mode=RunMode.source,
+        asr_variant=AboutAsrVariant.corrupt,
+        asr_detail="清单损坏",
+        asr_model="Qwen/Qwen3-ASR-1.7B",
+        ollama_model="qwen3.5:4b",
+        ollama_version="0.40.16",
+        data_root="/data",
+        logs_dir="/data/logs",
+        config_root="/config",
+        license_title="GPL-3.0 / 商业双许可",
+        license_note="说明",
+        links=links,
+    )
+    assert about.ok is True and about.asr_variant == AboutAsrVariant.corrupt
+    assert AboutInfoResponse.model_validate({**about.model_dump(), "asr_variant": None}).asr_variant is None
+    with pytest.raises(ValidationError):
+        AboutInfoResponse.model_validate({**about.model_dump(), "os_name": "bsd"})
+    with pytest.raises(ValidationError):
+        AboutInfoResponse.model_validate({**about.model_dump(), "unknown_extra": 1})
+
+    registered = set(contract_models())
+    expected_models = {
+        LogLineEntry,
+        LogSourceInfo,
+        LogSourceListResponse,
+        LogReadResponse,
+        LogClearResponse,
+        DiagnosticSummaryResponse,
+        AboutLinks,
+        AboutInfoResponse,
+    }
+    assert expected_models.issubset(registered)
+    schemas = build_openapi_skeleton()["components"]["schemas"]
+    for model in expected_models:
+        assert model.__name__ in schemas
+    for enum_name in ("LogLevel", "LogGroup", "RunMode", "AboutAsrVariant"):
+        assert enum_name in schemas

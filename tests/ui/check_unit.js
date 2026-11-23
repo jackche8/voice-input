@@ -32,7 +32,7 @@ for (const file of jsFiles) {
 const context = { window: {}, console: console };
 context.window.V3 = {};
 vm.createContext(context);
-for (const name of ["dom.js", "labels.js", "icons.js", "defaults.js", "hotkey-capture.js"]) {
+for (const name of ["dom.js", "labels.js", "icons.js", "defaults.js", "hotkey-capture.js", "logs-panel.js", "about-panel.js"]) {
   vm.runInContext(fs.readFileSync(path.join(v3js, name), "utf8"), context, { filename: name });
 }
 const V3 = context.window.V3 || context.V3;
@@ -95,9 +95,17 @@ if (
 } else pass("directionLabel 正常格式化方向且对未知语种不吞码");
 
 const iconsSrc = fs.readFileSync(path.join(v3js, "icons.js"), "utf8");
-if (!iconsSrc.includes('id="i-swap"') || !iconsSrc.includes('id="i-lock"')) {
-  fail("icons.js 缺少 i-swap 或 i-lock 图标定义");
-} else pass("icons.js 包含 i-swap 与 i-lock 图标定义");
+if (
+  !iconsSrc.includes('id="i-swap"') ||
+  !iconsSrc.includes('id="i-lock"') ||
+  !iconsSrc.includes('id="i-file-text"') ||
+  !iconsSrc.includes('id="i-info"') ||
+  !iconsSrc.includes('id="i-search"') ||
+  !iconsSrc.includes('id="i-external"') ||
+  (iconsSrc.match(/id="i-trash"/g) || []).length !== 1
+) {
+  fail("icons.js 缺少新增图标（i-file-text/i-info/i-search/i-external）或重复定义 i-trash");
+} else pass("icons.js 包含全部新增图标并复用唯一 i-trash");
 
 if (V3.labels.source("desktop") !== "本机" || V3.labels.source("web") !== "手机" || V3.labels.source("resend") !== "重发") {
   fail("来源标签不正确");
@@ -129,9 +137,41 @@ else pass("hotkey_annotate 中文标签为 截屏标注");
 if (V3.labels.formatHotkey("ctrl+alt+o") !== "Ctrl+Alt+O" || V3.labels.formatHotkey("ctrl+alt+a") !== "Ctrl+Alt+A") fail("formatHotkey 不正确：" + V3.labels.formatHotkey("ctrl+alt+o") + " / " + V3.labels.formatHotkey("ctrl+alt+a"));
 else pass("formatHotkey 格式化正确");
 const homeNavIds = Array.isArray(V3.labels.HOME_NAVS) ? V3.labels.HOME_NAVS.map((n) => n.id) : [];
-if (homeNavIds.length !== 5 || homeNavIds.join(",") !== "translate,ocr,history,lan,setup") {
-  fail("HOME_NAVS 应为 5 项（含 setup）：" + JSON.stringify(homeNavIds));
-} else pass("方案 C 主页五项导航齐全（含 setup）");
+if (homeNavIds.length !== 7 || homeNavIds.join(",") !== "translate,ocr,history,lan,setup,logs,about") {
+  fail("HOME_NAVS 应为 7 项（含 setup/logs/about）：" + JSON.stringify(homeNavIds));
+} else pass("方案 C 主页七项导航齐全（含 setup / logs / about）");
+
+if (V3.labels.errorCode("logs_io") !== "日志读写失败") {
+  fail("logs_io 错误码中文标签不正确：" + V3.labels.errorCode("logs_io"));
+} else pass("logs_io 中文标签为 日志读写失败");
+
+if (
+  !Array.isArray(V3.labels.LOG_MAX_LINES_OPTIONS) ||
+  V3.labels.LOG_MAX_LINES_OPTIONS.join(",") !== "500,2000,5000" ||
+  !V3.labels.LOG_GROUPS ||
+  V3.labels.LOG_GROUPS.runtime !== "运行服务" ||
+  V3.labels.LOG_GROUPS.setup !== "安装过程"
+) {
+  fail("LOG_MAX_LINES_OPTIONS 或 LOG_GROUPS 常量不正确");
+} else pass("labels.js 导出 LOG_MAX_LINES_OPTIONS=[500,2000,5000] 与 LOG_GROUPS");
+
+if (
+  !V3.aboutPanel ||
+  typeof V3.aboutPanel.asrVariantBadge !== "function" ||
+  V3.aboutPanel.asrVariantBadge("cuda").tone !== "ok" ||
+  V3.aboutPanel.asrVariantBadge("cuda").text !== "cuda" ||
+  V3.aboutPanel.asrVariantBadge("mps").tone !== "ok" ||
+  V3.aboutPanel.asrVariantBadge("mps").text !== "mps" ||
+  V3.aboutPanel.asrVariantBadge("cpu").tone !== "ok" ||
+  V3.aboutPanel.asrVariantBadge("cpu").text !== "cpu" ||
+  V3.aboutPanel.asrVariantBadge(null).tone !== "warn" ||
+  V3.aboutPanel.asrVariantBadge(null).text !== "未安装" ||
+  V3.aboutPanel.asrVariantBadge("corrupt").tone !== "danger" ||
+  V3.aboutPanel.asrVariantBadge("corrupt").text !== "清单损坏" ||
+  V3.aboutPanel.asrVariantBadge("future_npu").text !== "future_npu"
+) {
+  fail("aboutPanel.asrVariantBadge 五态映射或未知透传不正确");
+} else pass("aboutPanel.asrVariantBadge 五态徽章映射正确（cuda/mps/cpu=ok, null=warn未安装, corrupt=danger清单损坏）");
 
 const home = V3.defaults.homeState();
 if (
@@ -139,6 +179,25 @@ if (
   home.theme !== "light" ||
   home.activePanel !== "translate" ||
   home.setupTab !== "models" ||
+  Object.prototype.hasOwnProperty.call(home, "aboutText") ||
+  home.log_max_lines !== null ||
+  !home.logs ||
+  home.logs.phase !== "idle" ||
+  home.logs.log_max_lines !== null ||
+  home.logs.activeFile !== null ||
+  !Array.isArray(home.logs.sources) ||
+  home.logs.sources.length !== 0 ||
+  !Array.isArray(home.logs.entries) ||
+  home.logs.entries.length !== 0 ||
+  home.logs.copyOk !== "" ||
+  home.logs.copyError !== "" ||
+  !home.about ||
+  home.about.phase !== "idle" ||
+  home.about.version !== "" ||
+  home.about.asr_variant !== null ||
+  home.about.links !== null ||
+  home.about.copyOk !== "" ||
+  home.about.copyError !== "" ||
   home.asr.status !== "unknown" ||
   home.asr.sidecarRunning === true ||
   home.ollama.modelStatus !== "unknown" ||

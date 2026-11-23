@@ -121,6 +121,19 @@
       }
     });
 
+    var logsActions = typeof root.createLogsActions === "function"
+      ? root.createLogsActions({
+          client: client,
+          context: context,
+          clipboard: clipboard,
+          setupActions: setupActions,
+          setState: setState,
+          getState: getState,
+          isDestroyed: function () { return destroyed; },
+          nonLocalMessage: function () { return nonLocalMessage(context); }
+        })
+      : null;
+
     function storeLan(mapped) {
       lanToken = mapped && mapped.token ? mapped.token : null;
       lanUrls = [];
@@ -200,7 +213,6 @@
           error: null,
           message: "",
           apiPaths: root.mapApiPaths(catalog),
-          aboutText: "本地运行。组件状态来自设置检查，不把检查成功或注入标记当成已就绪。",
           history: root.applyHistory(results[2]),
           keywordsSaved: false,
           translateSettingsSaved: false,
@@ -950,9 +962,12 @@
       themeReqId += 1;
       audioInputsReqId += 1;
       setupActions.stopPoll();
+      if (logsActions && typeof logsActions.destroy === "function") {
+        logsActions.destroy();
+      }
     }
 
-    var hooks = Object.assign({}, setupActions.hooks, {
+    var hooks = Object.assign({}, setupActions.hooks, logsActions ? logsActions.hooks : {}, {
       onTranslateInput: function (payload) { return handleTranslateInput(payload); },
       onTranslateText: function (payload) { return translateText(payload); },
       onSwapDirection: function (payload) { return swapDirection(payload); },
@@ -967,11 +982,15 @@
       onToggleTheme: function (payload) { return toggleTheme(payload); },
       onSelectPanel: function (payload) {
         var panel = payload && payload.panel;
-        if (!panel) return;
+        if (!panel) return undefined;
         if (getState().activePanel !== panel) {
           setState({ activePanel: panel });
         }
         syncUrlForPanel(panel);
+        if (logsActions && typeof logsActions.onSelectPanel === "function") {
+          return logsActions.onSelectPanel(panel);
+        }
+        return undefined;
       }
     });
 

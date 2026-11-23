@@ -1013,3 +1013,65 @@ raise SystemExit(2)
                 os.kill(pid, signal.SIGKILL)
             except OSError:
                 pass
+
+
+def test_production_logs_about_shared_hardware_cache_and_step5_log_unification(world):
+    client = world["client"]
+    paths = world["paths"]
+    paths.logs.mkdir(parents=True, exist_ok=True)
+    (paths.logs / "app.log").write_text(
+        f"2026-11-23 [INFO] started with {FAKE_TOKEN}\n"
+        f"2026-11-23 [WARN] proxy http://alice:secret@127.0.0.1:7890\n",
+        encoding="utf-8",
+    )
+
+    # 1) /api/v1/about 与 /api/setup/check 共用唯一 30s CachedHardwareProbe（nvidia-smi 仅调用一次）
+    nvidia_before = sum(1 for c in world["run"].calls if Path(c[0]).name.lower().startswith("nvidia-smi"))
+    about_resp = client.get("/api/v1/about")
+    assert about_resp.status_code == 200, about_resp.text
+    about = about_resp.json()
+    assert about["ok"] is True and about["session_type"] == "wayland"
+    assert about["logs_dir"] == str(paths.logs) and about["data_root"] == str(paths.data_root)
+    assert client.get("/api/setup/check").status_code == 200
+    nvidia_after = sum(1 for c in world["run"].calls if Path(c[0]).name.lower().startswith("nvidia-smi"))
+    assert nvidia_after - nvidia_before == 1
+
+    # 2) 生产 LogService 脱敏 FAKE_TOKEN 与代理凭证
+    read = client.get("/api/v1/logs/app.log").json()
+    text = "\n".join(e["text"] for e in read["entries"])
+    assert FAKE_TOKEN not in text and "alice:secret" not in text
+    summary = client.get("/api/v1/logs/diagnostic-summary").json()
+    assert summary["ok"] is True and FAKE_TOKEN not in summary["text"]
+
+    # 3) Step 5 asr_download 统一走 stderr=subprocess.PIPE，绝不再建旧 setup-asr-download.log
+    paths.asr_python.parent.mkdir(parents=True, exist_ok=True)
+    paths.asr_python.write_text("", encoding="utf-8")
+    paths.asr_model_dir.mkdir(parents=True, exist_ok=True)
+    (paths.asr_model_dir / "config.json").write_text("{}", encoding="utf-8")
+    (paths.asr_model_dir / "model.safetensors").write_bytes(b"w")
+    seen_stderr: list[object] = []
+
+    class _Step5Proc:
+        returncode = 0
+        stdout = io.StringIO("")
+        stderr = io.StringIO("step5 stderr line\n")
+
+        def poll(self):
+            return 0
+
+    def spy_popen(_argv, **kw):
+        seen_stderr.append(kw.get("stderr"))
+        return _Step5Proc()
+
+    step5_adapters = SystemAdapters(environ=world["adapters"].environ, popen=spy_popen, http_transport=world["adapters"].http_transport)
+    actions = setup_task_actions(paths, ENDPOINTS, step5_adapters, world["runtime"].config)
+    assert actions[SetupTaskKind.asr_download](lambda _p: None).endswith("已下载")
+    assert seen_stderr == [subprocess.PIPE]
+    assert not (paths.logs / "setup-asr-download.log").exists()
+
+    # 4) 生产 SetupTaskManager 按 config.json 的 log_max_lines 启动前裁剪 setup-*.log
+    assert client.post("/api/v1/config", json={"log_max_lines": 500}, headers=H).status_code == 200
+    pull_log = paths.logs / "setup-ollama_pull.log"
+    pull_log.write_text("".join(f"line-{i}\n" for i in range(600)), encoding="utf-8")
+    world["runtime"].setup.tasks.start(SetupTaskKind.ollama_pull)
+    assert len(pull_log.read_text(encoding="utf-8").splitlines()) == 500

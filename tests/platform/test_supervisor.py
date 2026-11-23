@@ -350,3 +350,17 @@ def test_stop_component_is_non_blocking_idempotent_and_preserves_terminate_failu
     repeated = next(s for s in sup.snapshot() if s.name == ComponentName.asr)
     assert repeated.state == ComponentState.stopped and repeated.pid == stuck.pid
     assert repeated.reason == failed.reason
+
+
+def test_supervisor_forwards_log_max_lines_only_when_configured(tmp_path):
+    w = World(tmp_path)
+    seen_kwargs: list[dict] = []
+
+    def spy_spawn(argv, **kw):
+        seen_kwargs.append(dict(kw))
+        return FakeHandle(w.log, "x", 2000 + len(seen_kwargs))
+
+    sup = w.supervisor(spawn=spy_spawn, log_max_lines=lambda: 500)
+    sup.tick()
+    assert len(seen_kwargs) == 3
+    assert all(kw.get("max_lines") == 500 for kw in seen_kwargs)

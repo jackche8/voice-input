@@ -12,6 +12,7 @@ from urllib.parse import urlsplit, urlunsplit
 
 from _window import BackendMissing
 from _window.commands import pump_commands
+from _window.external_links import open_external_url, should_open_externally
 from _window.tls_policy import TRUSTED_HOST
 
 try:
@@ -30,12 +31,54 @@ def _with_route(url: str, route: str) -> str:
     return urlunsplit((parts.scheme, parts.netloc, path, query, ""))
 
 
+def wire_external_link_handlers(view, app_origin: str, webkit_mod=None, *, opener=None) -> None:
+    """拦截外链导航与新窗请求并交系统浏览器打开（使用 WebKit2GTK 4.1 规范 `decision.get_navigation_action().get_request().get_uri()`）。"""
+    webkit = WebKit2 if webkit_mod is None else webkit_mod
+    nav_type = webkit.PolicyDecisionType.NAVIGATION_ACTION
+    new_win_type = webkit.PolicyDecisionType.NEW_WINDOW_ACTION
+
+    def _open(uri: str) -> bool:
+        if opener is None:
+            return open_external_url(uri)
+        return open_external_url(uri, opener=opener)
+
+    def _uri_from_nav_action(nav_action) -> str:
+        request = nav_action.get_request() if nav_action is not None else None
+        uri = request.get_uri() if request is not None else ""
+        return uri if isinstance(uri, str) else ""
+
+    def on_decide_policy(_view, decision, decision_type) -> bool:
+        if decision_type not in (nav_type, new_win_type):
+            return False
+        uri = _uri_from_nav_action(decision.get_navigation_action())
+        if decision_type == new_win_type:
+            if should_open_externally(uri, app_origin):
+                _open(uri)
+            decision.ignore()
+            return True
+        if should_open_externally(uri, app_origin):
+            _open(uri)
+            decision.ignore()
+            return True
+        return False
+
+    def on_create(_view, navigation_action):
+        uri = _uri_from_nav_action(navigation_action)
+        if should_open_externally(uri, app_origin):
+            _open(uri)
+        return None
+
+    view.connect("decide-policy", on_decide_policy)
+    view.connect("create", on_create)
+
+
 def run(args: argparse.Namespace) -> int:
     context = WebKit2.WebContext.get_default()
     context.set_cache_model(WebKit2.CacheModel.DOCUMENT_VIEWER)  # 本地 127.0.0.1 主窗口禁磁盘启发式缓存，避免升级后读旧 CSS/JS
     context.clear_cache()
     context.allow_tls_certificate_for_host(Gio.TlsCertificate.new_from_file(args.cert), TRUSTED_HOST)
     view = WebKit2.WebView.new_with_context(context)
+    wire_external_link_handlers(view, args.url, WebKit2)
     window = Gtk.Window(title=args.title)
     window.set_default_size(1180, 820)
     window.add(view)
@@ -67,4 +110,4 @@ def run(args: argparse.Namespace) -> int:
     return 0
 
 
-__all__ = ["run"]
+__all__ = ["run", "wire_external_link_handlers"]

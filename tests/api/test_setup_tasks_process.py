@@ -354,3 +354,26 @@ def test_run_task_host_exit_waits_cancel_join_s_before_cleanup(tmp_path, monkeyp
     assert code == EXIT_INTERRUPTED
     assert 1.75 in join_timeouts
     assert order == ["abort_children", "action_cleanup_done", "cleanup"]
+
+
+def test_spawn_worker_rotates_and_trims_setup_log_via_log_max_lines(tmp_path):
+    world = World(tmp_path)
+    world.logs.mkdir(parents=True, exist_ok=True)
+    log_path = world.logs / "setup-ollama_pull.log"
+    log_path.write_text("l1\nl2\nl3\nl4\nl5\nl6\n", encoding="utf-8")
+
+    class _DummyProc:
+        pid = 8888
+        returncode = None
+
+        def poll(self):
+            return None
+
+    def fake_popen(_argv, **kw):
+        kw["stdout"].write(b"new-worker-line\n")
+        kw["stdout"].flush()
+        return _DummyProc()
+
+    mgr = world.manager(popen=fake_popen, log_max_lines=lambda: 2)
+    mgr.start(PULL)
+    assert log_path.read_text(encoding="utf-8") == "l5\nl6\nnew-worker-line\n"

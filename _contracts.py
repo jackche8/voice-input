@@ -30,6 +30,7 @@ class ErrorCode(StrEnum):
     jobs_io = "jobs_io"
     delivery_failed = "delivery_failed"
     config_io = "config_io"
+    logs_io = "logs_io"
     internal = "internal"
 
 
@@ -690,6 +691,10 @@ class HistoryListResponse(BaseModel):
 # 配置（已知字段；未知字段在存取层保留）
 # ---------------------------------------------------------------------------
 
+LOG_MAX_LINES_CHOICES: tuple[Literal[500, 2000, 5000], ...] = (500, 2000, 5000)
+DEFAULT_LOG_MAX_LINES: Literal[500, 2000, 5000] = 2000
+LOG_READ_MAX_BYTES = 4 * 1024 * 1024
+
 
 class AppConfig(BaseModel):
     """持久化配置的已知字段。未在此声明的键由存取层原样保留。
@@ -714,6 +719,7 @@ class AppConfig(BaseModel):
     autostart_enabled: bool = True
     ui_theme: Literal["light", "dark"] = "light"
     audio_input_device: str = ""
+    log_max_lines: Literal[500, 2000, 5000] = DEFAULT_LOG_MAX_LINES
     vision_model: str | None = None
     voice_mode: str | None = None
     asr_sidecar_url: str | None = None
@@ -762,6 +768,7 @@ class AppConfigView(BaseModel):
     autostart_enabled: bool
     ui_theme: Literal["light", "dark"] = "light"
     audio_input_device: str = ""
+    log_max_lines: Literal[500, 2000, 5000] = DEFAULT_LOG_MAX_LINES
     ollama_model: str = Field(description="产品固定纠错/翻译模型，只读")
 
 
@@ -781,6 +788,7 @@ class AppConfigUpdate(BaseModel):
     autostart_enabled: bool | None = None
     ui_theme: Literal["light", "dark"] | None = None
     audio_input_device: str | None = None
+    log_max_lines: Literal[500, 2000, 5000] | None = None
 
 
 class AudioInputDevice(BaseModel):
@@ -1019,6 +1027,129 @@ class LanAccessResponse(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# 运行日志与关于页面（仅本机只读/安全清空；契约唯一来源）
+# ---------------------------------------------------------------------------
+
+
+class LogLevel(StrEnum):
+    info = "info"
+    warn = "warn"
+    error = "error"
+
+
+class LogGroup(StrEnum):
+    runtime = "runtime"
+    setup = "setup"
+
+
+class RunMode(StrEnum):
+    frozen = "frozen"
+    deb = "deb"
+    source = "source"
+
+
+class AboutAsrVariant(StrEnum):
+    cuda = "cuda"
+    mps = "mps"
+    cpu = "cpu"
+    corrupt = "corrupt"
+
+
+class LogLineEntry(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    line_no: int = Field(ge=1)
+    text: str
+    level: LogLevel
+
+
+class LogSourceInfo(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    name: str
+    group: LogGroup
+    exists: bool
+    line_count: int = Field(ge=0)
+    bytes: int = Field(ge=0)
+    truncated: bool
+    has_error: bool
+    has_warn: bool
+    updated_at: str | None = None
+
+
+class LogSourceListResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    ok: Literal[True] = True
+    log_max_lines: Literal[500, 2000, 5000]
+    allowed_max_lines: list[int] = Field(default_factory=lambda: list(LOG_MAX_LINES_CHOICES))
+    sources: list[LogSourceInfo]
+
+
+class LogReadResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    ok: Literal[True] = True
+    name: str
+    group: LogGroup
+    exists: bool
+    max_lines: int = Field(ge=1, le=5000)
+    line_count: int = Field(ge=0)
+    bytes: int = Field(ge=0)
+    truncated: bool
+    has_error: bool
+    has_warn: bool
+    updated_at: str | None = None
+    entries: list[LogLineEntry]
+
+
+class LogClearResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    ok: Literal[True] = True
+    name: str
+    cleared: Literal[True] = True
+    bytes_before: int = Field(ge=0)
+
+
+class DiagnosticSummaryResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    ok: Literal[True] = True
+    generated_at: str
+    log_max_lines: Literal[500, 2000, 5000]
+    truncated: bool
+    included_files: list[str]
+    text: str
+
+
+class AboutLinks(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    repo_url: str
+    pages_url: str
+    releases_url: str
+    issues_url: str
+
+
+class AboutInfoResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    ok: Literal[True] = True
+    app_name: str
+    version: str
+    summary: str
+    os_name: Literal["linux", "windows", "macos"]
+    platform_detail: str
+    session_type: str
+    python_version: str
+    run_mode: RunMode
+    asr_variant: AboutAsrVariant | None = None
+    asr_detail: str
+    asr_model: str
+    ollama_model: str
+    ollama_version: str
+    data_root: str
+    logs_dir: str
+    config_root: str
+    license_title: str
+    license_note: str
+    links: AboutLinks
+
+
+# ---------------------------------------------------------------------------
 # Sidecar HTTP 路径（应用核心只通过这些路径访问 ASR，不 import torch/vLLM）
 # ---------------------------------------------------------------------------
 
@@ -1113,6 +1244,14 @@ def contract_models() -> tuple[type[BaseModel], ...]:
         SetupCheckResponse,
         LanAccessEntry,
         LanAccessResponse,
+        LogLineEntry,
+        LogSourceInfo,
+        LogSourceListResponse,
+        LogReadResponse,
+        LogClearResponse,
+        DiagnosticSummaryResponse,
+        AboutLinks,
+        AboutInfoResponse,
     )
 
 
@@ -1160,6 +1299,21 @@ __all__ = [
     "AsrSetupStatus",
     "LanAccessEntry",
     "LanAccessResponse",
+    "LOG_MAX_LINES_CHOICES",
+    "DEFAULT_LOG_MAX_LINES",
+    "LOG_READ_MAX_BYTES",
+    "LogLevel",
+    "LogGroup",
+    "RunMode",
+    "AboutAsrVariant",
+    "LogLineEntry",
+    "LogSourceInfo",
+    "LogSourceListResponse",
+    "LogReadResponse",
+    "LogClearResponse",
+    "DiagnosticSummaryResponse",
+    "AboutLinks",
+    "AboutInfoResponse",
     "OllamaSetupStatus",
     "PRODUCT_ASR_MODEL",
     "PRODUCT_OLLAMA_MODEL",

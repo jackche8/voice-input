@@ -16,7 +16,7 @@ from pathlib import Path
 from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QApplication
 
-from _config import ConfigStore
+from _config import ConfigStore, read_log_max_lines
 from _contracts import ErrorCode
 from _desktop.actions import DesktopActions
 from _desktop.api import DesktopApi
@@ -70,7 +70,7 @@ def main() -> None:
     lock = try_acquire_singleton_lock(paths.lock)
     if lock is None:  # 已有实例在运行：请它打开主窗口，本进程退出
         sys.exit(run_as_second_instance(paths))
-    app_log = attach_app_log(paths.logs / "app.log")
+    app_log = attach_app_log(paths.logs / "app.log", max_lines=read_log_max_lines(paths.config))
     atexit.register(app_log.close)
     ensure_tls_certificates(paths.cert_dir)  # 首次运行先生成本地 CA 与服务端证书（本机 API 客户端要用它校验）
     config = ConfigStore(paths.config)
@@ -105,7 +105,8 @@ def main() -> None:
     repeat_action = RepeatAction(api=api, last=last, probe=probe, status=status, job_ids=new_job_id)
     actions = DesktopActions(voice=voice, capture=capture_flow, repeat=repeat_action)
     main_window = MainWindow(paths=paths, origin=origin, environ=os.environ,
-                             on_failed=lambda message: status.error(ErrorCode.dependency_failed, message))
+                             on_failed=lambda message: status.error(ErrorCode.dependency_failed, message),
+                             log_max_lines=lambda: read_log_max_lines(paths.config))
     tray = StudioTrayIcon(
         on_open_home=lambda: main_window.show("/"), on_screenshot_translate=actions.screenshot,
         on_pure_ocr=actions.ocr, on_screenshot_annotate=actions.annotate, on_open_setup=lambda: main_window.show("/setup"),
@@ -114,7 +115,8 @@ def main() -> None:
     )
     tray.show()
     supervisor = create_supervisor(paths, os.environ, status=status, tray=tray, ui=bridge.post,
-                                   on_server_running=None if "--background" in sys.argv[1:] else lambda: main_window.show("/"))
+                                   on_server_running=None if "--background" in sys.argv[1:] else lambda: main_window.show("/"),
+                                   log_max_lines=lambda: read_log_max_lines(paths.config))
     single = SingleInstanceServer(socket_name(paths), on_show=main_window.show, on_quit=app.quit)  # quit 与托盘「退出」同一路径
     single.listen()
 

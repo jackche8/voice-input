@@ -1,0 +1,1534 @@
+<!doctype html>
+<!--
+  v3.4.6 运行日志与关于 · 模板 C「紧凑胶囊标签与聚焦卡片布局」
+  设计原则：横向来源胶囊（沿用 .setup-tabs 视觉家族）把整行宽度完全留给等宽日志内容，底部收口操作条；关于页以聚焦头卡 + 紧凑键值行清晰呈现。
+  展示的数据：
+    - 运行日志：sources[]（9 份 paths.logs 文件及行数/状态点）、activeFile、lines[]（后端脱敏行）、
+      log_max_lines（500 / 2000 / 5000 胶囊切换）、bytes / updated_at、四态 phase 与 error/message。
+    - 关于：app_name、version（单源 _version.APP_VERSION）、os_name / platform_detail / session_type、python_version、
+      asr_variant（cuda / cpu / mps + 设备）、models、data_root / logs_dir / config_root、license（AGPL-3.0 + 商业授权）、links。
+  触发的动作：
+    - onSelectLogSource(name) / onRefreshLogs() / onFilterLogs(keyword)
+    - onChangeLogMaxLines(500 | 2000 | 5000)（非乐观更新，持久化到 /api/v1/config）
+    - onCopyCurrentLog(name) / onCopyDiagnosticSummary() / onClearCurrentLog(name)（确认弹窗后清空）
+    - onCopyAboutInfo()（复制结构化环境信息）
+  基于的既有文件：
+    - static/v3/css/theme.css / studio.css（含 .setup-tabs / .rows / .studio-box / .v3-confirm）
+    - static/v3/js/home.js / labels.js / icons.js / defaults.js / confirm.js
+    - static/v3/js/business/home-controller.js / clipboard.js / http.js
+-->
+<html lang="zh-CN" data-theme="light">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>v3.4.6 运行日志与关于 · 模板 C「紧凑胶囊标签与聚焦卡片布局」</title>
+<style>
+/* ==================== 1. 既有 theme.css Studio C 令牌 ==================== */
+:root {
+  color-scheme: light;
+  --font-sans: "Noto Sans CJK SC", "PingFang SC", "Microsoft YaHei", system-ui, -apple-system, sans-serif;
+  --font-mono: "JetBrains Mono", "Noto Sans Mono CJK SC", "SFMono-Regular", Consolas, ui-monospace, monospace;
+  --fs-xs: 12px;
+  --fs-sm: 13px;
+  --fs-md: 14px;
+  --fs-lg: 16px;
+  --fs-xl: 20px;
+  --sp-1: 4px;
+  --sp-2: 8px;
+  --sp-3: 12px;
+  --sp-4: 16px;
+  --sp-5: 24px;
+  --sp-6: 32px;
+  --radius-sm: 6px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+  --radius-xl: 14px;
+  --radius-pill: 999px;
+  --c-bg: #f4f6fa;
+  --c-rail: #eef1f6;
+  --c-surface: #ffffff;
+  --c-surface-2: #f1f4f9;
+  --c-text: #1b1f2a;
+  --c-muted: #5d6578;
+  --c-border: #d8dee9;
+  --c-accent: #2563eb;
+  --c-accent-hover: #1d4ed8;
+  --c-accent-solid: #2563eb;
+  --c-accent-solid-hover: #1d4ed8;
+  --c-on-accent: #ffffff;
+  --c-accent-soft: #dbeafe;
+  --c-ok: #16a34a;
+  --c-ok-soft: #dcfce7;
+  --c-warn: #b45309;
+  --c-warn-soft: #fef3c7;
+  --c-danger: #dc2626;
+  --c-danger-solid: #dc2626;
+  --c-danger-soft: #fee2e2;
+  --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.06);
+  --shadow-studio: 0 12px 32px rgba(15, 23, 42, 0.08);
+  --shadow-hud: 0 8px 24px rgba(0, 0, 0, 0.35);
+  --dur-fast: 120ms;
+  --focus-ring: 0 0 0 3px var(--c-accent-soft), 0 0 0 1px var(--c-accent);
+}
+[data-theme="light"] {
+  color-scheme: light;
+  --c-bg: #f4f6fa;
+  --c-rail: #eef1f6;
+  --c-surface: #ffffff;
+  --c-surface-2: #f1f4f9;
+  --c-text: #1b1f2a;
+  --c-muted: #5d6578;
+  --c-border: #d8dee9;
+  --c-accent: #2563eb;
+  --c-accent-hover: #1d4ed8;
+  --c-accent-solid: #2563eb;
+  --c-accent-solid-hover: #1d4ed8;
+  --c-on-accent: #ffffff;
+  --c-accent-soft: #dbeafe;
+  --c-ok: #16a34a;
+  --c-ok-soft: #dcfce7;
+  --c-warn: #b45309;
+  --c-warn-soft: #fef3c7;
+  --c-danger: #dc2626;
+  --c-danger-solid: #dc2626;
+  --c-danger-soft: #fee2e2;
+  --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.06);
+  --shadow-studio: 0 12px 32px rgba(15, 23, 42, 0.08);
+}
+[data-theme="dark"] {
+  color-scheme: dark;
+  --c-bg: #0d1117;
+  --c-rail: #131820;
+  --c-surface: #161b22;
+  --c-surface-2: #1f2630;
+  --c-text: #e6edf3;
+  --c-muted: #8b949e;
+  --c-border: #30363d;
+  --c-accent: #58a6ff;
+  --c-accent-hover: #79c0ff;
+  --c-accent-solid: #1f6feb;
+  --c-accent-solid-hover: #1d4ed8;
+  --c-on-accent: #ffffff;
+  --c-accent-soft: rgba(56, 139, 253, 0.16);
+  --c-ok: #3fb950;
+  --c-ok-soft: rgba(63, 185, 80, 0.16);
+  --c-warn: #d29922;
+  --c-warn-soft: rgba(210, 153, 34, 0.16);
+  --c-danger: #f85149;
+  --c-danger-solid: #c92a2a;
+  --c-danger-soft: rgba(248, 81, 73, 0.16);
+  --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.28);
+  --shadow-studio: 0 16px 40px rgba(0, 0, 0, 0.35);
+}
+
+*, *::before, *::after { box-sizing: border-box; }
+html, body { margin: 0; }
+body {
+  font-family: var(--font-sans);
+  color: var(--c-text);
+  background: var(--c-bg);
+  font-size: var(--fs-md);
+  line-height: 1.5;
+}
+[hidden] { display: none !important; }
+
+.ic {
+  width: 16px;
+  height: 16px;
+  flex: none;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.ic-sm { width: 14px; height: 14px; }
+.ic-lg { width: 22px; height: 22px; }
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--sp-1);
+  font: inherit;
+  font-size: var(--fs-sm);
+  padding: 6px 14px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--c-border);
+  background: var(--c-surface);
+  color: var(--c-text);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: border-color var(--dur-fast), background-color var(--dur-fast), color var(--dur-fast);
+}
+.btn:hover:not(:disabled) { border-color: var(--c-accent); }
+.btn.primary {
+  background: var(--c-accent-solid);
+  border-color: var(--c-accent-solid);
+  color: var(--c-on-accent);
+}
+.btn.primary:hover:not(:disabled) {
+  background: var(--c-accent-solid-hover);
+  border-color: var(--c-accent-solid-hover);
+}
+.btn.danger-outline:hover:not(:disabled) {
+  border-color: var(--c-danger);
+  color: var(--c-danger);
+  background: var(--c-danger-soft);
+}
+.btn:disabled { opacity: 0.55; cursor: not-allowed; }
+.btn:focus-visible { outline: none; box-shadow: var(--focus-ring); }
+.btn-sm { padding: 4px 10px; font-size: var(--fs-xs); }
+
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-1);
+  font-size: var(--fs-xs);
+  padding: 2px 8px;
+  border-radius: var(--radius-pill);
+  background: var(--c-bg);
+  color: var(--c-muted);
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.badge.ok { background: var(--c-ok-soft); color: var(--c-ok); }
+.badge.warn { background: var(--c-warn-soft); color: var(--c-warn); }
+.badge.danger { background: var(--c-danger-soft); color: var(--c-danger); }
+.badge.accent { background: var(--c-accent-soft); color: var(--c-accent); }
+
+.mono { font-family: var(--font-mono); }
+.muted { color: var(--c-muted); }
+.saved { font-size: var(--fs-xs); color: var(--c-ok); white-space: nowrap; }
+
+.dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  display: inline-block;
+  flex: none;
+  background: var(--c-border);
+}
+.dot.ok { background: var(--c-ok); }
+.dot.warn { background: var(--c-warn); }
+.dot.err { background: var(--c-danger); }
+
+.progress {
+  height: 4px;
+  border-radius: var(--radius-pill);
+  background: var(--c-border);
+  overflow: hidden;
+}
+.progress > i {
+  display: block;
+  height: 100%;
+  width: 45%;
+  background: var(--c-accent);
+  border-radius: var(--radius-pill);
+  animation: v3-indeterminate 1.4s ease-in-out infinite;
+}
+@keyframes v3-indeterminate {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(240%); }
+}
+
+.field {
+  font: inherit;
+  font-size: var(--fs-sm);
+  padding: 5px 10px;
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-md);
+  background: var(--c-surface);
+  color: var(--c-text);
+  min-width: 0;
+}
+.field:disabled { background: var(--c-bg); color: var(--c-muted); }
+.field:focus-visible { outline: none; box-shadow: var(--focus-ring); }
+
+.rows {
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-lg);
+  background: var(--c-surface);
+  overflow: hidden;
+}
+
+.linkbtn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font: inherit;
+  font-size: var(--fs-sm);
+  color: var(--c-accent);
+  text-decoration: none;
+}
+.linkbtn:hover { text-decoration: underline; text-underline-offset: 2px; }
+.linkbtn:focus-visible { outline: none; box-shadow: var(--focus-ring); border-radius: 3px; }
+
+.v3-confirm {
+  position: fixed;
+  inset: 0;
+  z-index: 80;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--sp-5);
+  background: rgba(17, 24, 39, 0.45);
+}
+.v3-confirm-card {
+  max-width: 420px;
+  width: 100%;
+  background: var(--c-surface);
+  color: var(--c-text);
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--c-border);
+  box-shadow: var(--shadow-hud);
+  padding: var(--sp-5);
+}
+.v3-confirm-card h2 { margin: 0 0 var(--sp-2); font-size: var(--fs-lg); }
+.v3-confirm-warn {
+  padding: var(--sp-3);
+  border-radius: var(--radius-md);
+  background: var(--c-warn-soft);
+  color: var(--c-warn);
+  margin-bottom: var(--sp-4);
+  font-size: var(--fs-sm);
+  line-height: 1.6;
+}
+.actions { display: flex; justify-content: flex-end; gap: var(--sp-2); align-items: center; }
+
+/* ==================== 2. 模板预览切换栏 ==================== */
+.preview-bar {
+  position: sticky;
+  top: 0;
+  z-index: 60;
+  background: var(--c-rail);
+  border-bottom: 1px solid var(--c-border);
+  padding: var(--sp-2) var(--sp-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+}
+.preview-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--sp-3);
+  flex-wrap: wrap;
+}
+.preview-head strong { font-size: var(--fs-md); color: var(--c-accent); }
+.preview-head span { font-size: var(--fs-xs); color: var(--c-muted); }
+.preview-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.preview-controls button {
+  font: inherit;
+  font-size: var(--fs-xs);
+  padding: 4px 10px;
+  border-radius: var(--radius-pill);
+  border: 1px solid var(--c-border);
+  background: var(--c-surface);
+  color: var(--c-text);
+  cursor: pointer;
+  transition: border-color var(--dur-fast), background-color var(--dur-fast), color var(--dur-fast);
+}
+.preview-controls button:hover { border-color: var(--c-accent); color: var(--c-accent); }
+.preview-controls button.on { background: var(--c-accent-solid); border-color: var(--c-accent-solid); color: var(--c-on-accent); }
+.preview-controls button:focus-visible { outline: none; box-shadow: var(--focus-ring); }
+.preview-sep { width: 1px; height: 16px; background: var(--c-border); margin: 0 2px; }
+
+.stage-wrap {
+  max-width: 1320px;
+  margin: var(--sp-4) auto var(--sp-6);
+  padding: 0 var(--sp-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-4);
+}
+
+/* ==================== 3. Studio C 骨架 ==================== */
+.studio-window {
+  display: grid;
+  grid-template-columns: 232px minmax(0, 1fr);
+  min-height: 700px;
+  background: var(--c-bg);
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-xl);
+  overflow: hidden;
+  box-shadow: var(--shadow-studio);
+}
+.rail {
+  background: var(--c-rail);
+  border-right: 1px solid var(--c-border);
+  padding: var(--sp-4) 10px;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+}
+.rail-head {
+  padding: 0 10px 14px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: var(--sp-2);
+}
+.rail-brand {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  font-weight: 700;
+  font-size: 15px;
+  color: var(--c-text);
+}
+.rail-conn { display: inline-flex; align-items: center; gap: 5px; font-size: var(--fs-xs); color: var(--c-muted); }
+.rail .nav-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-2);
+  width: 100%;
+  font: inherit;
+  font-size: var(--fs-sm);
+  padding: 8px 12px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--c-muted);
+  cursor: pointer;
+  text-align: left;
+  transition: background-color var(--dur-fast), color var(--dur-fast);
+}
+.rail .nav-item:hover:not(:disabled) { color: var(--c-text); background: var(--c-surface-2); }
+.rail .nav-item.on { background: var(--c-accent-soft); color: var(--c-accent); font-weight: 600; }
+.rail .nav-item:disabled { opacity: 0.62; cursor: default; }
+.rail .nav-item:focus-visible { outline: none; box-shadow: var(--focus-ring); }
+.nav-item-label { display: inline-flex; align-items: center; gap: var(--sp-2); min-width: 0; }
+.rail-sep { height: 1px; background: var(--c-border); margin: var(--sp-2) 8px; }
+.rail-foot {
+  margin-top: auto;
+  padding: 12px 10px 4px;
+  border-top: 1px solid var(--c-border);
+  font-size: var(--fs-xs);
+  color: var(--c-muted);
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+}
+.rail-status-list { display: flex; flex-direction: column; gap: 5px; }
+.rail-status-row { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.rail-status-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rail-keys { display: flex; flex-direction: column; gap: 5px; padding-top: var(--sp-2); border-top: 1px dashed var(--c-border); }
+.rail-key-row { display: flex; align-items: center; justify-content: space-between; gap: var(--sp-2); }
+.rail-key-kbd {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  border: 1px solid var(--c-border);
+  background: var(--c-surface-2);
+  color: var(--c-text);
+  white-space: nowrap;
+}
+
+.studio-main {
+  padding: 20px 26px 28px;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-4);
+  min-width: 0;
+}
+.studio-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: var(--sp-3);
+  flex-wrap: wrap;
+}
+.studio-head h1 { margin: 0; font-size: var(--fs-xl); color: var(--c-text); line-height: 1.25; }
+.studio-sub { margin-top: 4px; font-size: var(--fs-xs); color: var(--c-muted); }
+.studio-actions { display: flex; align-items: center; gap: var(--sp-2); flex-wrap: wrap; }
+.studio-panel { flex: 1; display: flex; flex-direction: column; gap: var(--sp-3); min-width: 0; min-height: 0; }
+
+.studio-box {
+  background: var(--c-surface);
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-lg);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  min-width: 0;
+}
+.box-head {
+  flex-shrink: 0;
+  padding: 9px 14px;
+  border-bottom: 1px solid var(--c-border);
+  background: var(--c-surface-2);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+  font-size: var(--fs-xs);
+  color: var(--c-muted);
+}
+.box-foot {
+  flex-shrink: 0;
+  padding: 10px 14px;
+  border-top: 1px solid var(--c-border);
+  background: var(--c-surface-2);
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+  font-size: var(--fs-xs);
+  color: var(--c-muted);
+}
+.box-empty {
+  margin: auto 0;
+  text-align: center;
+  color: var(--c-muted);
+  font-size: var(--fs-sm);
+  line-height: 1.7;
+  padding: var(--sp-5);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--sp-3);
+}
+.box-loading {
+  margin: auto 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--sp-3);
+  color: var(--c-accent);
+  font-size: var(--fs-sm);
+  padding: var(--sp-5);
+}
+.box-loading .progress { width: 200px; }
+.box-error {
+  margin: var(--sp-4);
+  padding: var(--sp-3) var(--sp-4);
+  border-radius: var(--radius-md);
+  background: var(--c-danger-soft);
+  color: var(--c-danger);
+  font-size: var(--fs-sm);
+  line-height: 1.65;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--sp-3);
+  overflow-wrap: anywhere;
+}
+.box-error-main { display: flex; align-items: flex-start; gap: var(--sp-2); min-width: 0; flex: 1; }
+
+/* ==================== 4. 模板 C 胶囊标签与聚焦关于样式 ==================== */
+/* 保留上限分段胶囊（字重恒定 500，避免选中态横向抖动） */
+.cap-seg-wrap {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  font-size: var(--fs-xs);
+  color: var(--c-muted);
+}
+.cap-seg {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px;
+  border-radius: var(--radius-pill);
+  background: var(--c-surface);
+  border: 1px solid var(--c-border);
+  gap: 2px;
+}
+.cap-seg button {
+  font: inherit;
+  font-size: var(--fs-xs);
+  font-weight: 500;
+  padding: 3px 10px;
+  border: 0;
+  border-radius: var(--radius-pill);
+  background: transparent;
+  color: var(--c-muted);
+  cursor: pointer;
+  font-variant-numeric: tabular-nums;
+  transition: background-color var(--dur-fast), color var(--dur-fast);
+}
+.cap-seg button:hover:not(:disabled) { color: var(--c-text); background: var(--c-surface-2); }
+.cap-seg button.on { background: var(--c-accent-soft); color: var(--c-accent); }
+.cap-seg button:disabled { opacity: 0.55; cursor: not-allowed; }
+.cap-seg button:focus-visible { outline: none; box-shadow: var(--focus-ring); }
+
+/* 横向来源胶囊条（按运行服务 5 + 安装过程 4 两行自然分组，显示完整文件名且无单枚孤行） */
+.source-pills {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 6px 8px;
+  border-radius: var(--radius-lg);
+  background: var(--c-surface);
+  border: 1px solid var(--c-border);
+}
+.source-pills-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+}
+.source-pills-tag {
+  font-size: 11px;
+  color: var(--c-muted);
+  padding: 0 6px 0 4px;
+  min-width: 56px;
+  flex: none;
+}
+.source-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font: inherit;
+  font-size: var(--fs-xs);
+  font-weight: 500;
+  padding: 4px 8px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-pill);
+  background: transparent;
+  color: var(--c-muted);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background-color var(--dur-fast), color var(--dur-fast), border-color var(--dur-fast);
+}
+.source-pill:hover { color: var(--c-text); background: var(--c-surface-2); }
+.source-pill.on {
+  background: var(--c-accent-soft);
+  border-color: var(--c-accent);
+  color: var(--c-accent);
+}
+.source-pill:focus-visible { outline: none; box-shadow: var(--focus-ring); }
+.pill-count {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  opacity: 0.78;
+  font-variant-numeric: tabular-nums;
+}
+
+.c-status-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-3);
+  flex-wrap: wrap;
+  width: 100%;
+}
+.c-search-wrap {
+  position: relative;
+  flex: 1 1 220px;
+  max-width: 380px;
+  min-width: 160px;
+  display: flex;
+  align-items: center;
+}
+.c-search-wrap .ic { position: absolute; left: 9px; color: var(--c-muted); pointer-events: none; }
+.c-search-wrap input { width: 100%; padding-left: 30px; font-size: var(--fs-xs); }
+.c-telemetry {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+  font-size: var(--fs-xs);
+  color: var(--c-muted);
+}
+
+.log-viewport {
+  height: 430px;
+  display: flex;
+  flex-direction: column;
+  overflow: auto;
+  background: var(--c-surface);
+  min-width: 0;
+}
+.log-lines {
+  margin: 0;
+  padding: var(--sp-2) 0;
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  line-height: 1.65;
+  min-width: 0;
+}
+.log-line {
+  display: grid;
+  grid-template-columns: 44px minmax(0, 1fr);
+  gap: var(--sp-3);
+  padding: 2px 14px;
+  align-items: baseline;
+}
+.log-line:hover { background: var(--c-surface-2); }
+.log-ln { text-align: right; color: var(--c-muted); user-select: none; font-variant-numeric: tabular-nums; opacity: 0.72; }
+.log-msg { color: var(--c-text); white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word; min-width: 0; }
+.log-viewport.nowrap .log-msg { white-space: pre; overflow-wrap: normal; word-break: normal; }
+.log-line.lvl-warn { background: var(--c-warn-soft); }
+.log-line.lvl-warn .log-msg { color: var(--c-warn); }
+.log-line.lvl-err { background: var(--c-danger-soft); }
+.log-line.lvl-err .log-msg { color: var(--c-danger); }
+.log-redact {
+  display: inline-block;
+  padding: 0 4px;
+  border-radius: 3px;
+  background: var(--c-surface-2);
+  border: 1px solid var(--c-border);
+  color: var(--c-muted);
+  font-weight: 600;
+}
+.log-hit { background: var(--c-warn-soft); color: var(--c-warn); border-radius: 2px; padding: 0 2px; }
+.log-loading-state {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+  gap: var(--sp-4);
+  padding: var(--sp-5);
+}
+.log-loading-state .box-loading { margin: 0; padding: 0; }
+.log-skeleton { width: 100%; max-width: 560px; display: flex; flex-direction: column; gap: 8px; }
+.log-skel-bar { height: 12px; border-radius: 4px; background: var(--c-surface-2); }
+
+.c-foot-left, .c-foot-right {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+}
+.c-foot-right { margin-left: auto; }
+
+/* 关于页：聚焦头卡 + 紧凑键值表 */
+.about-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-4);
+  width: 100%;
+}
+.about-hero {
+  background: var(--c-surface);
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-lg);
+  padding: var(--sp-4) var(--sp-5);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-4);
+  flex-wrap: wrap;
+}
+.about-hero-left {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  min-width: 0;
+  flex: 1 1 320px;
+}
+.about-mark {
+  width: 44px;
+  height: 44px;
+  border-radius: var(--radius-md);
+  background: var(--c-accent-soft);
+  color: var(--c-accent);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+}
+.about-hero-title-row {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+}
+.about-hero-title { font-size: var(--fs-lg); font-weight: 700; color: var(--c-text); }
+.about-hero-sub { font-size: var(--fs-xs); color: var(--c-muted); margin-top: 3px; }
+.about-hero-actions { display: inline-flex; align-items: center; gap: var(--sp-2); flex-wrap: wrap; }
+
+.kv-table-row {
+  display: grid;
+  grid-template-columns: 164px minmax(0, 1fr);
+  gap: var(--sp-3);
+  padding: 11px var(--sp-4);
+  border-top: 1px solid var(--c-border);
+  align-items: baseline;
+}
+.kv-table-row:first-child { border-top: 0; }
+.kv-k { font-size: var(--fs-xs); color: var(--c-muted); font-weight: 500; }
+.kv-v {
+  font-size: var(--fs-sm);
+  color: var(--c-text);
+  overflow-wrap: anywhere;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+}
+.kv-v-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+
+/* ==================== 5. 设计说明与回调观察 ==================== */
+.notes-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  gap: var(--sp-3);
+}
+.note-card {
+  background: var(--c-surface);
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-lg);
+  padding: var(--sp-4);
+  font-size: var(--fs-sm);
+}
+.note-card h3 { margin: 0 0 var(--sp-2); font-size: var(--fs-md); color: var(--c-text); }
+.note-card ul { margin: 0; padding-left: 18px; color: var(--c-muted); }
+.note-card li { margin: 4px 0; line-height: 1.55; }
+.note-card strong { color: var(--c-text); }
+.note-card code {
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  color: var(--c-accent);
+  background: var(--c-surface-2);
+  padding: 1px 5px;
+  border-radius: 4px;
+}
+.event-log {
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  color: var(--c-muted);
+  background: var(--c-surface-2);
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-md);
+  padding: var(--sp-2) var(--sp-3);
+  max-height: 112px;
+  overflow: auto;
+  white-space: pre-wrap;
+  line-height: 1.55;
+}
+
+@media (max-width: 860px) {
+  .studio-window { grid-template-columns: 1fr; }
+  .rail { border-right: 0; border-bottom: 1px solid var(--c-border); }
+  .studio-main { padding: var(--sp-4); }
+  .kv-table-row { grid-template-columns: 1fr; gap: 4px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+</style>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false">
+  <symbol id="i-mic" viewBox="0 0 24 24"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/></symbol>
+  <symbol id="i-copy" viewBox="0 0 24 24"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h8"/></symbol>
+  <symbol id="i-alert" viewBox="0 0 24 24"><path d="M12 3 2 21h20L12 3zM12 10v5M12 18h.01"/></symbol>
+  <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M20 11a8 8 0 1 0-2.3 5.7M20 4v7h-7"/></symbol>
+  <symbol id="i-globe" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18"/></symbol>
+  <symbol id="i-scan" viewBox="0 0 24 24"><path d="M4 8V5a1 1 0 0 1 1-1h3M16 4h3a1 1 0 0 1 1 1v3M20 16v3a1 1 0 0 1-1 1h-3M8 20H5a1 1 0 0 1-1-1v-3M7 12h10"/></symbol>
+  <symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></symbol>
+  <symbol id="i-phone" viewBox="0 0 24 24"><rect x="7" y="2" width="10" height="20" rx="2"/><path d="M12 18h.01"/></symbol>
+  <symbol id="i-settings" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3h.1a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8v.1a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></symbol>
+  <symbol id="i-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></symbol>
+  <symbol id="i-moon" viewBox="0 0 24 24"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></symbol>
+  <symbol id="i-trash" viewBox="0 0 24 24"><path d="M3 6h18M8 6V4h8v2M6 6l1 14h10l1-14"/></symbol>
+  <symbol id="i-file-text" viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6M8 13h8M8 17h6M8 9h2"/></symbol>
+  <symbol id="i-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 16v-4M12 8h.01"/></symbol>
+  <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></symbol>
+  <symbol id="i-external" viewBox="0 0 24 24"><path d="M14 3h7v7M10 14 21 3M21 14v5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5"/></symbol>
+</svg>
+
+<header class="preview-bar">
+  <div class="preview-head">
+    <strong>模板 C「紧凑胶囊标签与聚焦卡片布局」</strong>
+    <span>日志页横向来源胶囊 + 100% 全宽长行查看区 + 底部集中操作栏；关于页聚焦头卡 + 紧凑双列键值表</span>
+  </div>
+  <div class="preview-controls" id="preview-controls">
+    <button type="button" data-panel="logs" class="on">视图：运行日志</button>
+    <button type="button" data-panel="about">视图：关于</button>
+    <span class="preview-sep" aria-hidden="true"></span>
+    <button type="button" data-state="normal" class="on">正常态（含长行与脱敏）</button>
+    <button type="button" data-state="empty">空态</button>
+    <button type="button" data-state="loading">加载中</button>
+    <button type="button" data-state="error">出错态</button>
+    <span class="preview-sep" aria-hidden="true"></span>
+    <button type="button" id="btn-theme">主题：浅色（切深色）</button>
+  </div>
+</header>
+
+<main class="stage-wrap">
+  <div class="studio-window">
+    <aside class="rail">
+      <div class="rail-head">
+        <span class="rail-brand"><svg class="ic"><use href="#i-mic"/></svg>Voice Studio</span>
+        <span class="rail-conn"><span class="dot ok" aria-hidden="true"></span><span>已就绪</span></span>
+      </div>
+      <div role="navigation" aria-label="工作台导航">
+        <button type="button" class="nav-item" disabled><span class="nav-item-label"><svg class="ic"><use href="#i-globe"/></svg>翻译框 · 主页</span></button>
+        <button type="button" class="nav-item" disabled><span class="nav-item-label"><svg class="ic"><use href="#i-scan"/></svg>图片 OCR 识别</span></button>
+        <button type="button" class="nav-item" disabled><span class="nav-item-label"><svg class="ic"><use href="#i-clock"/></svg>语音与翻译历史</span></button>
+        <button type="button" class="nav-item" disabled><span class="nav-item-label"><svg class="ic"><use href="#i-phone"/></svg>手机扫码语音</span></button>
+        <button type="button" class="nav-item" disabled>
+          <span class="nav-item-label"><svg class="ic"><use href="#i-settings"/></svg>模型与热键设置</span>
+          <span class="dot ok" aria-hidden="true"></span>
+        </button>
+        <button type="button" class="nav-item on" id="nav-logs" aria-current="page">
+          <span class="nav-item-label"><svg class="ic"><use href="#i-file-text"/></svg>运行日志</span>
+        </button>
+        <button type="button" class="nav-item" id="nav-about">
+          <span class="nav-item-label"><svg class="ic"><use href="#i-info"/></svg>关于</span>
+        </button>
+      </div>
+      <div class="rail-sep" aria-hidden="true"></div>
+      <button type="button" class="nav-item" id="rail-theme-btn">
+        <span class="nav-item-label" id="rail-theme-label"><svg class="ic"><use href="#i-sun"/></svg>外观主题</span>
+        <span class="badge" id="rail-theme-badge">浅色</span>
+      </button>
+      <div class="rail-foot">
+        <div class="rail-status-list">
+          <div class="rail-status-row"><span class="dot ok" aria-hidden="true"></span><span class="rail-status-text">Qwen3-ASR-1.7B 就绪</span></div>
+          <div class="rail-status-row"><span class="dot ok" aria-hidden="true"></span><span class="rail-status-text">qwen3.5:4b 就绪</span></div>
+        </div>
+        <div class="rail-keys" aria-label="全局快捷键">
+          <div class="rail-key-row"><span>语音输入</span><kbd class="rail-key-kbd">Ctrl+Alt+Z</kbd></div>
+          <div class="rail-key-row"><span>截图翻译</span><kbd class="rail-key-kbd">Ctrl+Alt+X</kbd></div>
+          <div class="rail-key-row"><span>纯 OCR 识别</span><kbd class="rail-key-kbd">Ctrl+Alt+O</kbd></div>
+          <div class="rail-key-row"><span>重复上次输入</span><kbd class="rail-key-kbd">Ctrl+Alt+R</kbd></div>
+          <div class="rail-key-row"><span>截屏标注</span><kbd class="rail-key-kbd">Ctrl+Alt+A</kbd></div>
+        </div>
+      </div>
+    </aside>
+
+    <div class="studio-main">
+      <header class="studio-head">
+        <div>
+          <h1 id="page-title">运行日志</h1>
+          <div class="studio-sub" id="page-sub">全宽日志阅读与胶囊切源 · 所有敏感令牌与代理密码均由后端脱敏为 ***</div>
+        </div>
+        <div class="studio-actions" id="head-actions-logs">
+          <div class="cap-seg-wrap">
+            <span>每文件保留</span>
+            <div class="cap-seg" id="cap-seg" role="group" aria-label="单文件日志保留行数上限">
+              <button type="button" data-cap="500">500 行</button>
+              <button type="button" data-cap="2000" class="on">2000 行</button>
+              <button type="button" data-cap="5000">5000 行</button>
+            </div>
+            <span class="saved" id="cap-saved" hidden>已保存</span>
+          </div>
+        </div>
+      </header>
+
+      <!-- 面板 1：运行日志（横向胶囊 + 紧凑状态栏 + 底部操作条） -->
+      <section class="studio-panel" id="panel-logs">
+        <div class="source-pills" id="source-pills" role="tablist" aria-label="日志文件列表"></div>
+
+        <div class="studio-box">
+          <div class="box-head">
+            <div class="c-status-bar">
+              <div class="c-search-wrap">
+                <svg class="ic ic-sm" aria-hidden="true"><use href="#i-search"/></svg>
+                <input type="search" class="field" id="log-filter" placeholder="关键词筛选当前日志（支持过滤 ERROR / WARN / 路径）…" aria-label="关键词筛选当前日志" />
+              </div>
+              <div class="c-telemetry">
+                <span class="mono" id="log-meta">app.log · 10 / 2000 行 · 18.4 KB · 已脱敏</span>
+                <button type="button" class="btn btn-sm" id="btn-toggle-wrap" aria-pressed="true">自动换行：开</button>
+              </div>
+            </div>
+          </div>
+
+          <div class="log-viewport" id="log-viewport" role="tabpanel" aria-label="日志内容"></div>
+
+          <div class="box-foot">
+            <div class="c-foot-left">
+              <button type="button" class="btn btn-sm" id="btn-refresh"><svg class="ic ic-sm"><use href="#i-refresh"/></svg>刷新</button>
+              <button type="button" class="btn btn-sm danger-outline" id="btn-clear-log"><svg class="ic ic-sm"><use href="#i-trash"/></svg>清空当前日志</button>
+            </div>
+            <div class="c-foot-right">
+              <span class="saved" id="logs-copy-feedback" hidden>已复制</span>
+              <button type="button" class="btn btn-sm" id="btn-copy-log"><svg class="ic ic-sm"><use href="#i-copy"/></svg>复制当前日志</button>
+              <button type="button" class="btn primary btn-sm" id="btn-copy-summary"><svg class="ic ic-sm"><use href="#i-copy"/></svg>复制排障汇总</button>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- 面板 2：关于（聚焦头卡 + 简洁键值行） -->
+      <section class="studio-panel" id="panel-about" hidden>
+        <div class="about-wrap" id="about-body"></div>
+      </section>
+    </div>
+  </div>
+
+  <div class="note-card">
+    <h3>前端触发动作日志（模拟后端响应 · 脱敏与排障汇总均由后端完成）</h3>
+    <div class="event-log" id="event-log"></div>
+  </div>
+
+  <div class="notes-grid">
+    <div class="note-card">
+      <h3>1. 展示的数据字段</h3>
+      <ul>
+        <li><strong>运行日志</strong>：<code>sources[]</code>（9 份 <code>paths.logs</code> 文件：<code>name / short_label / lines / bytes / has_error / has_warn</code>）、脱敏行数组 <code>lines[]</code>、分段保留上限 <code>log_max_lines</code>（<code>500 | 2000 | 5000</code>）与四态 <code>phase / error</code>。</li>
+        <li><strong>关于信息</strong>：聚焦头卡展示 <code>app_name / version / summary</code>；键值表展示 <code>os_platform / python_version / asr_variant / models / data_root / logs_dir / config_root / license / links</code>，均由后端权威提供。</li>
+      </ul>
+    </div>
+    <div class="note-card">
+      <h3>2. 触发的动作与建议接口</h3>
+      <ul>
+        <li><strong>胶囊切源 / 刷新 / 筛选</strong> → <code>onSelectLogSource(name)</code> / <code>onRefreshLogs()</code>（<code>GET /api/v1/logs</code>、<code>GET /api/v1/logs/{name}</code>）。</li>
+        <li><strong>顶部胶囊切换保留上限</strong> → <code>onChangeLogMaxLines(500|2000|5000)</code>（<code>POST /api/v1/config</code>，等待回读后切换激活态）。</li>
+        <li><strong>底部操作条</strong> → <code>onClearCurrentLog(name)</code>（确认后 <code>DELETE /api/v1/logs/{name}</code>）、<code>onCopyCurrentLog(name)</code>、<code>onCopyDiagnosticSummary()</code>（<code>GET /api/v1/logs/diagnostic-summary</code>）；关于页头卡 <code>onCopyAboutInfo()</code>。</li>
+      </ul>
+    </div>
+    <div class="note-card">
+      <h3>3. 复用的既有页面、组件与文件</h3>
+      <ul>
+        <li><code>static/v3/css/theme.css</code> &amp; <code>studio.css</code>：胶囊条沿用 <code>.setup-tabs</code> 视觉家族，卡片与确认框复用 <code>.studio-box</code> / <code>.rows</code> / <code>.v3-confirm</code>。</li>
+        <li><code>static/v3/js/home.js</code> &amp; <code>labels.js</code> &amp; <code>icons.js</code> &amp; <code>confirm.js</code>：侧栏扩至 7 项，日志与关于拆为独立纯 UI 模块。</li>
+        <li><code>static/v3/js/business/home-controller.js</code> &amp; <code>clipboard.js</code>、<code>_version.py</code>、<code>_paths.py</code>。</li>
+      </ul>
+    </div>
+  </div>
+</main>
+
+<div class="v3-confirm" id="confirm-modal" role="dialog" aria-modal="true" aria-labelledby="confirm-title" hidden>
+  <div class="v3-confirm-card">
+    <h2 id="confirm-title">清空当前日志文件？</h2>
+    <div class="v3-confirm-warn" id="confirm-warn">将清空当前日志文件内容，操作不可撤销，不会重启正在运行的服务。</div>
+    <div class="actions">
+      <button type="button" class="btn" id="confirm-cancel">取消</button>
+      <button type="button" class="btn primary" id="confirm-ok">确认清空</button>
+    </div>
+  </div>
+</div>
+
+<script>
+(function () {
+  "use strict";
+
+  var LOG_FILES = [
+    {
+      name: "app.log", short: "app.log", bytes: 18840, updatedAt: "19:58:42",
+      lines: [
+        "2026-11-23 19:41:02 [INFO] Ollama Voice Input v3.4.5 已启动 (linux/x11)，热键后端 x11_grab",
+        "2026-11-23 19:41:02 [INFO] paths.data_root=/home/user/.local/share/ollama-voice-input paths.logs=/home/user/.local/share/ollama-voice-input/logs",
+        "2026-11-23 19:41:03 [INFO] supervisor: 启动本地服务 server (127.0.0.1:17945), web_input_token=***",
+        "2026-11-23 19:41:04 [INFO] proxy: 同步系统代理配置 HTTPS_PROXY=http://***:***@127.0.0.1:7890 NO_PROXY=127.0.0.1,localhost",
+        "2026-11-23 19:41:05 [INFO] supervisor: ollama 已就绪 (127.0.0.1:17947, version=0.40.16, model=qwen3.5:4b)",
+        "2026-11-23 19:41:08 [INFO] supervisor: asr sidecar 已就绪 (Qwen3-ASR-1.7B, variant=cuda, device=cuda:0)",
+        "2026-11-23 19:45:19 [WARN] hotkey: 目标焦点窗口返回短暂拒绝输入，已保留最近记录供 Ctrl+Alt+R 重发",
+        "2026-11-23 19:52:11 [INFO] translate: POST /api/v1/translate direction=zh->en chunks=2 elapsed_ms=1142 request_uri=https://127.0.0.1:17945/api/v1/translate?token=***&upstream_proxy=http://***:***@127.0.0.1:7890&trace_id=tr_20261123_195211_long_diagnostic_segment_boundary_check_ok",
+        "2026-11-23 19:55:03 [ERROR] ocr: Tesseract 识别返回空文本区域 (rect=142,88,24,18)，已如实向界面上报 ocr_failed",
+        "2026-11-23 19:58:42 [INFO] log_retention: 单文件保留上限 log_max_lines=2000，已完成尾部截断校验"
+      ]
+    },
+    {
+      name: "server.log", short: "server.log", bytes: 9420, updatedAt: "19:58:40",
+      lines: [
+        "2026-11-23 19:41:03 [INFO] uvicorn: Started server process [24812] on https://127.0.0.1:17945",
+        "2026-11-23 19:41:03 [INFO] auth: 已加载本机令牌校验，自动隐藏 Authorization: Bearer ***",
+        "2026-11-23 19:46:12 [INFO] HTTP 200 GET /api/v1/status 6ms",
+        "2026-11-23 19:52:11 [INFO] HTTP 200 POST /api/v1/translate 1140ms (chunks=2, model=qwen3.5:4b)",
+        "2026-11-23 19:56:04 [WARN] lan_ws: 移动端心跳超时，已关闭旧会话 session_id=ws_9f2a token=***"
+      ]
+    },
+    {
+      name: "window.log", short: "window.log", bytes: 4120, updatedAt: "19:50:11",
+      lines: [
+        "2026-11-23 19:41:04 [INFO] PySide6 WebEngineView 挂载完成 (ui_theme=light)",
+        "2026-11-23 19:41:04 [INFO] 加载工作台入口 https://127.0.0.1:17945/?token=***",
+        "2026-11-23 19:50:11 [INFO] 窗口最小化至系统托盘"
+      ]
+    },
+    {
+      name: "asr.log", short: "asr.log", bytes: 32510, updatedAt: "19:57:18",
+      lines: [
+        "2026-11-23 19:41:04 [INFO] asr_sidecar: Python 3.12.3 · torch 2.5.1+cu124 · CUDA available=True (NVIDIA GeForce RTX 4070)",
+        "2026-11-23 19:41:07 [INFO] model_loader: 已加载 /home/user/.local/share/ollama-voice-input/models/Qwen3-ASR-1.7B (fp16, 3.4GB VRAM)",
+        "2026-11-23 19:48:22 [INFO] stream: utterance_id=u_8841 audio_sec=4.20 rtf=0.14 text_len=28",
+        "2026-11-23 19:57:18 [WARN] audio: 麦克风采样率由 48000Hz 重采样至 16000Hz，设备=USB Condenser Microphone (hw:2,0)"
+      ]
+    },
+    {
+      name: "ollama.log", short: "ollama.log", bytes: 15280, updatedAt: "19:52:12",
+      lines: [
+        "2026-11-23 19:41:04 [INFO] ollama 0.40.16 listening on 127.0.0.1:17947 (OLLAMA_MODELS=/home/user/.local/share/ollama-voice-input/models/ollama)",
+        "2026-11-23 19:41:05 [INFO] loaded model qwen3.5:4b (num_ctx=8192, gpu_layers=all)",
+        "2026-11-23 19:52:12 [INFO] POST /api/chat 200 1.12s done_reason=stop"
+      ]
+    },
+    {
+      name: "setup-asr_runtime_install.log", short: "setup-asr_runtime", bytes: 24910, updatedAt: "昨日 14:22",
+      lines: [
+        "2026-11-22 14:19:01 [INFO] setup_worker: 探测到 NVIDIA CUDA 驱动 560.35，选择变体 cuda (cu124)",
+        "2026-11-22 14:19:02 [INFO] uv_runner: 使用显式代理 HTTPS_PROXY=http://***:***@127.0.0.1:7890",
+        "2026-11-22 14:22:18 [INFO] setup_worker: 已完成 ASR 隔离环境安装 (/home/user/.local/share/ollama-voice-input/runtimes/asr/venv)"
+      ]
+    },
+    {
+      name: "setup-ollama_install.log", short: "setup-ollama", bytes: 0, updatedAt: "—",
+      lines: []
+    },
+    {
+      name: "setup-ollama_pull.log", short: "setup-ollama_pull", bytes: 6340, updatedAt: "昨日 14:18",
+      lines: [
+        "2026-11-22 14:16:05 [INFO] pulling manifest for qwen3.5:4b",
+        "2026-11-22 14:18:09 [INFO] verifying sha256 digest",
+        "2026-11-22 14:18:10 [INFO] success"
+      ]
+    },
+    {
+      name: "setup-asr-download.log", short: "setup-asr-dl", bytes: 8190, updatedAt: "昨日 14:25",
+      lines: [
+        "2026-11-22 14:22:20 [INFO] hf_download: repo=Qwen/Qwen3-ASR-1.7B HF_TOKEN=***",
+        "2026-11-22 14:25:44 [INFO] hf_download: model.safetensors 校验通过，写入完成"
+      ]
+    }
+  ];
+
+  var ABOUT_DATA = {
+    appName: "Voice Studio · Ollama Voice Input",
+    version: "v3.4.5",
+    summary: "100% 本地离线的跨平台语音输入、截屏原位翻译与画笔标注工作台",
+    osPlatform: "Linux · Ubuntu 24.04.1 LTS (x86_64 · X11)",
+    pythonVersion: "Python 3.12.3（源码运行）",
+    asrVariant: "cuda",
+    asrDetail: "CUDA 加速 · NVIDIA GeForce RTX 4070",
+    models: "Qwen3-ASR-1.7B · qwen3.5:4b（Ollama 0.40.16）",
+    dataRoot: "/home/user/.local/share/ollama-voice-input",
+    logsDir: "/home/user/.local/share/ollama-voice-input/logs",
+    configRoot: "/home/user/.config/ollama-voice-input",
+    licenseTitle: "AGPL-3.0 + 商业授权",
+    licenseNote: "个人及企业内部非二次封装商用均免费；闭源二次封装或商业再分发需获取商业授权。",
+    repoUrl: "https://github.com/jackche8/voice-input",
+    pagesUrl: "https://jackche8.github.io/voice-input/",
+    releasesUrl: "https://github.com/jackche8/voice-input/releases",
+    issuesUrl: "https://github.com/jackche8/voice-input/issues"
+  };
+
+  var state = {
+    theme: "light",
+    panel: "logs",
+    viewState: "normal",
+    activeFile: "app.log",
+    keyword: "",
+    maxLines: 2000,
+    savingCap: false,
+    capSaved: false,
+    wrap: true,
+    logsCopied: "",
+    aboutCopied: false
+  };
+
+  var eventLogs = [];
+  var el = {
+    controls: document.getElementById("preview-controls"),
+    btnTheme: document.getElementById("btn-theme"),
+    railThemeBtn: document.getElementById("rail-theme-btn"),
+    railThemeLabel: document.getElementById("rail-theme-label"),
+    railThemeBadge: document.getElementById("rail-theme-badge"),
+    navLogs: document.getElementById("nav-logs"),
+    navAbout: document.getElementById("nav-about"),
+    pageTitle: document.getElementById("page-title"),
+    pageSub: document.getElementById("page-sub"),
+    headLogs: document.getElementById("head-actions-logs"),
+    capSeg: document.getElementById("cap-seg"),
+    capSaved: document.getElementById("cap-saved"),
+    panelLogs: document.getElementById("panel-logs"),
+    panelAbout: document.getElementById("panel-about"),
+    sourcePills: document.getElementById("source-pills"),
+    logFilter: document.getElementById("log-filter"),
+    logViewport: document.getElementById("log-viewport"),
+    logMeta: document.getElementById("log-meta"),
+    logsCopyFeedback: document.getElementById("logs-copy-feedback"),
+    btnRefresh: document.getElementById("btn-refresh"),
+    btnCopySummary: document.getElementById("btn-copy-summary"),
+    btnToggleWrap: document.getElementById("btn-toggle-wrap"),
+    btnClearLog: document.getElementById("btn-clear-log"),
+    btnCopyLog: document.getElementById("btn-copy-log"),
+    aboutBody: document.getElementById("about-body"),
+    confirmModal: document.getElementById("confirm-modal"),
+    confirmWarn: document.getElementById("confirm-warn"),
+    confirmCancel: document.getElementById("confirm-cancel"),
+    confirmOk: document.getElementById("confirm-ok"),
+    eventLog: document.getElementById("event-log")
+  };
+
+  function logEvent(msg) {
+    var d = new Date();
+    var ts = String(d.getHours()).padStart(2, "0") + ":" + String(d.getMinutes()).padStart(2, "0") + ":" + String(d.getSeconds()).padStart(2, "0");
+    eventLogs.unshift("[" + ts + "] " + msg);
+    if (eventLogs.length > 12) eventLogs.length = 12;
+    el.eventLog.textContent = eventLogs.join("\n");
+  }
+
+  function escapeHtml(s) {
+    return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  }
+
+  function formatBytes(b) {
+    if (!b) return "0 B";
+    if (b < 1024) return b + " B";
+    return (b / 1024).toFixed(1) + " KB";
+  }
+
+  function getFileObj(name) {
+    for (var i = 0; i < LOG_FILES.length; i++) {
+      if (LOG_FILES[i].name === name) return LOG_FILES[i];
+    }
+    return LOG_FILES[0];
+  }
+
+  function dotClassForFile(f) {
+    if (!f.lines.length) return "";
+    for (var i = 0; i < f.lines.length; i++) {
+      if (f.lines[i].indexOf("[ERROR]") !== -1) return "err";
+    }
+    for (var j = 0; j < f.lines.length; j++) {
+      if (f.lines[j].indexOf("[WARN]") !== -1) return "warn";
+    }
+    return "ok";
+  }
+
+  function formatLogLineHtml(line, kw) {
+    var html = escapeHtml(line).replace(/\*\*\*/g, '<span class="log-redact">***</span>');
+    if (kw) {
+      var esc = kw.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      html = html.replace(new RegExp("(" + esc + ")", "gi"), '<mark class="log-hit">$1</mark>');
+    }
+    return html;
+  }
+
+  function applyTheme(t) {
+    state.theme = t === "dark" ? "dark" : "light";
+    document.documentElement.dataset.theme = state.theme;
+    var isDark = state.theme === "dark";
+    el.btnTheme.textContent = isDark ? "主题：深色（切浅色）" : "主题：浅色（切深色）";
+    el.railThemeBadge.textContent = isDark ? "深色" : "浅色";
+    el.railThemeLabel.innerHTML = '<svg class="ic"><use href="#i-' + (isDark ? "moon" : "sun") + '"/></svg>外观主题';
+  }
+
+  function renderPills() {
+    var runtime = LOG_FILES.slice(0, 5);
+    var setup = LOG_FILES.slice(5);
+    function renderRow(label, list) {
+      var row = '<div class="source-pills-row"><span class="source-pills-tag">' + label + '</span>';
+      list.forEach(function (f) {
+        var on = f.name === state.activeFile;
+        var effectiveLines = (on && state.viewState === "empty") ? 0 : f.lines.length;
+        var dot = effectiveLines ? dotClassForFile(f) : "";
+        row +=
+          '<button type="button" class="source-pill' + (on ? " on" : "") + '" role="tab" aria-selected="' + on + '" title="' + escapeHtml(f.name) + '" data-file="' + escapeHtml(f.name) + '">' +
+            '<span class="dot ' + dot + '" aria-hidden="true"></span>' +
+            '<span>' + escapeHtml(f.name) + '</span>' +
+            '<span class="pill-count">' + effectiveLines + '</span>' +
+          '</button>';
+      });
+      row += '</div>';
+      return row;
+    }
+    el.sourcePills.innerHTML = renderRow("运行服务", runtime) + renderRow("安装过程", setup);
+
+    el.capSeg.querySelectorAll("button[data-cap]").forEach(function (b) {
+      b.classList.toggle("on", Number(b.dataset.cap) === state.maxLines);
+      b.disabled = state.savingCap || state.viewState === "loading";
+    });
+    el.capSaved.hidden = !state.capSaved;
+  }
+
+  function renderLogs() {
+    renderPills();
+    var file = getFileObj(state.activeFile);
+    el.logViewport.classList.toggle("nowrap", !state.wrap);
+    el.btnToggleWrap.textContent = state.wrap ? "自动换行：开" : "自动换行：关";
+    el.btnToggleWrap.setAttribute("aria-pressed", String(state.wrap));
+    el.logsCopyFeedback.hidden = !state.logsCopied;
+    el.logsCopyFeedback.textContent = state.logsCopied;
+
+    var isNormal = state.viewState === "normal";
+    var kw = state.keyword.trim();
+    var matched = file.lines.filter(function (ln) {
+      return !kw || ln.toLowerCase().indexOf(kw.toLowerCase()) !== -1;
+    });
+
+    el.btnCopyLog.disabled = !isNormal || !matched.length;
+    el.btnClearLog.disabled = state.viewState === "loading" || state.viewState === "error" || (isNormal && !file.lines.length);
+    el.btnCopySummary.disabled = state.viewState === "loading";
+
+    if (state.viewState === "loading") {
+      el.logViewport.innerHTML =
+        '<div class="log-loading-state">' +
+          '<div class="box-loading" role="status" aria-live="polite">' +
+            '<span>正在读取 ' + escapeHtml(file.name) + '（保留上限 ' + state.maxLines + ' 行）…</span>' +
+            '<div class="progress" aria-hidden="true"><i></i></div>' +
+          '</div>' +
+          '<div class="log-skeleton" aria-hidden="true">' +
+            '<div class="log-skel-bar" style="width:74%"></div>' +
+            '<div class="log-skel-bar" style="width:90%"></div>' +
+            '<div class="log-skel-bar" style="width:66%"></div>' +
+            '<div class="log-skel-bar" style="width:82%"></div>' +
+          '</div>' +
+        '</div>';
+      el.logMeta.textContent = file.name + " · 读取中…";
+      return;
+    }
+
+    if (state.viewState === "error") {
+      el.logViewport.innerHTML =
+        '<div class="box-error" role="alert">' +
+          '<div class="box-error-main"><svg class="ic"><use href="#i-alert"/></svg><span>日志读取失败（logs_io）：无法打开 ' + escapeHtml(file.name) + '（PermissionError：请检查日志目录读写权限）。</span></div>' +
+          '<button type="button" class="btn btn-sm" id="btn-inline-retry">重试读取</button>' +
+        '</div>';
+      var retry = document.getElementById("btn-inline-retry");
+      if (retry) retry.addEventListener("click", function () { state.viewState = "normal"; syncPreviewButtons(); render(); });
+      el.logMeta.textContent = file.name + " · 读取失败";
+      return;
+    }
+
+    if (state.viewState === "empty" || !file.lines.length) {
+      el.logViewport.innerHTML =
+        '<div class="box-empty">' +
+          '<div><strong>' + escapeHtml(file.name) + ' 当前无日志记录</strong><br/>该组件尚未输出日志，或刚刚执行过清空操作。</div>' +
+          '<button type="button" class="btn btn-sm" id="btn-empty-refresh"><svg class="ic ic-sm"><use href="#i-refresh"/></svg>刷新日志</button>' +
+        '</div>';
+      var er = document.getElementById("btn-empty-refresh");
+      if (er) er.addEventListener("click", function () {
+        state.viewState = "normal";
+        if (!file.lines.length) state.activeFile = "app.log";
+        syncPreviewButtons();
+        render();
+      });
+      el.logMeta.textContent = file.name + " · 0 / " + state.maxLines + " 行 · 0 B · 已脱敏";
+      return;
+    }
+
+    if (!matched.length) {
+      el.logViewport.innerHTML =
+        '<div class="box-empty">' +
+          '<div>未在 ' + escapeHtml(file.name) + ' 中找到包含「' + escapeHtml(kw) + '」的日志行。</div>' +
+          '<button type="button" class="btn btn-sm" id="btn-clear-filter">清除关键词</button>' +
+        '</div>';
+      var cf = document.getElementById("btn-clear-filter");
+      if (cf) cf.addEventListener("click", function () {
+        state.keyword = "";
+        el.logFilter.value = "";
+        renderLogs();
+      });
+      el.logMeta.textContent = file.name + " · 匹配 0 / " + file.lines.length + " 行";
+      return;
+    }
+
+    var html = '<div class="log-lines">';
+    matched.forEach(function (ln, idx) {
+      var cls = "log-line";
+      if (ln.indexOf("[ERROR]") !== -1) cls += " lvl-err";
+      else if (ln.indexOf("[WARN]") !== -1) cls += " lvl-warn";
+      html += '<div class="' + cls + '"><span class="log-ln">' + (idx + 1) + '</span><span class="log-msg">' + formatLogLineHtml(ln, kw) + '</span></div>';
+    });
+    html += "</div>";
+    el.logViewport.innerHTML = html;
+    el.logMeta.textContent =
+      file.name + " · " +
+      (kw ? ("匹配 " + matched.length + " / " + file.lines.length) : (file.lines.length + " / " + state.maxLines)) +
+      " 行 · " + formatBytes(file.bytes) + " · 已脱敏";
+  }
+
+  function renderAbout() {
+    if (state.viewState === "loading") {
+      el.aboutBody.innerHTML =
+        '<div class="studio-box"><div class="box-loading" role="status" aria-live="polite" style="min-height:340px">' +
+          '<span>正在读取版本与运行环境信息…</span><div class="progress" aria-hidden="true"><i></i></div>' +
+        '</div></div>';
+      return;
+    }
+    if (state.viewState === "error") {
+      el.aboutBody.innerHTML =
+        '<div class="studio-box"><div class="box-error" role="alert">' +
+          '<div class="box-error-main"><svg class="ic"><use href="#i-alert"/></svg><span>无法读取关于信息（internal）：本地服务连接中断，未回退为硬编码默认值。</span></div>' +
+          '<button type="button" class="btn btn-sm" id="btn-about-retry">重试</button>' +
+        '</div></div>';
+      var r = document.getElementById("btn-about-retry");
+      if (r) r.addEventListener("click", function () { state.viewState = "normal"; syncPreviewButtons(); render(); });
+      return;
+    }
+
+    el.aboutBody.innerHTML =
+      '<div class="about-hero">' +
+        '<div class="about-hero-left">' +
+          '<div class="about-mark" aria-hidden="true"><svg class="ic ic-lg"><use href="#i-mic"/></svg></div>' +
+          '<div style="min-width:0">' +
+            '<div class="about-hero-title-row">' +
+              '<span class="about-hero-title">' + escapeHtml(ABOUT_DATA.appName) + '</span>' +
+              '<span class="badge accent mono">' + escapeHtml(ABOUT_DATA.version) + '</span>' +
+            '</div>' +
+            '<div class="about-hero-sub">' + escapeHtml(ABOUT_DATA.summary) + '</div>' +
+          '</div>' +
+        '</div>' +
+        '<div class="about-hero-actions">' +
+          '<span class="saved" id="about-copy-feedback"' + (state.aboutCopied ? "" : " hidden") + '>已复制环境信息</span>' +
+          '<button type="button" class="btn primary" id="btn-copy-about"><svg class="ic"><use href="#i-copy"/></svg>复制环境信息</button>' +
+        '</div>' +
+      '</div>' +
+      '<div class="rows">' +
+        '<div class="kv-table-row"><div class="kv-k">操作系统与平台</div><div class="kv-v">' + escapeHtml(ABOUT_DATA.osPlatform) + '</div></div>' +
+        '<div class="kv-table-row"><div class="kv-k">Python 运行环境</div><div class="kv-v mono">' + escapeHtml(ABOUT_DATA.pythonVersion) + '</div></div>' +
+        '<div class="kv-table-row"><div class="kv-k">ASR 运行变体</div><div class="kv-v"><span class="badge ok mono">' + escapeHtml(ABOUT_DATA.asrVariant) + '</span><span>' + escapeHtml(ABOUT_DATA.asrDetail) + '</span></div></div>' +
+        '<div class="kv-table-row"><div class="kv-k">本地模型栈</div><div class="kv-v mono">' + escapeHtml(ABOUT_DATA.models) + '</div></div>' +
+        '<div class="kv-table-row"><div class="kv-k">本地数据目录</div><div class="kv-v mono" style="font-size:var(--fs-xs)">' + escapeHtml(ABOUT_DATA.dataRoot) + '</div></div>' +
+        '<div class="kv-table-row"><div class="kv-k">本地日志目录</div><div class="kv-v mono" style="font-size:var(--fs-xs)">' + escapeHtml(ABOUT_DATA.logsDir) + '</div></div>' +
+        '<div class="kv-table-row"><div class="kv-k">本地配置目录</div><div class="kv-v mono" style="font-size:var(--fs-xs)">' + escapeHtml(ABOUT_DATA.configRoot) + '</div></div>' +
+        '<div class="kv-table-row"><div class="kv-k">开源与商业双许可</div><div class="kv-v-stack"><div class="kv-v"><span class="badge accent">' + escapeHtml(ABOUT_DATA.licenseTitle) + '</span></div><div class="muted" style="font-size:var(--fs-xs)">' + escapeHtml(ABOUT_DATA.licenseNote) + '</div></div></div>' +
+        '<div class="kv-table-row"><div class="kv-k">项目与文档链接</div><div class="kv-v">' +
+          '<a class="linkbtn" href="' + escapeHtml(ABOUT_DATA.repoUrl) + '" target="_blank" rel="noopener">GitHub 仓库<svg class="ic ic-sm"><use href="#i-external"/></svg></a>' +
+          '<a class="linkbtn" href="' + escapeHtml(ABOUT_DATA.pagesUrl) + '" target="_blank" rel="noopener">产品主页 (GitHub Pages)<svg class="ic ic-sm"><use href="#i-external"/></svg></a>' +
+          '<a class="linkbtn" href="' + escapeHtml(ABOUT_DATA.releasesUrl) + '" target="_blank" rel="noopener">Releases<svg class="ic ic-sm"><use href="#i-external"/></svg></a>' +
+          '<a class="linkbtn" href="' + escapeHtml(ABOUT_DATA.issuesUrl) + '" target="_blank" rel="noopener">Issues<svg class="ic ic-sm"><use href="#i-external"/></svg></a>' +
+        '</div></div>' +
+      '</div>';
+
+    var copyAboutBtn = document.getElementById("btn-copy-about");
+    if (copyAboutBtn) {
+      copyAboutBtn.addEventListener("click", function () {
+        state.aboutCopied = true;
+        logEvent("onCopyAboutInfo() → 复制后端权威环境信息块（版本/平台/Python/ASR变体/本地路径/双许可）");
+        renderAbout();
+      });
+    }
+  }
+
+  function syncPreviewButtons() {
+    el.controls.querySelectorAll("button[data-panel]").forEach(function (b) { b.classList.toggle("on", b.dataset.panel === state.panel); });
+    el.controls.querySelectorAll("button[data-state]").forEach(function (b) { b.classList.toggle("on", b.dataset.state === state.viewState); });
+  }
+
+  function render() {
+    var isAbout = state.panel === "about";
+    el.navLogs.classList.toggle("on", !isAbout);
+    el.navAbout.classList.toggle("on", isAbout);
+    if (isAbout) {
+      el.navAbout.setAttribute("aria-current", "page");
+      el.navLogs.removeAttribute("aria-current");
+    } else {
+      el.navLogs.setAttribute("aria-current", "page");
+      el.navAbout.removeAttribute("aria-current");
+    }
+    el.panelLogs.hidden = isAbout;
+    el.panelAbout.hidden = !isAbout;
+    el.headLogs.hidden = isAbout;
+
+    if (isAbout) {
+      el.pageTitle.textContent = "关于";
+      el.pageSub.textContent = "版本、运行环境、本地目录与双许可信息（由本地服务权威返回）";
+      renderAbout();
+    } else {
+      el.pageTitle.textContent = "运行日志";
+      el.pageSub.textContent = "全宽日志阅读与胶囊切源 · 所有敏感令牌与代理密码均由后端脱敏为 ***";
+      renderLogs();
+    }
+  }
+
+  el.controls.addEventListener("click", function (ev) {
+    var btn = ev.target.closest("button");
+    if (!btn) return;
+    if (btn.dataset.panel) {
+      state.panel = btn.dataset.panel;
+      state.logsCopied = "";
+      state.aboutCopied = false;
+      syncPreviewButtons();
+      logEvent("onSelectPanel({ panel: \"" + state.panel + "\" })");
+      render();
+    } else if (btn.dataset.state) {
+      state.viewState = btn.dataset.state;
+      syncPreviewButtons();
+      logEvent("预览状态切换 → " + state.viewState);
+      render();
+    }
+  });
+  el.navLogs.addEventListener("click", function () { state.panel = "logs"; syncPreviewButtons(); render(); });
+  el.navAbout.addEventListener("click", function () { state.panel = "about"; syncPreviewButtons(); render(); });
+  el.btnTheme.addEventListener("click", function () { applyTheme(state.theme === "dark" ? "light" : "dark"); });
+  el.railThemeBtn.addEventListener("click", function () { applyTheme(state.theme === "dark" ? "light" : "dark"); });
+
+  el.sourcePills.addEventListener("click", function (ev) {
+    var pill = ev.target.closest("button[data-file]");
+    if (!pill) return;
+    state.activeFile = pill.dataset.file;
+    state.logsCopied = "";
+    logEvent("onSelectLogSource({ name: \"" + state.activeFile + "\" }) → GET /api/v1/logs/" + state.activeFile);
+    renderLogs();
+  });
+
+  el.capSeg.addEventListener("click", function (ev) {
+    var btn = ev.target.closest("button[data-cap]");
+    if (!btn || btn.disabled) return;
+    var next = Number(btn.dataset.cap);
+    if (next === state.maxLines) return;
+    state.savingCap = true;
+    state.capSaved = false;
+    renderLogs();
+    logEvent("onChangeLogMaxLines({ log_max_lines: " + next + " }) → POST /api/v1/config");
+    setTimeout(function () {
+      state.maxLines = next;
+      state.savingCap = false;
+      state.capSaved = true;
+      logEvent("← config 已回读确认 log_max_lines=" + next);
+      renderLogs();
+    }, 180);
+  });
+
+  el.logFilter.addEventListener("input", function () { state.keyword = el.logFilter.value; renderLogs(); });
+  el.btnToggleWrap.addEventListener("click", function () { state.wrap = !state.wrap; renderLogs(); });
+  el.btnRefresh.addEventListener("click", function () {
+    state.logsCopied = "";
+    logEvent("onRefreshLogs({ name: \"" + state.activeFile + "\" }) → 刷新当前日志");
+    renderLogs();
+  });
+  el.btnCopyLog.addEventListener("click", function () {
+    state.logsCopied = "已复制 " + state.activeFile;
+    logEvent("onCopyCurrentLog({ name: \"" + state.activeFile + "\", redacted: true })");
+    renderLogs();
+  });
+  el.btnCopySummary.addEventListener("click", function () {
+    state.logsCopied = "已复制排障汇总（已脱敏）";
+    logEvent("onCopyDiagnosticSummary() → GET /api/v1/logs/diagnostic-summary（汇总版本/平台/变体/组件状态 + 关键脱敏尾行）");
+    renderLogs();
+  });
+
+  el.btnClearLog.addEventListener("click", function () {
+    el.confirmWarn.textContent = "将清空 " + state.activeFile + " 中的现有记录，此操作不可恢复，不会影响正在运行的服务进程。";
+    el.confirmModal.hidden = false;
+    el.confirmCancel.focus();
+  });
+  el.confirmCancel.addEventListener("click", function () { el.confirmModal.hidden = true; });
+  el.confirmModal.addEventListener("click", function (ev) { if (ev.target === el.confirmModal) el.confirmModal.hidden = true; });
+  document.addEventListener("keydown", function (ev) { if (ev.key === "Escape" && !el.confirmModal.hidden) el.confirmModal.hidden = true; });
+  el.confirmOk.addEventListener("click", function () {
+    var f = getFileObj(state.activeFile);
+    f.lines = [];
+    f.bytes = 0;
+    f.updatedAt = "刚刚清空";
+    el.confirmModal.hidden = true;
+    state.logsCopied = "已清空 " + f.name;
+    logEvent("onClearCurrentLog({ name: \"" + f.name + "\" }) → DELETE /api/v1/logs/" + f.name);
+    renderLogs();
+  });
+
+  var qs = new URLSearchParams(window.location.search);
+  applyTheme(qs.get("theme") || "light");
+  if (qs.get("panel") === "about") state.panel = "about";
+  if (["normal", "empty", "loading", "error"].indexOf(qs.get("state")) !== -1) state.viewState = qs.get("state");
+  if (qs.get("file")) state.activeFile = qs.get("file");
+  syncPreviewButtons();
+  logEvent("模板 C 初始化完成（默认浅色主题 · 胶囊切源 + 聚焦头卡 · 单文件保留上限 2000 行）");
+  render();
+})();
+</script>
+</body>
+</html>

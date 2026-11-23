@@ -272,6 +272,22 @@ def main() -> int:
     )
     runtime.setup = SandboxSetup(runtime.components, sandbox_root / "install_all.json", events=runtime.events)
     runtime.lan = SandboxLan(port, token)
+    logs_dir = sandbox_root / "logs"
+    logs_dir.mkdir(parents=True, exist_ok=True)
+    (logs_dir / "app.log").write_text(
+        "2026-11-23 10:00:00 [INFO] sandbox boot ready\n"
+        "2026-11-23 10:00:01 [WARN] HTTPS_PROXY=http://alice:secret@127.0.0.1:7890\n"
+        f"2026-11-23 10:00:02 [ERROR] leaked token {token}\n",
+        encoding="utf-8",
+    )
+    (logs_dir / "server.log").write_text(
+        "2026-11-23 10:00:00 [INFO] uvicorn listening on 127.0.0.1\n",
+        encoding="utf-8",
+    )
+    (logs_dir / "setup-ollama_pull.log").write_text(
+        "2026-11-23 10:00:00 [INFO] pulling qwen3.5:4b\n",
+        encoding="utf-8",
+    )
     static_v3 = REPO / "static" / "v3"
     app = create_app(runtime, static_v3=static_v3)
     meta = {

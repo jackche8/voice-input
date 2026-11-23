@@ -61,6 +61,11 @@ const requiredOps = [
   "retry_component_api_v1_components__name__retry_post",
   "lan_access_api_v1_lan_access_get",
   "list_audio_inputs_api_v1_audio_inputs_get",
+  "list_logs_api_v1_logs_get",
+  "diagnostic_summary_api_v1_logs_diagnostic_summary_get",
+  "read_log_api_v1_logs__name__get",
+  "clear_log_api_v1_logs__name__delete",
+  "get_about_api_v1_about_get",
   "get_config_api_v1_config_get",
   "post_config_api_v1_config_post",
   "history_api_v1_history_get",
@@ -236,6 +241,7 @@ function loadBusiness(extra) {
   };
   context.document = extra && extra.document;
   context.location = extra && extra.location;
+  if (extra && extra.ClipboardItem) context.ClipboardItem = extra.ClipboardItem;
   context.window.V3 = {};
   context.window.V3Business = {};
   vm.createContext(context);
@@ -244,7 +250,7 @@ function loadBusiness(extra) {
   });
   const order = [
     "catalog.js", "context.js", "job-id.js", "http.js", "sse.js", "clipboard.js",
-    "audio.js", "platform.js", "map-setup.js", "setup-actions.js", "home-controller.js",
+    "audio.js", "platform.js", "map-setup.js", "setup-actions.js", "logs-actions.js", "home-controller.js",
     "voice-controller.js", "bootstrap.js"
   ];
   order.forEach(function (name) {
@@ -2660,6 +2666,505 @@ async function runUnit() {
   } else fail("非本机/未连接 onToggleTheme 误发请求：" + JSON.stringify({ lanCalls: lanThemeWorld.calls.length, discCalls: discThemeWorld.calls.length }));
   lanThemeCtl.destroy();
   discThemeCtl.destroy();
+
+  /* ---------- ST6: map-setup log_max_lines / clipboard.writeAsyncText / logs-actions 懒加载、竞态与非乐观保存 ---------- */
+  const cfgNoCap = B.applyConfig({ log_max_lines: null }, { polish_enabled: true });
+  const cfgWithCap = B.applyConfig({ log_max_lines: null }, { polish_enabled: true, log_max_lines: 5000 });
+  if (
+    B.LEGAL_CONFIG_KEYS.indexOf("log_max_lines") >= 0
+    && B.pickLegalConfig({ log_max_lines: 500, bogus: 1 }).log_max_lines === 500
+    && !("bogus" in B.pickLegalConfig({ log_max_lines: 500, bogus: 1 }))
+    && cfgNoCap.log_max_lines === null
+    && cfgWithCap.log_max_lines === 5000
+  ) {
+    pass("map-setup 合法化 log_max_lines 且缺省时不伪造 2000");
+  } else fail("map-setup log_max_lines 映射异常：" + JSON.stringify({ cfgNoCap: cfgNoCap, cfgWithCap: cfgWithCap }));
+
+  /* clipboard.writeAsyncText：1) ClipboardItem + write 路径保留同步手势与单次 fetch；2) 失败保留原始 ApiError 零未处理拒绝；3) 无 ClipboardItem 时回退 writeText 且零重复请求 */
+  function FakeClipboardItem(items) { this.items = items; }
+  const clipWrittenItems = [];
+  let getTextCalls1 = 0;
+  let wroteSync = false;
+  const clipItemAdapter = B.createClipboard({
+    ClipboardItem: FakeClipboardItem,
+    Blob: Blob,
+    clipboard: {
+      write: function (items) {
+        wroteSync = true;
+        clipWrittenItems.push(items);
+        return Promise.resolve(items[0].items["text/plain"]).then(function (blob) { return blob.text(); });
+      },
+      writeText: function () { throw new Error("should not call writeText when ClipboardItem write succeeds"); }
+    }
+  });
+  let resolveAsyncText;
+  const asyncClipP1 = clipItemAdapter.writeAsyncText(function () {
+    getTextCalls1 += 1;
+    return new Promise(function (res) { resolveAsyncText = res; });
+  });
+  const calledWriteSynchronously = wroteSync;
+  resolveAsyncText("diagnostic-payload-ok");
+  await asyncClipP1;
+  const blobText1 = await (await clipWrittenItems[0][0].items["text/plain"]).text();
+  if (calledWriteSynchronously && getTextCalls1 === 1 && blobText1 === "diagnostic-payload-ok") {
+    pass("clipboard.writeAsyncText 同步调用 clipboard.write(ClipboardItem) 保留用户手势且单次调用 getText");
+  } else fail("clipboard.writeAsyncText ClipboardItem 路径异常：" + JSON.stringify({ calledWriteSynchronously: calledWriteSynchronously, getTextCalls1: getTextCalls1, blobText1: blobText1 }));
+
+  let unhandledCount = 0;
+  const onUnhandled = function () { unhandledCount += 1; };
+  process.on("unhandledRejection", onUnhandled);
+  let getTextCallsErr = 0;
+  const origApiErr = new B.ApiError({ error: "logs_io", message: "日志目录不可读", status: 500 });
+  const clipItemErrAdapter = B.createClipboard({
+    ClipboardItem: FakeClipboardItem,
+    Blob: Blob,
+    clipboard: {
+      write: function (items) {
+        return Promise.resolve(items[0].items["text/plain"]).then(function () {}, function () {
+          throw new Error("DOMException: NotAllowedError");
+        });
+      },
+      writeText: function () { return Promise.resolve(); }
+    }
+  });
+  let caughtAsyncErr = null;
+  try {
+    await clipItemErrAdapter.writeAsyncText(function () {
+      getTextCallsErr += 1;
+      return Promise.reject(origApiErr);
+    });
+  } catch (err) {
+    caughtAsyncErr = err;
+  }
+  await new Promise(function (res) { setTimeout(res, 10); });
+  process.off("unhandledRejection", onUnhandled);
+  if (caughtAsyncErr === origApiErr && getTextCallsErr === 1 && unhandledCount === 0) {
+    pass("clipboard.writeAsyncText 在 getText 失败时保留原始 ApiError、零重复请求且零 unhandledRejection");
+  } else fail("clipboard.writeAsyncText 错误保留异常：" + JSON.stringify({ same: caughtAsyncErr === origApiErr, err: caughtAsyncErr && caughtAsyncErr.message, calls: getTextCallsErr, unhandled: unhandledCount }));
+
+  let getTextCallsFallback = 0;
+  const fallbackTexts = [];
+  const clipFallbackAdapter = B.createClipboard({
+    ClipboardItem: function () { throw new TypeError("Promise value not supported"); },
+    Blob: Blob,
+    clipboard: {
+      write: function () { throw new Error("should not call write"); },
+      writeText: function (t) { fallbackTexts.push(t); return Promise.resolve(); }
+    }
+  });
+  await clipFallbackAdapter.writeAsyncText(function () {
+    getTextCallsFallback += 1;
+    return Promise.resolve("fallback-summary-once");
+  });
+  let getTextCallsNoWrite = 0;
+  const noWriteTexts = [];
+  const clipTextOnlyAdapter = B.createClipboard({
+    clipboard: {
+      writeText: function (t) { noWriteTexts.push(t); return Promise.resolve(); }
+    }
+  });
+  await clipTextOnlyAdapter.writeAsyncText(function () {
+    getTextCallsNoWrite += 1;
+    return Promise.resolve("text-only-summary");
+  });
+  if (
+    getTextCallsFallback === 1 && fallbackTexts.join(",") === "fallback-summary-once"
+    && getTextCallsNoWrite === 1 && noWriteTexts.join(",") === "text-only-summary"
+  ) {
+    pass("clipboard.writeAsyncText 不支持 Promise ClipboardItem 或无 write() 时复用同一 textPromise 回退 writeText（零重复请求）");
+  } else fail("clipboard.writeAsyncText 回退路径异常：" + JSON.stringify({ getTextCallsFallback: getTextCallsFallback, fallbackTexts: fallbackTexts, getTextCallsNoWrite: getTextCallsNoWrite, noWriteTexts: noWriteTexts }));
+
+  /* logs-actions + home-controller 完整业务单元测试（懒加载 / 乱序丢弃 / 非乐观上限保存+重读 / 清空与 409 / 复制成功与失败分离 / 非本机拦截 / destroy） */
+  const logsWorld = createWorld();
+  logsWorld.serverConfig = {
+    ok: true,
+    ui_theme: "light",
+    audio_input_device: "",
+    polish_enabled: true,
+    custom_keywords: [],
+    translate_lang_pair: "zh-en",
+    translate_auto_enabled: true,
+    log_max_lines: 2000,
+    hotkey_voice: "ctrl+alt+z",
+    hotkey_screenshot: "ctrl+alt+x",
+    hotkey_ocr: "ctrl+alt+o",
+    hotkey_repeat: "ctrl+alt+r",
+    hotkey_annotate: "ctrl+alt+a",
+    autostart_enabled: false
+  };
+  logsWorld.delayRead = false;
+  logsWorld.pendingReads = [];
+  logsWorld.delayCapPost = false;
+  logsWorld.pendingCapPosts = [];
+  logsWorld.delayThemePost = false;
+  logsWorld.pendingThemePosts = [];
+  logsWorld.failClear409 = false;
+  logsWorld.failSummary = false;
+  logsWorld.delayAbout = false;
+  logsWorld.pendingAbouts = [];
+  logsWorld.appLines = [
+    { line_no: 1, level: "info", text: "boot ok token=***" },
+    { line_no: 2, level: "warn", text: "warn line" }
+  ];
+  logsWorld.serverLines = [{ line_no: 1, level: "info", text: "server ok" }];
+  logsWorld.asrLines = [{ line_no: 1, level: "info", text: "asr ok" }];
+  logsWorld.routes.push(
+    {
+      path: "/api/setup/check",
+      handler: function (_rec, res) {
+        return res(200, {
+          ok: true,
+          session_type: "x11",
+          asr: { model_name: "Qwen3-ASR-1.7B", status: "ready", weights_present: true, sidecar_running: true, message: "" },
+          ollama: { model_name: "qwen3.5:4b", installed: true, running: true, version: "0.40.16", model_status: "ready", message: "" },
+          capabilities: [],
+          components: [],
+          install_all: { state: "done", current: null, steps: [] }
+        });
+      }
+    },
+    {
+      method: "GET",
+      path: "/api/v1/config",
+      handler: function (_rec, res) { return res(200, Object.assign({}, logsWorld.serverConfig)); }
+    },
+    {
+      method: "POST",
+      path: "/api/v1/config",
+      handler: function (rec, res) {
+        const body = JSON.parse(rec.body || "{}");
+        if (logsWorld.delayThemePost && "ui_theme" in body) {
+          return new Promise(function (resolve) {
+            logsWorld.pendingThemePosts.push(function () {
+              Object.assign(logsWorld.serverConfig, body);
+              resolve(res(200, Object.assign({}, logsWorld.serverConfig)));
+            });
+          });
+        }
+        if (logsWorld.delayCapPost && "log_max_lines" in body) {
+          return new Promise(function (resolve) {
+            logsWorld.pendingCapPosts.push({
+              cap: body.log_max_lines,
+              resolveOk: function () {
+                logsWorld.serverConfig.log_max_lines = body.log_max_lines;
+                resolve(res(200, Object.assign({}, logsWorld.serverConfig)));
+              }
+            });
+          });
+        }
+        Object.assign(logsWorld.serverConfig, body);
+        return res(200, Object.assign({}, logsWorld.serverConfig));
+      }
+    },
+    { path: "/api/v1/history", handler: function (_rec, res) { return res(200, { ok: true, records: [], total: 0, skipped_malformed: 0 }); } },
+    { path: "/api/v1/lan-access", handler: function (_rec, res) { return res(200, { ok: true, port: 17945, token: "tok", token_masked: "t***k", entries: [], message: "" }); } },
+    { path: "/api/v1/audio-inputs", handler: function (_rec, res) { return res(200, { ok: true, default_device: null, devices: [] }); } },
+    {
+      method: "GET",
+      match: function (url) { return /\/api\/v1\/logs\/diagnostic-summary(\?|$)/.test(url); },
+      handler: function (_rec, res) {
+        if (logsWorld.failSummary) return res(500, { ok: false, error: "logs_io", message: "无法生成排障汇总" });
+        return res(200, { ok: true, generated_at: "2026-11-23T10:00:00Z", log_max_lines: logsWorld.serverConfig.log_max_lines, truncated: false, included_files: ["app.log"], text: "=== Diagnostic Summary *** ===" });
+      }
+    },
+    {
+      method: "GET",
+      match: function (url) { return /\/api\/v1\/logs(\?|$)/.test(url); },
+      handler: function (_rec, res) {
+        return res(200, {
+          ok: true,
+          log_max_lines: logsWorld.serverConfig.log_max_lines,
+          allowed_max_lines: [500, 2000, 5000],
+          sources: [
+            { name: "app.log", group: "runtime", exists: true, line_count: logsWorld.appLines.length, bytes: 120, truncated: false, has_error: false, has_warn: logsWorld.appLines.length > 1, updated_at: "2026-11-23T10:00:00" },
+            { name: "server.log", group: "runtime", exists: true, line_count: logsWorld.serverLines.length, bytes: 60, truncated: false, has_error: false, has_warn: false, updated_at: "2026-11-23T10:00:00" },
+            { name: "asr.log", group: "runtime", exists: true, line_count: logsWorld.asrLines.length, bytes: 60, truncated: false, has_error: false, has_warn: false, updated_at: "2026-11-23T10:00:00" }
+          ]
+        });
+      }
+    },
+    {
+      method: "GET",
+      match: function (url) { return /\/api\/v1\/logs\/[^/?]+(\?|$)/.test(url); },
+      handler: function (rec, res) {
+        const name = decodeURIComponent(rec.url.split("/api/v1/logs/")[1].split("?")[0]);
+        const entries = name === "server.log" ? logsWorld.serverLines : (name === "asr.log" ? logsWorld.asrLines : logsWorld.appLines);
+        const payload = {
+          ok: true,
+          name: name,
+          group: "runtime",
+          exists: true,
+          max_lines: logsWorld.serverConfig.log_max_lines,
+          line_count: entries.length,
+          bytes: entries.length * 40,
+          truncated: false,
+          has_error: false,
+          has_warn: false,
+          updated_at: "2026-11-23T10:00:00",
+          entries: entries.slice()
+        };
+        if (logsWorld.delayRead) {
+          return new Promise(function (resolve) {
+            logsWorld.pendingReads.push({ name: name, resolve: function () { resolve(res(200, payload)); } });
+          });
+        }
+        return res(200, payload);
+      }
+    },
+    {
+      method: "DELETE",
+      match: function (url) { return /\/api\/v1\/logs\/[^/?]+(\?|$)/.test(url); },
+      handler: function (rec, res) {
+        const name = decodeURIComponent(rec.url.split("/api/v1/logs/")[1].split("?")[0]);
+        if (logsWorld.failClear409) {
+          return res(409, { ok: false, error: "conflict", message: "安装任务运行中，暂不可清空" });
+        }
+        if (name === "app.log") logsWorld.appLines = [];
+        if (name === "server.log") logsWorld.serverLines = [];
+        return res(200, { ok: true, name: name, cleared: true, bytes_before: 80 });
+      }
+    },
+    {
+      method: "GET",
+      path: "/api/v1/about",
+      handler: function (_rec, res) {
+        const payload = {
+          ok: true,
+          app_name: "Voice Studio",
+          version: "3.4.6",
+          summary: "本地语音与翻译工作台",
+          os_name: "linux",
+          platform_detail: "Ubuntu 24.04",
+          session_type: "x11",
+          python_version: "3.12.3",
+          run_mode: "source",
+          asr_variant: "cuda",
+          asr_detail: "NVIDIA GPU",
+          asr_model: "Qwen3-ASR-1.7B",
+          ollama_model: "qwen3.5:4b",
+          ollama_version: "0.40.16",
+          data_root: "/var/lib/ovi",
+          logs_dir: "/var/lib/ovi/logs",
+          config_root: "/etc/ovi",
+          license_title: "AGPL-3.0 + 商业授权",
+          license_note: "个人免费",
+          links: {
+            repo_url: "https://github.com/jackche8/voice-input",
+            pages_url: "https://jackche8.github.io/voice-input/",
+            releases_url: "https://github.com/jackche8/voice-input/releases",
+            issues_url: "https://github.com/jackche8/voice-input/issues"
+          }
+        };
+        if (logsWorld.delayAbout) {
+          return new Promise(function (resolve) {
+            logsWorld.pendingAbouts.push(function (overrideVersion) {
+              const p = Object.assign({}, payload);
+              if (overrideVersion) p.version = overrideVersion;
+              resolve(res(200, p));
+            });
+          });
+        }
+        return res(200, payload);
+      }
+    }
+  );
+  const logsClip = { texts: [], failNext: false };
+  const logsCtl = B.createHomeController({
+    client: B.createHttp({ catalog: catalog, context: localCtx, fetch: logsWorld.fetch, origin: "https://127.0.0.1:17945" }),
+    context: localCtx,
+    catalog: catalog,
+    clipboard: B.createClipboard({
+      clipboard: {
+        writeText: function (t) {
+          if (logsClip.failNext) {
+            logsClip.failNext = false;
+            return Promise.reject(new Error("剪贴板权限被拒绝"));
+          }
+          logsClip.texts.push(t);
+          return Promise.resolve();
+        }
+      }
+    })
+  });
+  const logsView = fakeView(catalogCtx.V3.defaults.homeState());
+  logsCtl.bind(logsView);
+
+  /* 1. loadAll() 严禁急切请求 /api/v1/logs 或 /api/v1/about */
+  await logsCtl.start();
+  const eagerLogCalls = logsWorld.calls.filter(function (c) { return c.url.indexOf("/logs") >= 0 || c.url.indexOf("/about") >= 0; });
+  if (
+    eagerLogCalls.length === 0
+    && logsView.getState().log_max_lines === 2000
+    && logsView.getState().logs.phase === "idle"
+    && logsView.getState().about.phase === "idle"
+  ) {
+    pass("loadAll() 仅加载核心配置 log_max_lines=2000，严禁急切请求 logs/about（保持懒加载）");
+  } else fail("loadAll() 误急切请求 logs/about：" + JSON.stringify(eagerLogCalls));
+
+  /* 2. onSelectPanel("logs") 懒加载来源表与当前日志 */
+  await logsCtl.hooks.onSelectPanel({ panel: "logs" });
+  const logsAfterEnter = logsView.getState().logs;
+  if (
+    logsAfterEnter.phase === "ready"
+    && logsAfterEnter.activeFile === "app.log"
+    && logsAfterEnter.sources.length === 3
+    && logsAfterEnter.entries.length === 2
+  ) {
+    pass("onSelectPanel('logs') 懒加载来源列表与 app.log 内容");
+  } else fail("onSelectPanel('logs') 懒加载异常：" + JSON.stringify(logsAfterEnter));
+
+  /* 3. 快速切源乱序返回丢弃旧响应（logReadReqId + activeFile） */
+  logsWorld.delayRead = true;
+  const readSlowServer = logsCtl.hooks.onSelectLogSource({ name: "server.log" });
+  const readFastAsr = logsCtl.hooks.onSelectLogSource({ name: "asr.log" });
+  const pSrv = logsWorld.pendingReads.shift();
+  const pAsr = logsWorld.pendingReads.shift();
+  pAsr.resolve();
+  await readFastAsr;
+  pSrv.resolve();
+  await readSlowServer;
+  logsWorld.delayRead = false;
+  if (
+    logsView.getState().logs.activeFile === "asr.log"
+    && logsView.getState().logs.entries.length === 1
+    && logsView.getState().logs.entries[0].text === "asr ok"
+  ) {
+    pass("快速切源乱序返回时 logReadReqId 丢弃滞后的 server.log 响应，保留最新 asr.log");
+  } else fail("快速切源防竞态失效：" + JSON.stringify(logsView.getState().logs));
+
+  /* 4. onChangeLogMaxLines 非乐观保存 + 乱序丢弃 + 回读后立刻重读当前日志 + 继承 inFlightThemeWrites 保护 */
+  logsWorld.delayCapPost = true;
+  const callsBeforeCap = logsWorld.calls.length;
+  const capReq1 = logsCtl.hooks.onChangeLogMaxLines({ log_max_lines: 5000 });
+  const duringCap = logsView.getState();
+  const capReq2 = logsCtl.hooks.onChangeLogMaxLines({ log_max_lines: 500 });
+  const c1 = logsWorld.pendingCapPosts.shift();
+  const c2 = logsWorld.pendingCapPosts.shift();
+  c2.resolveOk();
+  await capReq2;
+  c1.resolveOk();
+  await capReq1;
+  logsWorld.delayCapPost = false;
+  const callsAfterCap = logsWorld.calls.slice(callsBeforeCap);
+  const rereadAfterCap = callsAfterCap.some(function (c) { return c.method === "GET" && /\/api\/v1\/logs\/asr\.log/.test(c.url); });
+  if (
+    duringCap.logs.savingCap === true && duringCap.log_max_lines === 2000 && duringCap.logs.log_max_lines === 2000
+    && logsView.getState().log_max_lines === 500 && logsView.getState().logs.log_max_lines === 500
+    && logsView.getState().logs.capSaved === true && logsView.getState().logs.savingCap === false
+    && logsView.getState().logs.max_lines === 500 && rereadAfterCap
+  ) {
+    pass("onChangeLogMaxLines 非乐观持久化、丢弃旧乱序请求，并在回读后立刻重读来源与当前日志");
+  } else fail("onChangeLogMaxLines 行为异常：" + JSON.stringify({ duringCap: duringCap.logs.log_max_lines, after: logsView.getState().logs, rereadAfterCap: rereadAfterCap }));
+
+  /* 验证继承 setupActions inFlightThemeWrites 保护：主题写未完成时并发改 log_max_lines 不闪回旧主题 */
+  logsWorld.delayThemePost = true;
+  const themeWriteInFlight = logsCtl.hooks.onToggleTheme({ theme: "dark" });
+  await logsCtl.hooks.onChangeLogMaxLines({ log_max_lines: 2000 });
+  const themeMidCap = logsView.getState().theme;
+  logsWorld.pendingThemePosts.shift()();
+  await themeWriteInFlight;
+  logsWorld.delayThemePost = false;
+  if (themeMidCap === "dark" && logsView.getState().theme === "dark") {
+    pass("onChangeLogMaxLines 复用 setupActions.saveConfig，继承 inFlightThemeWrites 并发主题防闪回保护");
+  } else fail("onChangeLogMaxLines 并发主题防闪回失效：" + JSON.stringify({ themeMidCap: themeMidCap, final: logsView.getState().theme }));
+
+  /* 5. onClearCurrentLog：409 冲突保留原文写 copyError；成功后清空并刷新且保留已清空提示 */
+  await logsCtl.hooks.onSelectLogSource({ name: "app.log" });
+  logsWorld.failClear409 = true;
+  await logsCtl.hooks.onClearCurrentLog({ name: "app.log" });
+  const afterClear409 = logsView.getState().logs;
+  logsWorld.failClear409 = false;
+  await logsCtl.hooks.onClearCurrentLog({ name: "app.log" });
+  const afterClearOk = logsView.getState().logs;
+  if (
+    afterClear409.clearing === false && afterClear409.copyOk === "" && /冲突|安装任务/.test(afterClear409.copyError || "") && afterClear409.entries.length === 2
+    && afterClearOk.clearing === false && afterClearOk.phase === "empty" && afterClearOk.entries.length === 0 && /已清空 app\.log/.test(afterClearOk.copyOk || "") && afterClearOk.copyError === ""
+  ) {
+    pass("onClearCurrentLog 409 冲突写 copyError 保原文，成功后清空并刷新且保留已清空 copyOk");
+  } else fail("onClearCurrentLog 行为异常：" + JSON.stringify({ afterClear409: afterClear409, afterClearOk: afterClearOk }));
+
+  /* 6. copyCurrentLog / copyDiagnosticSummary / about / copyAboutInfo 的 copyOk 与 copyError 严格分离 */
+  await logsCtl.hooks.onSelectLogSource({ name: "server.log" });
+  await logsCtl.hooks.onCopyCurrentLog({ name: "server.log", text: "server ok" });
+  const logCopyOkState = Object.assign({}, logsView.getState().logs);
+  logsClip.failNext = true;
+  await logsCtl.hooks.onCopyCurrentLog({ name: "server.log", text: "server ok" });
+  const logCopyErrState = Object.assign({}, logsView.getState().logs);
+  await logsCtl.hooks.onCopyDiagnosticSummary();
+  const sumOkState = Object.assign({}, logsView.getState().logs);
+  logsWorld.failSummary = true;
+  await logsCtl.hooks.onCopyDiagnosticSummary();
+  const sumErrState = Object.assign({}, logsView.getState().logs);
+  logsWorld.failSummary = false;
+  if (
+    /已复制 server\.log/.test(logCopyOkState.copyOk) && logCopyOkState.copyError === ""
+    && logCopyErrState.copyOk === "" && /剪贴板权限被拒绝/.test(logCopyErrState.copyError)
+    && /已复制排障汇总/.test(sumOkState.copyOk) && sumOkState.copyError === "" && logsClip.texts[logsClip.texts.length - 1] === "=== Diagnostic Summary *** ==="
+    && sumErrState.copyOk === "" && /日志读写失败|无法生成排障汇总/.test(sumErrState.copyError)
+  ) {
+    pass("onCopyCurrentLog 与 onCopyDiagnosticSummary 严格分离 copyOk 与 copyError（失败透传后端 ApiError）");
+  } else fail("日志复制反馈分离异常：" + JSON.stringify({ logCopyOkState: logCopyOkState, logCopyErrState: logCopyErrState, sumOkState: sumOkState, sumErrState: sumErrState }));
+
+  await logsCtl.hooks.onSelectPanel({ panel: "about" });
+  const aboutLoaded = logsView.getState().about;
+  await logsCtl.hooks.onCopyAboutInfo();
+  const aboutCopyOk = Object.assign({}, logsView.getState().about);
+  const aboutClipText = logsClip.texts[logsClip.texts.length - 1] || "";
+  logsClip.failNext = true;
+  await logsCtl.hooks.onCopyAboutInfo();
+  const aboutCopyErr = Object.assign({}, logsView.getState().about);
+  if (
+    aboutLoaded.phase === "ready" && aboutLoaded.version === "3.4.6" && aboutLoaded.asr_variant === "cuda"
+    && aboutCopyOk.copyOk === "已复制环境信息" && aboutCopyOk.copyError === ""
+    && aboutClipText.indexOf("v3.4.6") >= 0 && aboutClipText.indexOf("/var/lib/ovi/logs") >= 0
+    && aboutCopyErr.copyOk === "" && /剪贴板权限被拒绝/.test(aboutCopyErr.copyError)
+  ) {
+    pass("onSelectPanel('about') 懒加载关于信息，onCopyAboutInfo 同步复制并分离 copyOk/copyError");
+  } else fail("关于面板业务动作异常：" + JSON.stringify({ aboutLoaded: aboutLoaded, aboutCopyOk: aboutCopyOk, aboutCopyErr: aboutCopyErr }));
+
+  /* 7. aboutReqId 乱序防覆盖 + destroy() 拦截在途 about 响应；非本机（lanCtx）零 fetch 拦截 logs/about */
+  logsWorld.delayAbout = true;
+  const aboutSlow = logsCtl.hooks.onRefreshAbout();
+  const aboutFast = logsCtl.hooks.onRefreshAbout();
+  const ab1 = logsWorld.pendingAbouts.shift();
+  const ab2 = logsWorld.pendingAbouts.shift();
+  ab2("3.4.6");
+  await aboutFast;
+  ab1("0.0.0-stale");
+  await aboutSlow;
+  if (logsView.getState().about.version === "3.4.6") {
+    pass("aboutReqId 丢弃滞后乱序的关于响应，保留最新版本号");
+  } else fail("aboutReqId 防乱序覆盖失效：" + JSON.stringify(logsView.getState().about));
+
+  const lateAboutP = logsCtl.hooks.onRefreshAbout();
+  logsCtl.destroy();
+  logsWorld.pendingAbouts.shift()("9.9.9-ghost");
+  await lateAboutP;
+  logsWorld.delayAbout = false;
+  if (logsView.getState().about.phase === "loading") {
+    pass("destroy() 递增 aboutReqId，丢弃销毁后迟到的关于响应");
+  } else fail("destroy() 后迟到 about 响应污染了视图：" + JSON.stringify(logsView.getState().about));
+
+  const lanLogsWorld = createWorld();
+  const lanLogsCtl = B.createHomeController({
+    client: B.createHttp({ catalog: catalog, context: lanCtx, fetch: lanLogsWorld.fetch, origin: "https://192.168.1.8:17945" }),
+    context: lanCtx,
+    catalog: catalog
+  });
+  const lanLogsView = fakeView(catalogCtx.V3.defaults.homeState());
+  lanLogsCtl.bind(lanLogsView);
+  await lanLogsCtl.hooks.onSelectPanel({ panel: "logs" });
+  await lanLogsCtl.hooks.onSelectPanel({ panel: "about" });
+  await lanLogsCtl.hooks.onCopyDiagnosticSummary();
+  if (
+    lanLogsWorld.calls.length === 0
+    && lanLogsView.getState().logs.phase === "error" && lanLogsView.getState().logs.error === "forbidden"
+    && /仅允许在本机访问/.test(lanLogsView.getState().logs.copyError || "")
+    && lanLogsView.getState().about.phase === "error" && lanLogsView.getState().about.error === "forbidden"
+  ) {
+    pass("非本机（LAN）访问 logs / about / diagnostic-summary 零 fetch 且在触碰剪贴板前显式呈报 forbidden");
+  } else fail("非本机 logs/about 拦截失效：" + JSON.stringify({ calls: lanLogsWorld.calls.length, logs: lanLogsView.getState().logs, about: lanLogsView.getState().about }));
+  lanLogsCtl.destroy();
 }
 
 function runAsgi() {
@@ -2781,11 +3286,18 @@ function runAsgi() {
         if (htmlByPage["/"] !== htmlByPage["/setup"]) {
           throw new Error("GET / 与 GET /setup 应返回完全一致的 index.html");
         }
+        for (const reqScript of ["js/confirm.js", "js/logs-panel.js", "js/about-panel.js", "js/business/logs-actions.js"]) {
+          if (htmlByPage["/"].indexOf(reqScript) < 0) {
+            throw new Error("GET / index.html 缺少脚本 " + reqScript);
+          }
+        }
         const jsRes = await fetch(origin + "/js/business/bootstrap.js");
         if (!jsRes.ok) throw new Error("/js 资源 HTTP " + jsRes.status);
+        const logsActRes = await fetch(origin + "/js/business/logs-actions.js");
+        if (!logsActRes.ok) throw new Error("/js/business/logs-actions.js HTTP " + logsActRes.status);
         const cssRes = await fetch(origin + "/css/theme.css");
         if (!cssRes.ok) throw new Error("/css 资源 HTTP " + cssRes.status);
-        /* 设置页业务层（home-controller + setup-actions）经真实路由驱动真实一键装齐顺序任务与组件登记表 */
+        /* 设置页业务层（home-controller + setup-actions + logs-actions）经真实路由驱动真实一键装齐、日志脱敏与关于信息 */
         const since = "2026-11-20T00:00:00+00:00";
         const reported = await client.call("report_components_api_v1_components_post", { body: { components: [
           { name: "ollama", state: "running", since: since },
@@ -2793,10 +3305,23 @@ function runAsgi() {
           { name: "server", state: "running", since: since }
         ] } });
         if (!reported || reported.ok !== true) throw new Error("组件上报未被接受");
-        const setupCtl = Bmod.window.V3Business.createHomeController({ client: client, context: context, catalog: catalog, pollInterval: 20 });
-        const setupView = fakeView();
+        const asgiClipTexts = [];
+        const asgiClip = Bmod.window.V3Business.createClipboard({
+          clipboard: {
+            writeText: function (t) { asgiClipTexts.push(String(t)); return Promise.resolve(); }
+          }
+        });
+        const setupCtl = Bmod.window.V3Business.createHomeController({ client: client, context: context, catalog: catalog, clipboard: asgiClip, pollInterval: 20 });
+        const setupView = fakeView(Bmod.window.V3.defaults.homeState());
         setupCtl.bind(setupView);
         await setupCtl.start();
+        if (setupView.getState().log_max_lines !== 2000 || setupView.getState().logs.phase !== "idle" || setupView.getState().about.phase !== "idle") {
+          throw new Error("隔离 ASGI start() 后 log_max_lines 或 logs/about 懒加载初始态异常：" + JSON.stringify({
+            cap: setupView.getState().log_max_lines,
+            logsPhase: setupView.getState().logs.phase,
+            aboutPhase: setupView.getState().about.phase
+          }));
+        }
         const comps = setupView.getState().components || [];
         if (setupView.getState().connection !== "connected" || comps.map(function (c) { return c.name + ":" + c.state; }).join(",") !== "ollama:running,asr:stopped,server:running") {
           throw new Error("设置页未读到上报的组件状态：" + JSON.stringify(comps));
@@ -2945,6 +3470,106 @@ function runAsgi() {
         const cfgAfterMicDefault = await client.call("get_config_api_v1_config_get");
         if (setupView.getState().audio_input_device !== "" || cfgAfterMicDefault.audio_input_device !== "") {
           throw new Error("隔离 ASGI 切回跟随系统默认（空串）未持久化：" + JSON.stringify({ state: setupView.getState().audio_input_device, cfg: cfgAfterMicDefault.audio_input_device }));
+        }
+        /* 真 HTTP 往返验证运行日志与关于页面：logs 9 源 / app.log 真脱敏 / log_max_lines=500 / DELETE server.log / diagnostic-summary / about */
+        await setupCtl.hooks.onSelectPanel({ panel: "logs" });
+        const asgiLogs = setupView.getState().logs;
+        const asgiSourceNames = (asgiLogs.sources || []).map(function (s) { return s.name; });
+        const asgiAppJoined = (asgiLogs.entries || []).map(function (e) { return e.text; }).join("\n");
+        if (
+          asgiLogs.phase !== "ready"
+          || asgiLogs.activeFile !== "app.log"
+          || asgiSourceNames.length !== 9
+          || asgiSourceNames.indexOf("setup-asr_download.log") < 0
+          || asgiLogs.entries.length !== 3
+          || asgiAppJoined.indexOf("ui-business-sandbox-token") >= 0
+          || asgiAppJoined.indexOf("alice:secret") >= 0
+          || asgiAppJoined.indexOf("***") < 0
+        ) {
+          throw new Error("隔离 ASGI 运行日志读取或脱敏校验失败：" + JSON.stringify({
+            phase: asgiLogs.phase,
+            sources: asgiSourceNames,
+            entries: asgiLogs.entries
+          }));
+        }
+        await setupCtl.hooks.onChangeLogMaxLines({ log_max_lines: 500 });
+        const cfgAfterCap500 = await client.call("get_config_api_v1_config_get");
+        if (
+          setupView.getState().log_max_lines !== 500
+          || setupView.getState().logs.log_max_lines !== 500
+          || setupView.getState().logs.max_lines !== 500
+          || setupView.getState().logs.capSaved !== true
+          || cfgAfterCap500.log_max_lines !== 500
+        ) {
+          throw new Error("隔离 ASGI 保存 log_max_lines=500 或立刻重读未对齐：" + JSON.stringify({
+            stateCap: setupView.getState().log_max_lines,
+            logs: setupView.getState().logs,
+            cfg: cfgAfterCap500.log_max_lines
+          }));
+        }
+        await setupCtl.hooks.onSelectLogSource({ name: "server.log" });
+        if (setupView.getState().logs.activeFile !== "server.log" || setupView.getState().logs.entries.length !== 1) {
+          throw new Error("隔离 ASGI 切换读取 server.log 异常：" + JSON.stringify(setupView.getState().logs));
+        }
+        await setupCtl.hooks.onClearCurrentLog({ name: "server.log" });
+        if (
+          setupView.getState().logs.phase !== "empty"
+          || setupView.getState().logs.entries.length !== 0
+          || !/已清空 server\.log/.test(setupView.getState().logs.copyOk || "")
+        ) {
+          throw new Error("隔离 ASGI 清空 server.log 未生效或未保留反馈：" + JSON.stringify(setupView.getState().logs));
+        }
+        const badCapRes = await fetch(origin + "/api/v1/config", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ log_max_lines: 1234 })
+        });
+        if (badCapRes.status !== 400) {
+          throw new Error("隔离 ASGI 非法 log_max_lines 应返回 400，实际 " + badCapRes.status);
+        }
+        await setupCtl.hooks.onClearCurrentLog({ name: "unknown-not-allowed.log" });
+        if (setupView.getState().logs.copyOk !== "" || !/未找到/.test(setupView.getState().logs.copyError || "")) {
+          throw new Error("隔离 ASGI 清空未知日志未呈报 404 copyError：" + JSON.stringify(setupView.getState().logs));
+        }
+        await setupCtl.hooks.onCopyDiagnosticSummary();
+        const asgiSummaryText = asgiClipTexts[asgiClipTexts.length - 1] || "";
+        if (
+          !/已复制排障汇总/.test(setupView.getState().logs.copyOk || "")
+          || setupView.getState().logs.copyError !== ""
+          || !asgiSummaryText
+          || asgiSummaryText.indexOf("ui-business-sandbox-token") >= 0
+          || asgiSummaryText.indexOf("alice:secret") >= 0
+          || asgiSummaryText.indexOf("***") < 0
+        ) {
+          throw new Error("隔离 ASGI 复制排障汇总或脱敏失败：" + JSON.stringify({
+            copyOk: setupView.getState().logs.copyOk,
+            copyError: setupView.getState().logs.copyError,
+            sample: asgiSummaryText.slice(0, 200)
+          }));
+        }
+        await setupCtl.hooks.onSelectPanel({ panel: "about" });
+        const directAbout = await client.call("get_about_api_v1_about_get");
+        const asgiAbout = setupView.getState().about;
+        if (
+          asgiAbout.phase !== "ready"
+          || !/^\d+\.\d+\.\d+/.test(asgiAbout.version || "")
+          || asgiAbout.version !== directAbout.version
+          || !asgiAbout.links
+          || !asgiAbout.links.repo_url
+          || !asgiAbout.links.pages_url
+          || !asgiAbout.links.releases_url
+          || !asgiAbout.links.issues_url
+        ) {
+          throw new Error("隔离 ASGI 关于页面信息与服务端契约不一致：" + JSON.stringify({ asgiAbout: asgiAbout, direct: directAbout }));
+        }
+        await setupCtl.hooks.onCopyAboutInfo();
+        const asgiAboutClip = asgiClipTexts[asgiClipTexts.length - 1] || "";
+        if (
+          setupView.getState().about.copyOk !== "已复制环境信息"
+          || setupView.getState().about.copyError !== ""
+          || asgiAboutClip.indexOf(asgiAbout.version) < 0
+        ) {
+          throw new Error("隔离 ASGI 复制环境信息失败：" + JSON.stringify({ about: setupView.getState().about, clip: asgiAboutClip }));
         }
         setupCtl.destroy();
         const lan = await client.call("lan_access_api_v1_lan_access_get");

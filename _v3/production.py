@@ -19,7 +19,7 @@ import httpx
 from _asr import AsrSidecarClient
 from _asr_provider import SidecarStreamProvider
 from _audio_codec import decode_audio_to_pcm16k
-from _config import ConfigStore, migrate_to_product_config
+from _config import ConfigStore, migrate_to_product_config, read_log_max_lines
 from _contracts import (
     DEFAULT_OLLAMA_BASE_URL,
     DEFAULT_TRANSLATE_LANG_PAIR,
@@ -43,6 +43,7 @@ from _jobs import JobStore
 from _jobs_service import JobsService
 from _linux.conflicts import scan_hotkey_conflicts
 from _linux.evdev_keyboards import readable_keyboard_paths
+from _logs import LogService
 from _ocr import image_to_text, list_tesseract_languages
 from _ocr_layout import extract_ocr_layout
 from _ollama import OllamaClient
@@ -58,6 +59,7 @@ from _utterance import UtteranceService
 from _v3.auth import AuthSettings
 from _v3.component_routes import ComponentRegistry
 from _v3.lan_access import LanAccessService, list_physical_lan_ipv4
+from _v3.logs_routes import active_setup_log_names_for
 from _v3.release_download import create_release_client
 from _v3.runtime import Runtime
 from _v3.runtime_install import (
@@ -209,7 +211,7 @@ def setup_task_actions(
             worker=ASR_DOWNLOAD_WORKER,
             repo_id=PRODUCT_ASR_MODEL,
             model_dir=paths.asr_model_dir,
-            log_path=paths.logs / "setup-asr-download.log",
+            log_path=None,
             env=download_env,
             popen=adapters.popen,
         ),
@@ -270,6 +272,8 @@ def _setup_service(
     config: ConfigStore,
     components: ComponentRegistry,
     events: EventBus | None = None,
+    cached_hardware: CachedHardwareProbe | None = None,
+    raw_hardware_probe: Callable[[], object] | None = None,
 ) -> SetupService:
     ollama_probe = _ollama_probe(paths, endpoints, adapters, config)
 
@@ -306,16 +310,18 @@ def _setup_service(
             hotkey_conflicts_capability(hotkey_scan),
         ]
 
-    def raw_hardware_probe():
-        return probe_asr_hardware(
-            paths.os_name,
-            platform.machine(),
-            run=adapters.run,
-            which=adapters.which,
-            environ=adapters.environ,
-        )
+    if raw_hardware_probe is None:
+        def raw_hardware_probe():
+            return probe_asr_hardware(
+                paths.os_name,
+                platform.machine(),
+                run=adapters.run,
+                which=adapters.which,
+                environ=adapters.environ,
+            )
 
-    cached_hardware = CachedHardwareProbe(raw_hardware_probe)
+    if cached_hardware is None:
+        cached_hardware = CachedHardwareProbe(raw_hardware_probe)
     probes = SetupProbes(
         session=lambda: session_type(adapters.environ, os_name=paths.os_name),
         ollama=ollama_probe,
@@ -332,6 +338,7 @@ def _setup_service(
         owner_pid=os.getppid(),  # 看护层拉起的服务端的父进程即应用主进程（macOS 为随其退出的包装进程）
         environ=adapters.environ,
         popen=adapters.popen,
+        log_max_lines=lambda: read_log_max_lines(paths.config),
     )
     facts = SequenceFacts(
         ollama_installed=paths.ollama_binary.is_file,
@@ -424,6 +431,38 @@ def compose_production_runtime(
     list_audio_inputs = adapters.list_audio_inputs or (
         lambda: list_audio_input_devices(refresh=True, os_name=paths.os_name)
     )
+
+    def raw_hardware_probe():
+        return probe_asr_hardware(
+            paths.os_name,
+            platform.machine(),
+            run=adapters.run,
+            which=adapters.which,
+            environ=adapters.environ,
+        )
+
+    cached_hardware = CachedHardwareProbe(raw_hardware_probe)
+    setup = _setup_service(
+        paths,
+        endpoints,
+        adapters,
+        config,
+        components,
+        events=events,
+        cached_hardware=cached_hardware,
+        raw_hardware_probe=raw_hardware_probe,
+    )
+    logs = LogService(
+        paths=paths,
+        get_log_max_lines=lambda: read_log_max_lines(paths.config),
+        get_secret_tokens=lambda: (token,),
+        get_components=components.snapshot,
+        get_active_setup_logs=lambda: active_setup_log_names_for(setup),
+        get_hardware_detail=lambda: cached_hardware.get().detail,
+        get_ollama_version=lambda: endpoints.ollama_version,
+        get_ollama_model=lambda: _model(config),
+        session_type=session_type(adapters.environ, os_name=paths.os_name),
+    )
     return Runtime(
         config=config,
         history=history,
@@ -440,10 +479,12 @@ def compose_production_runtime(
         ocr_layout=extract_ocr_layout,
         decode_audio=decode_audio_to_pcm16k,
         stream_provider=SidecarStreamProvider(asr),
-        setup=_setup_service(paths, endpoints, adapters, config, components, events=events),
+        setup=setup,
         components=components,
         lan=LanAccessService(token=token, list_ips=list_ips, port=endpoints.port),
         list_audio_inputs=list_audio_inputs,
+        logs=logs,
+        about=logs.about,
         upload_tmp=paths.upload_tmp,
     )
 

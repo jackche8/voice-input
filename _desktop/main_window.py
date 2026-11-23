@@ -48,6 +48,7 @@ class MainWindow:
         on_failed: Callable[[str], None],
         spawn: Callable[..., ChildHandle] = spawn_child,
         close_wait_s: float = CLOSE_WAIT_S,
+        log_max_lines: Callable[[], int | None] | None = None,
     ) -> None:
         self._paths = paths
         self._origin = origin
@@ -55,6 +56,7 @@ class MainWindow:
         self._on_failed = on_failed
         self._spawn = spawn
         self._close_wait_s = close_wait_s
+        self._log_max_lines = log_max_lines
         self._log_path = paths.logs / "window.log"
         self._lock = threading.Lock()
         self._handle: ChildHandle | None = None
@@ -65,8 +67,11 @@ class MainWindow:
         with self._lock:
             if self._handle is not None and self._handle.poll() is None and self._send(Show(route)):
                 return
+            spawn_kwargs: dict[str, object] = {}
+            if self._log_max_lines is not None:
+                spawn_kwargs["max_lines"] = self._log_max_lines()
             self._handle = self._spawn(window_command(self._paths, self._origin, route), cwd=self._paths.program_root,
-                                       env=self._environ, log_path=self._log_path, stdin_pipe=True)
+                                       env=self._environ, log_path=self._log_path, stdin_pipe=True, **spawn_kwargs)
             handle = self._handle
         threading.Thread(target=self._watch, args=(handle,), name="main-window-watch", daemon=True).start()
 

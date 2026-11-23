@@ -205,7 +205,11 @@ def access_mode(method: str, path: str) -> str:
         "/api/v1/audio-inputs",
         "/api/v1/events",
         "/api/v1/events/platform",
+        "/api/v1/logs",
+        "/api/v1/about",
     }:
+        return "local"
+    if path.startswith("/api/v1/logs/"):
         return "local"
     if path.startswith("/api/v1/recognize/"):
         return "local"

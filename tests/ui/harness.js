@@ -26,6 +26,14 @@
     const audioInputChanges = [];
     let audioInputRefreshes = 0;
     const setupActions = [];
+    const logSourceSelects = [];
+    const logRefreshes = [];
+    const logCapChanges = [];
+    const logClears = [];
+    const logCurrentCopies = [];
+    let logSummaryCopies = 0;
+    let aboutCopies = 0;
+    let aboutRefreshes = 0;
     const hooks = {
       onCopy: function (payload) { copies.push(payload); },
       onConfirmResendChoice: function (payload) { confirms.push(payload); },
@@ -48,10 +56,18 @@
       onRefreshAudioInputs: function () { audioInputRefreshes += 1; },
       onInstallAll: function () { setupActions.push("install-all"); },
       onRetryComponent: function (name) { setupActions.push("retry:" + name); },
-      onToggleAutostart: function (enabled) { setupActions.push("autostart:" + enabled); }
+      onToggleAutostart: function (enabled) { setupActions.push("autostart:" + enabled); },
+      onSelectLogSource: function (payload) { logSourceSelects.push(payload); },
+      onRefreshLogs: function (payload) { logRefreshes.push(payload); },
+      onChangeLogMaxLines: function (payload) { logCapChanges.push(payload); },
+      onClearCurrentLog: function (payload) { logClears.push(payload); },
+      onCopyCurrentLog: function (payload) { logCurrentCopies.push(payload); },
+      onCopyDiagnosticSummary: function () { logSummaryCopies += 1; },
+      onCopyAboutInfo: function () { aboutCopies += 1; },
+      onRefreshAbout: function () { aboutRefreshes += 1; }
     };
 
-    /* ---------- 1. 方案 C 统一工作台 (#home-root：5 面板 + 内置 6 标签设置) ---------- */
+    /* ---------- 1. 方案 C 统一工作台 (#home-root：7 面板 + 内置 6 标签设置) ---------- */
     const homeRoot = document.getElementById("home-root");
     const home = V3.home.mount(homeRoot, {}, hooks);
     const homeInitText = homeRoot.innerText;
@@ -75,7 +91,11 @@
     assert(!!homeRoot.querySelector('kbd[data-hotkey-badge="hotkey_ocr"]'), "主页侧栏展示第四热键 hotkey_ocr");
     assert(!!homeRoot.querySelector('kbd[data-hotkey-badge="hotkey_annotate"]'), "主页侧栏展示第五热键 hotkey_annotate");
     assert(!homeRoot.querySelector('a[href="/setup"]'), "主页侧栏无 /setup 跳页外链");
-    assert(homeRoot.querySelectorAll('button[data-panel]').length === 5, "主页侧栏提供 5 项页内切换面板");
+    const navPanelIds = Array.prototype.slice.call(homeRoot.querySelectorAll('button[data-panel]')).map(function (b) { return b.dataset.panel; });
+    assert(
+      navPanelIds.length === 7 && navPanelIds.join(",") === "translate,ocr,history,lan,setup,logs,about",
+      "主页侧栏提供 7 项页内切换面板（translate,ocr,history,lan,setup,logs,about）"
+    );
     assert(!!homeRoot.querySelector('button[data-panel="setup"]'), "主页侧栏提供页内设置按钮");
 
     /* 切到内置设置面板：校验未连接默认态、6 子标签与原地切换主题 */
@@ -1556,6 +1576,361 @@
 
     childObserver.disconnect();
     progHome.destroy();
+
+    /* ---------- 7. 模板 C 运行日志面板（9 胶囊 / 4 态 / 零 innerHTML / 原始行号 / 持久顶栏 / V3.mountConfirm / copyOk vs copyError） ---------- */
+    const logsHome = V3.home.mount(homeRoot, { activePanel: "logs" }, hooks);
+    const logsPane = homeRoot.querySelector('[data-panel-view="logs"]');
+    const logsHeadWrap0 = homeRoot.querySelector('[data-role="logs-head-actions"]');
+    const capBtns0 = Array.prototype.slice.call(homeRoot.querySelectorAll('[data-role="log-cap-seg"] button[data-cap]'));
+    assert(
+      !!logsHeadWrap0 && capBtns0.map(function (b) { return b.dataset.cap; }).join(",") === "500,2000,5000",
+      "运行日志顶栏挂载 500/2000/5000 保留上限胶囊"
+    );
+    assert(
+      capBtns0.every(function (b) { return !b.classList.contains("on") && b.disabled; })
+        && logsPane.innerText.indexOf("2000") === -1,
+      "未连接且 log_max_lines=null 时绝不伪造 2000 激活态且全部上限按钮禁用"
+    );
+    assert(
+      logsPane.querySelector('[data-role="log-source-pills"]').hidden === true,
+      "未读取来源列表时隐藏来源胶囊条（不渲染空壳分组）"
+    );
+
+    /* 注入 9 份规范日志文件 + 正常态日志行（含 *** 脱敏、WARN/ERROR 与 <span class="raw">a & b</span>） */
+    logsHome.setState(V3Fixtures.logsConnected);
+    const runtimePills = Array.prototype.slice.call(logsPane.querySelectorAll('[data-log-group="runtime"] button[data-file]')).map(function (b) { return b.dataset.file; });
+    const setupPills = Array.prototype.slice.call(logsPane.querySelectorAll('[data-log-group="setup"] button[data-file]')).map(function (b) { return b.dataset.file; });
+    assert(
+      runtimePills.join(",") === "app.log,server.log,window.log,asr.log,ollama.log"
+        && setupPills.join(",") === "setup-asr_runtime_install.log,setup-ollama_install.log,setup-ollama_pull.log,setup-asr_download.log",
+      "来源胶囊精确展示两排 9 份规范日志（第 9 份为下划线 setup-asr_download.log）"
+    );
+    const appPill = logsPane.querySelector('button[data-file="app.log"]');
+    const ollamaInstallPill = logsPane.querySelector('button[data-file="setup-ollama_install.log"]');
+    const asrDlPill = logsPane.querySelector('button[data-file="setup-asr_download.log"]');
+    assert(
+      appPill.classList.contains("on") && appPill.getAttribute("aria-selected") === "true"
+        && appPill.querySelector(".dot").classList.contains("err")
+        && ollamaInstallPill.querySelector(".pill-count").textContent === "0"
+        && !ollamaInstallPill.querySelector(".dot").classList.contains("ok"),
+      "来源胶囊正确展示激活态、错误/警告状态点与不存在文件 0 行计数"
+    );
+
+    const logSrcCountBefore = logSourceSelects.length;
+    asrDlPill.click();
+    assert(
+      logSourceSelects.length === logSrcCountBefore + 1 && logSourceSelects[logSourceSelects.length - 1].name === "setup-asr_download.log",
+      "点击来源胶囊触发 onSelectLogSource({ name })"
+    );
+
+    /* 非乐观上限切换 + 持久 headActionsEl 经受 1s setState 轮询零重挂 */
+    const cap2000Btn = homeRoot.querySelector('button[data-cap="2000"]');
+    const cap5000Btn = homeRoot.querySelector('button[data-cap="5000"]');
+    assert(cap2000Btn.classList.contains("on") && !cap2000Btn.disabled && !cap5000Btn.classList.contains("on"), "回读 log_max_lines=2000 后仅 2000 激活且可点");
+    const capChangeBefore = logCapChanges.length;
+    cap5000Btn.click();
+    assert(
+      logCapChanges.length === capChangeBefore + 1
+        && logCapChanges[logCapChanges.length - 1].log_max_lines === 5000
+        && cap2000Btn.classList.contains("on") && !cap5000Btn.classList.contains("on"),
+      "点击 5000 上限仅派发 onChangeLogMaxLines 且不做乐观激活翻转"
+    );
+
+    const headContainer = homeRoot.querySelector(".studio-actions");
+    const headObserver = new MutationObserver(function () {});
+    headObserver.observe(headContainer, { childList: true });
+    const linesWrapBeforePoll = logsPane.querySelector('[data-role="log-lines"]');
+    logsHome.setState({ asr: { message: "1s-poll-tick" }, log_max_lines: 5000, logs: { capSaved: true } });
+    const headMutations = headObserver.takeRecords();
+    headObserver.disconnect();
+    assert(
+      headMutations.length === 0
+        && homeRoot.querySelector('[data-role="logs-head-actions"]') === logsHeadWrap0
+        && homeRoot.querySelector('button[data-cap="5000"]') === cap5000Btn
+        && cap5000Btn.classList.contains("on")
+        && !homeRoot.querySelector('[data-role="log-cap-saved"]').hidden,
+      "logs 面板下 1s setState 轮询保持持久 headActionsEl 节点身份零拆挂，并在回读后激活 5000 与已保存反馈"
+    );
+    assert(
+      logsPane.querySelector('[data-role="log-lines"]') === linesWrapBeforePoll,
+      "相同 entries 引用下 1s 轮询记忆化复用 .log-lines DOM 节点（零重绘）"
+    );
+
+    /* 零 innerHTML 搜索 span / class / < / & 永不破坏 DOM + 保留原始 1-based line_no */
+    const logFilterInput = logsPane.querySelector('input[data-role="log-filter"]');
+    const logViewport = logsPane.querySelector('[data-role="log-viewport"]');
+    assert(
+      logViewport.querySelectorAll(".log-line").length === 10
+        && logViewport.querySelectorAll(".log-redact").length >= 4
+        && logViewport.querySelectorAll(".log-line.lvl-warn").length === 1
+        && logViewport.querySelectorAll(".log-line.lvl-err").length === 1,
+      "日志视口正确渲染 10 行、*** 脱敏胶囊与 warn/error 分级底色"
+    );
+
+    logFilterInput.value = "span";
+    logFilterInput.dispatchEvent(new Event("input", { bubbles: true }));
+    const spanMatchedLines = logViewport.querySelectorAll(".log-line");
+    const spanRedact = spanMatchedLines[0] ? spanMatchedLines[0].querySelector(".log-redact") : null;
+    assert(
+      spanMatchedLines.length === 1
+        && spanMatchedLines[0].querySelector(".log-ln").textContent === "7"
+        && !!spanRedact && spanRedact.textContent === "***"
+        && spanMatchedLines[0].querySelectorAll("mark.log-hit").length === 2
+        && spanMatchedLines[0].querySelector(".log-msg").textContent.indexOf('<span class="raw">a & b</span>') !== -1
+        && !spanMatchedLines[0].querySelector("span.raw"),
+      "搜索 span 零 HTML 污染：保留原始行号 7、完整保留 span.log-redact 且原始 <span class=\"raw\"> 仅作纯文本"
+    );
+
+    logFilterInput.value = "class";
+    logFilterInput.dispatchEvent(new Event("input", { bubbles: true }));
+    const classMatchedLines = logViewport.querySelectorAll(".log-line");
+    const classRedact = classMatchedLines[0] ? classMatchedLines[0].querySelector(".log-redact") : null;
+    assert(
+      classMatchedLines.length === 1
+        && classMatchedLines[0].querySelector(".log-ln").textContent === "7"
+        && !!classRedact && classRedact.textContent === "***"
+        && classMatchedLines[0].querySelectorAll("mark.log-hit").length === 1,
+      "搜索 class 仅命中原始日志文本，绝不误伤 span.log-redact 属性"
+    );
+
+    logFilterInput.value = "&";
+    logFilterInput.dispatchEvent(new Event("input", { bubbles: true }));
+    const ampMarks = Array.prototype.slice.call(logViewport.querySelectorAll("mark.log-hit"));
+    assert(
+      logViewport.querySelectorAll(".log-line").length === 2
+        && ampMarks.length >= 3
+        && ampMarks.every(function (m) { return m.textContent === "&"; })
+        && logViewport.innerText.indexOf("&amp;") === -1,
+      "搜索 & 仅高亮字面 &，无 &amp; 实体污染"
+    );
+
+    logFilterInput.value = "<";
+    logFilterInput.dispatchEvent(new Event("input", { bubbles: true }));
+    const ltMarks = Array.prototype.slice.call(logViewport.querySelectorAll("mark.log-hit"));
+    assert(
+      logViewport.querySelectorAll(".log-line").length === 1
+        && ltMarks.length === 2
+        && ltMarks.every(function (m) { return m.textContent === "<"; })
+        && logViewport.innerText.indexOf("&lt;") === -1,
+      "搜索 < 仅高亮字面 <，无 &lt; 实体污染"
+    );
+
+    logFilterInput.value = "NO_SUCH_NEEDLE_XYZ";
+    logFilterInput.dispatchEvent(new Event("input", { bubbles: true }));
+    assert(
+      !!logViewport.querySelector('[data-role="logs-clear-filter"]')
+        && logsPane.querySelector('button[data-role="logs-copy-current"]').disabled === true,
+      "搜索零命中时显示清除关键词空态并禁用复制当前日志"
+    );
+    logViewport.querySelector('[data-role="logs-clear-filter"]').click();
+    assert(
+      logFilterInput.value === "" && logViewport.querySelectorAll(".log-line").length === 10,
+      "点击清除关键词恢复全部 10 行日志"
+    );
+
+    /* 自动换行切换仅改 class，不重建 .log-lines */
+    const linesWrapBeforeWrap = logsPane.querySelector('[data-role="log-lines"]');
+    const wrapBtn = logsPane.querySelector('button[data-role="log-toggle-wrap"]');
+    wrapBtn.click();
+    assert(
+      logViewport.classList.contains("nowrap")
+        && wrapBtn.getAttribute("aria-pressed") === "false"
+        && wrapBtn.textContent === "自动换行：关"
+        && logsPane.querySelector('[data-role="log-lines"]') === linesWrapBeforeWrap,
+      "切换自动换行仅切 .nowrap 类，不重建 .log-lines DOM"
+    );
+    wrapBtn.click();
+    assert(!logViewport.classList.contains("nowrap") && wrapBtn.getAttribute("aria-pressed") === "true", "再次点击恢复自动换行：开");
+
+    /* V3.mountConfirm 清空当前日志完整确认链路（取消不触发，确认触发一次） */
+    const clearBtn = logsPane.querySelector('button[data-role="logs-clear"]');
+    const clearCountBefore = logClears.length;
+    clearBtn.click();
+    const confirmModal1 = homeRoot.querySelector('.v3-confirm[role="dialog"]');
+    assert(
+      !!confirmModal1
+        && confirmModal1.innerText.indexOf("app.log") !== -1
+        && logClears.length === clearCountBefore,
+      "点击清空当前日志先弹出 V3.mountConfirm 确认框且未直接调用 onClearCurrentLog"
+    );
+    if (confirmModal1) confirmModal1.querySelector("button.btn:not(.primary)").click();
+    assert(
+      !homeRoot.querySelector('.v3-confirm[role="dialog"]') && logClears.length === clearCountBefore,
+      "点击取消关闭确认框且不触发 onClearCurrentLog"
+    );
+    clearBtn.click();
+    const confirmModal2 = homeRoot.querySelector('.v3-confirm[role="dialog"]');
+    if (confirmModal2) confirmModal2.querySelector("button.btn.primary").click();
+    assert(
+      !!confirmModal2
+        && !homeRoot.querySelector('.v3-confirm[role="dialog"]')
+        && logClears.length === clearCountBefore + 1
+        && logClears[logClears.length - 1].name === "app.log",
+      "点击确认清空关闭确认框并触发 onClearCurrentLog({ name: 'app.log' })"
+    );
+
+    /* 复制当前日志 / 复制排障汇总 与 copyOk(--c-ok) / copyError(--c-danger) 颜色分离 */
+    const copyCurBefore = logCurrentCopies.length;
+    const copySumBefore = logSummaryCopies;
+    logsPane.querySelector('button[data-role="logs-copy-current"]').click();
+    logsPane.querySelector('button[data-role="logs-copy-summary"]').click();
+    assert(
+      logCurrentCopies.length === copyCurBefore + 1
+        && logCurrentCopies[logCurrentCopies.length - 1].name === "app.log"
+        && logCurrentCopies[logCurrentCopies.length - 1].text.indexOf("web_input_token=***") !== -1
+        && logSummaryCopies === copySumBefore + 1,
+      "复制当前日志与复制排障汇总分别走 onCopyCurrentLog / onCopyDiagnosticSummary 回调"
+    );
+    const logsFeedback = logsPane.querySelector('[data-role="logs-copy-feedback"]');
+    logsHome.setState({ logs: { copyOk: "已复制 app.log", copyError: "" } });
+    const okColor = window.getComputedStyle(logsFeedback).color;
+    assert(
+      !logsFeedback.hidden && logsFeedback.classList.contains("saved") && logsFeedback.textContent === "已复制 app.log",
+      "copyOk 以 .saved 绿色提示显示"
+    );
+    logsHome.setState({ logs: { copyOk: "", copyError: "剪贴板写入失败" } });
+    const errColor = window.getComputedStyle(logsFeedback).color;
+    assert(
+      !logsFeedback.hidden
+        && logsFeedback.classList.contains("copy-err")
+        && logsFeedback.getAttribute("role") === "alert"
+        && logsFeedback.textContent === "剪贴板写入失败"
+        && errColor !== okColor,
+      "copyError 以 .copy-err 红色 alert 显示且颜色与 copyOk 严格分离"
+    );
+
+    /* 日志面板其余三态：loading / error / empty */
+    logsHome.setState({ logs: { phase: "loading" } });
+    const logLoadBar = logsPane.querySelector(".box-loading .progress.indeterminate");
+    const logLoadFill = logLoadBar ? logLoadBar.querySelector("i") : null;
+    assert(
+      !!logLoadBar && !!logLoadFill
+        && window.getComputedStyle(logLoadBar).width === "180px"
+        && window.getComputedStyle(logLoadFill).animationName === "v3-indeterminate"
+        && !!logsPane.querySelector(".log-skeleton"),
+      "运行日志 loading 态使用单源 .box-loading .progress.indeterminate（宽 180px）与骨架屏"
+    );
+
+    logsHome.setState({ logs: { phase: "error", error: "logs_io", message: "PermissionError: 无法打开 app.log" } });
+    const logErrBox = logsPane.querySelector(".log-viewport .box-error[role='alert']");
+    assert(
+      !!logErrBox
+        && logErrBox.innerText.indexOf("日志读写失败") !== -1
+        && logErrBox.innerText.indexOf("PermissionError") !== -1,
+      "运行日志 error 态展示 logs_io 中文标签与后端错误详情"
+    );
+    const refreshBeforeErr = logRefreshes.length;
+    logsPane.querySelector('button[data-role="logs-retry"]').click();
+    assert(logRefreshes.length === refreshBeforeErr + 1, "日志 error 态点击重试读取触发 onRefreshLogs");
+
+    logsHome.setState({ logs: { phase: "empty", entries: [], bytes: 0, error: null, message: "" } });
+    assert(
+      !!logsPane.querySelector(".log-viewport .box-empty")
+        && logsPane.innerText.indexOf("app.log 当前无日志记录") !== -1
+        && logsPane.querySelector('button[data-role="logs-clear"]').disabled === true
+        && logsPane.querySelector('button[data-role="logs-copy-current"]').disabled === true,
+      "运行日志 empty 态展示无日志提示并禁用清空与复制当前日志"
+    );
+
+    /* 切到其他面板（translate）确认其余面板 headActionsEl 仍保持动态重建，再切回 logs */
+    logsHome.setPanel("translate");
+    assert(
+      !!homeRoot.querySelector('button[data-role="translate-submit"]')
+        && !homeRoot.querySelector('[data-role="logs-head-actions"]'),
+      "切至 translate 面板时 headActionsEl 仍保持原有动态渲染"
+    );
+
+    /* ---------- 8. 模板 C 关于面板（头卡 / 9 键值行 / 5 态 ASR 变体 / 4 外链 / 清理旧 .setup-about / destroy 回收确认框） ---------- */
+    logsHome.setPanel("about");
+    const aboutPane = homeRoot.querySelector('[data-panel-view="about"]');
+    assert(!homeRoot.querySelector(".studio-actions").children.length, "关于面板顶栏 headActionsEl 保持空置");
+
+    logsHome.setState({ about: { phase: "loading" } });
+    const aboutLoadBar = aboutPane.querySelector(".box-loading .progress.indeterminate");
+    assert(
+      !!aboutLoadBar && window.getComputedStyle(aboutLoadBar).width === "180px",
+      "关于面板 loading 态使用单源 .box-loading .progress.indeterminate（宽 180px）"
+    );
+
+    logsHome.setState({ about: { phase: "error", error: "internal", message: "本地服务连接中断" } });
+    assert(
+      !!aboutPane.querySelector('.about-wrap .box-error[role="alert"]')
+        && aboutPane.innerText.indexOf("本地服务连接中断") !== -1
+        && aboutPane.innerText.indexOf("v3.4.6") === -1,
+      "关于面板 error 态展示后端错误且绝不回退为硬编码版本默认值"
+    );
+    const aboutRefBefore = aboutRefreshes;
+    aboutPane.querySelector('button[data-role="about-retry"]').click();
+    assert(aboutRefreshes === aboutRefBefore + 1, "关于面板 error 态点击重试触发 onRefreshAbout");
+
+    logsHome.setState(V3Fixtures.aboutConnected);
+    const aboutHero = aboutPane.querySelector('[data-role="about-hero"]');
+    const aboutKvRows = aboutPane.querySelectorAll('[data-role="about-kv"] .kv-table-row');
+    assert(
+      !!aboutHero
+        && aboutPane.querySelector('[data-role="about-version"]').textContent === "v3.4.6"
+        && aboutKvRows.length === 9
+        && aboutPane.innerText.indexOf("Ubuntu 24.04.1 LTS") !== -1
+        && aboutPane.innerText.indexOf("Python 3.12.3（源码运行）") !== -1
+        && aboutPane.innerText.indexOf("AGPL-3.0 + 商业授权") !== -1,
+      "关于面板渲染聚焦头卡（v3.4.6）与全部 9 行键值信息"
+    );
+
+    const aboutLinks = Array.prototype.slice.call(aboutPane.querySelectorAll('[data-role="about-links"] a.linkbtn'));
+    assert(
+      aboutLinks.length === 4
+        && aboutLinks.every(function (a) {
+          return a.getAttribute("target") === "_blank"
+            && a.getAttribute("rel") === "noopener"
+            && /^https:\/\//.test(a.getAttribute("href"))
+            && !!a.querySelector('use[href="#i-external"]');
+        }),
+      "关于面板 4 条项目外链均带 target=_blank、rel=noopener 与 #i-external 图标"
+    );
+
+    /* 5 态 ASR 变体徽章验证（cuda/mps/cpu=ok, null=warn未安装, corrupt=danger清单损坏） */
+    [
+      { variant: "cuda", cls: "ok", text: "cuda" },
+      { variant: "mps", cls: "ok", text: "mps" },
+      { variant: "cpu", cls: "ok", text: "cpu" },
+      { variant: null, cls: "warn", text: "未安装" },
+      { variant: "corrupt", cls: "danger", text: "清单损坏" }
+    ].forEach(function (tc) {
+      logsHome.setState({ about: { asr_variant: tc.variant, asr_detail: "det-" + String(tc.variant) } });
+      const b = aboutPane.querySelector('[data-role="about-asr-variant"]');
+      assert(
+        !!b && b.classList.contains(tc.cls) && b.textContent === tc.text,
+        "关于面板 asr_variant=" + String(tc.variant) + " 渲染为 badge." + tc.cls + "「" + tc.text + "」"
+      );
+    });
+
+    const aboutCopyBefore = aboutCopies;
+    aboutPane.querySelector('button[data-role="about-copy-info"]').click();
+    assert(aboutCopies === aboutCopyBefore + 1, "点击复制环境信息触发 onCopyAboutInfo");
+    logsHome.setState({ about: { copyOk: "已复制环境信息", copyError: "" } });
+    assert(
+      aboutPane.querySelector('[data-role="about-copy-feedback"]').classList.contains("saved"),
+      "关于面板 copyOk 显示绿色 .saved 反馈"
+    );
+    logsHome.setState({ about: { copyOk: "", copyError: "剪贴板被拒绝" } });
+    assert(
+      aboutPane.querySelector('[data-role="about-copy-feedback"]').classList.contains("copy-err"),
+      "关于面板 copyError 显示红色 .copy-err 反馈"
+    );
+
+    /* 验证 setup-models 已彻底删除废弃 aboutText / .setup-about */
+    logsHome.setState({ activePanel: "setup", setupTab: "models", aboutText: "obsolete-should-not-render" });
+    assert(
+      !homeRoot.querySelector(".setup-about") && homeRoot.innerText.indexOf("obsolete-should-not-render") === -1,
+      "setup-models 已彻底清理废弃 .setup-about 与 aboutText"
+    );
+
+    /* 验证 home.destroy() 同步销毁打开中的 V3.mountConfirm 对话框 */
+    logsHome.setState(Object.assign({}, V3Fixtures.logsConnected, { activePanel: "logs" }));
+    logsPane.querySelector('button[data-role="logs-clear"]').click();
+    assert(!!homeRoot.querySelector('.v3-confirm[role="dialog"]'), "销毁前确认框处于打开态");
+    logsHome.destroy();
+    assert(!homeRoot.querySelector('.v3-confirm[role="dialog"]'), "home.destroy() 同步销毁 V3.mountConfirm 对话框");
 
     window.__V3_HARNESS__ = { passes: passes, failures: failures, copies: copies, confirms: confirms };
   } catch (err) {

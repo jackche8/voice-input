@@ -23,7 +23,7 @@ from pathlib import Path
 from _atomic_file import atomic_write_bytes
 from _contracts import ErrorCode, LogicError, SetupProgress, SetupTask, SetupTaskKind, SetupTaskState
 from _paths import PROGRAM_ROOT
-from _platform.child_process import process_identity, windows_subprocess_kwargs
+from _platform.child_process import open_append_log_binary, process_identity, rotate_log, windows_subprocess_kwargs
 
 ProgressFn = Callable[[SetupProgress], None]
 SetupAction = Callable[[ProgressFn], str]
@@ -103,6 +103,7 @@ class SetupTaskManager:
         identity: Callable[[int], str | None] = process_identity,
         disk_usage=shutil.disk_usage,
         clock: Callable[[], str] = now_iso,
+        log_max_lines: Callable[[], int | None] | None = None,
     ) -> None:
         self._kinds = dict(kinds)
         self._dir = tasks_dir
@@ -116,6 +117,7 @@ class SetupTaskManager:
         self._identity = identity
         self._disk_usage = disk_usage
         self._clock = clock
+        self._log_max_lines = log_max_lines
         self._lock = threading.Lock()
         self._inflight: dict[str, tuple[SetupTask, subprocess.Popen]] = {}  # 已拉起、worker 尚未写出第一份任务文件
         self._children: list[subprocess.Popen] = []
@@ -170,7 +172,10 @@ class SetupTaskManager:
                 "--owner-pid", str(self._owner_pid), "--owner-identity", self._owner_identity or ""]
         session = windows_subprocess_kwargs(new_process_group=True, errors=None) or {"start_new_session": True}
         env = {**self._environ, "PYTHONUTF8": "1"}
-        with open(self._log_dir / f"setup-{task.kind.value}.log", "ab") as log:
+        log_path = self._log_dir / f"setup-{task.kind.value}.log"
+        max_lines = self._log_max_lines() if self._log_max_lines is not None else None
+        rotate_log(log_path, max_lines=max_lines)
+        with open_append_log_binary(log_path) as log:
             proc = self._popen(argv, cwd=str(self._cwd), env=env, stdin=subprocess.DEVNULL, stdout=log,
                                stderr=subprocess.STDOUT, close_fds=True, **session)
         self._children.append(proc)

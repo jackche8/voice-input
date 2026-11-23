@@ -44,6 +44,10 @@ REQUIRED_PATHS = {
     "/api/v1/components",
     "/api/v1/components/{name}/retry",
     "/api/v1/lan-access",
+    "/api/v1/logs",
+    "/api/v1/logs/diagnostic-summary",
+    "/api/v1/logs/{name}",
+    "/api/v1/about",
 }
 
 
@@ -69,6 +73,14 @@ def test_generated_openapi_has_real_paths_and_sse_schemas(tmp_path: Path):
         "UtteranceResendNeedsConfirmation",
         "OcrInplaceResponse",
         "OcrTextBlock",
+        "LogLineEntry",
+        "LogSourceInfo",
+        "LogSourceListResponse",
+        "LogReadResponse",
+        "LogClearResponse",
+        "DiagnosticSummaryResponse",
+        "AboutLinks",
+        "AboutInfoResponse",
     ):
         assert name in schemas, name
     events = first["paths"]["/api/v1/recognize/sessions/{session_id}/events"]["get"]
@@ -128,3 +140,16 @@ def test_openapi_security_and_errors_are_derived(tmp_path: Path):
     chunks = spec["paths"]["/api/v1/recognize/sessions/{session_id}/chunks"]["post"]
     assert "413" in chunks["responses"]
     assert "s16le" in (chunks.get("description") or "")
+
+    expected_local_ops = (
+        ("/api/v1/logs", "get", "list_logs_api_v1_logs_get"),
+        ("/api/v1/logs/diagnostic-summary", "get", "diagnostic_summary_api_v1_logs_diagnostic_summary_get"),
+        ("/api/v1/logs/{name}", "get", "read_log_api_v1_logs__name__get"),
+        ("/api/v1/logs/{name}", "delete", "clear_log_api_v1_logs__name__delete"),
+        ("/api/v1/about", "get", "get_about_api_v1_about_get"),
+    )
+    for path, method, op_id in expected_local_ops:
+        op = spec["paths"][path][method]
+        assert op.get("operationId") == op_id, (path, method, op.get("operationId"))
+        assert op.get("security") == []
+        assert "403" in op["responses"] and "413" not in op["responses"]

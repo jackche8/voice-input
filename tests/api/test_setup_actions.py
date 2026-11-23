@@ -775,3 +775,84 @@ def test_build_release_proxy_mounts_and_create_release_client(monkeypatch):
         )
     assert "urlsecret" not in exc_redact.value.message and "excsecret" not in exc_redact.value.message
     assert "http://***@127.0.0.1:7890" in exc_redact.value.message
+
+
+def test_asr_download_none_log_path_concurrent_stderr_tee_and_tail(tmp_path, monkeypatch):
+    python = tmp_path / "venv" / "bin" / "python"
+    python.parent.mkdir(parents=True)
+    python.write_text("")
+    model_dir = tmp_path / "models" / "Qwen3-ASR-1.7B"
+
+    class _PipeProc:
+        def __init__(self, *, rc: int, stderr_text: str | None, write_weights: bool) -> None:
+            self._rc = rc
+            self._write_weights = write_weights
+            self._polls = 0
+            self.returncode = None
+            self.stdout = io.StringIO(json.dumps({"total_bytes": 100}) + "\n")
+            if stderr_text is not None:
+                self.stderr = io.StringIO(stderr_text)
+
+        def poll(self):
+            self._polls += 1
+            if self._polls < 2:
+                return None
+            if self._write_weights:
+                model_dir.mkdir(parents=True, exist_ok=True)
+                (model_dir / "config.json").write_text("{}")
+                (model_dir / "model.safetensors").write_bytes(b"1")
+            self.returncode = self._rc
+            return self._rc
+
+    # 1) log_path=None：stderr=subprocess.PIPE 并发排空并安全 tee 到 sys.stderr
+    captured_err = io.StringIO()
+    monkeypatch.setattr("sys.stderr", captured_err)
+    seen_kw: list[dict] = []
+
+    def popen_ok(_argv, **kw):
+        seen_kw.append(dict(kw))
+        return _PipeProc(rc=0, stderr_text="hf progress line\n", write_weights=True)
+
+    ok_action = asr_download_action(
+        python=python,
+        worker=Path("/w.py"),
+        repo_id="Qwen/Qwen3-ASR-1.7B",
+        model_dir=model_dir,
+        log_path=None,
+        env={},
+        popen=popen_ok,
+        sleep=lambda _s: None,
+    )
+    assert "已下载" in ok_action(lambda _p: None)
+    assert seen_kw[-1]["stderr"] == subprocess.PIPE
+    assert "hf progress line" in captured_err.getvalue()
+
+    # 2) sys.stderr=None（pythonw/冻结无控制台）且非零退出：保留末尾 400 字尾缓冲不崩
+    monkeypatch.setattr("sys.stderr", None)
+    long_err = ("X" * 300) + "TAIL_MARKER_400"
+    fail_action = asr_download_action(
+        python=python,
+        worker=Path("/w.py"),
+        repo_id="r",
+        model_dir=model_dir,
+        log_path=None,
+        env={},
+        popen=lambda _a, **_k: _PipeProc(rc=2, stderr_text=long_err, write_weights=False),
+        sleep=lambda _s: None,
+    )
+    with pytest.raises(LogicError) as err:
+        fail_action(lambda _p: None)
+    assert "退出码 2" in err.value.message and "TAIL_MARKER_400" in err.value.message
+
+    # 3) 容忍 getattr(proc, "stderr", None) is None（如 _DoneProc）
+    no_stderr_action = asr_download_action(
+        python=python,
+        worker=Path("/w.py"),
+        repo_id="r",
+        model_dir=model_dir,
+        log_path=None,
+        env={},
+        popen=lambda _a, **_k: _PipeProc(rc=0, stderr_text=None, write_weights=True),
+        sleep=lambda _s: None,
+    )
+    assert "已下载" in no_stderr_action(lambda _p: None)
