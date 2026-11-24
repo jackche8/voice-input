@@ -410,7 +410,7 @@ def test_fifth_hotkey_annotate_dispatches_across_wayland_x11_and_cross_platform_
             self.vk = vk
 
     class _FakeListener:
-        def __init__(self, *, on_press, on_release) -> None:
+        def __init__(self, *, on_press, on_release, **_kw) -> None:
             self.on_press = on_press
             self.on_release = on_release
 
@@ -441,6 +441,7 @@ def test_fifth_hotkey_annotate_dispatches_across_wayland_x11_and_cross_platform_
     wl.on_release(_FakeKey(char="a", vk=0x41))
     wl.on_release(_FakeKey(name="alt_l", vk=0xA4))
     wl.on_release(_FakeKey(name="ctrl_l", vk=0xA2))
+    win_rig.drain_actions()
     assert win_events == ["annotate"]
     win_rig.stop()
 
@@ -465,6 +466,7 @@ def test_fifth_hotkey_annotate_dispatches_across_wayland_x11_and_cross_platform_
     ml.on_release(_FakeKey(char="a", vk=0x00))
     ml.on_release(_FakeKey(name="alt", vk=0x3A))
     ml.on_release(_FakeKey(name="ctrl", vk=0x3B))
+    mac_rig.drain_actions()
     assert mac_events == ["annotate"]
     mac_rig.stop()
 

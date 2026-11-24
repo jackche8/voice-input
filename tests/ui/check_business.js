@@ -3165,6 +3165,627 @@ async function runUnit() {
     pass("非本机（LAN）访问 logs / about / diagnostic-summary 零 fetch 且在触碰剪贴板前显式呈报 forbidden");
   } else fail("非本机 logs/about 拦截失效：" + JSON.stringify({ calls: lanLogsWorld.calls.length, logs: lanLogsView.getState().logs, about: lanLogsView.getState().about }));
   lanLogsCtl.destroy();
+
+  /* ---------- F2：home-controller 持久提示槽 + bootstrap 样式表自愈全分支 ---------- */
+  /* 1. home-controller.setPersistentNotice：防 1s 轮询与 saveConfig 抹除、浅拷贝不改入参、显式非空报错仍正常显示、destroy 后忽略 */
+  const persistCtx = loadBusiness();
+  const PB = persistCtx.window.V3Business;
+  const pCatalog = PB.createCatalog(snapshot);
+  const pLocalCtx = PB.createContext({ protocol: "https:", hostname: "127.0.0.1", origin: "https://127.0.0.1:17945", href: "https://127.0.0.1:17945/", search: "" });
+  let capturedHomeSetState = null;
+  const origCreateSetupActions = PB.createSetupActions;
+  PB.createSetupActions = function (opts) {
+    capturedHomeSetState = opts && opts.setState;
+    return origCreateSetupActions(opts);
+  };
+  let persistPollCount = 0;
+  let persistFailNextConfig = false;
+  const persistFetch = async function (url, init) {
+    const u = String(url);
+    const method = (init && init.method) || "GET";
+    if (u.indexOf("/api/setup/check") >= 0) {
+      persistPollCount += 1;
+      const busyState = persistPollCount < 3 ? "running" : "done";
+      return jsonRes(200, {
+        ok: true,
+        asr: { status: "ready", sidecar_running: true },
+        ollama: { installed: true, running: true, model_status: "ready" },
+        capabilities: [],
+        components: [{ name: "asr", state: busyState === "running" ? "starting" : "running", reason: "", failures: 0 }],
+        install_all: { state: busyState, current: null, steps: [] }
+      });
+    }
+    if (u.indexOf("/api/v1/config") >= 0 && method === "POST") {
+      if (persistFailNextConfig) {
+        persistFailNextConfig = false;
+        return jsonRes(400, { ok: false, error: "invalid_request", message: "显式配置保存报错" });
+      }
+      const parsed = JSON.parse((init && init.body) || "{}");
+      return jsonRes(200, Object.assign({
+        polish_enabled: true,
+        custom_keywords: [],
+        translate_lang_pair: "zh-en",
+        translate_auto_enabled: true,
+        hotkey_voice: "ctrl+alt+z",
+        hotkey_screenshot: "ctrl+alt+x",
+        hotkey_ocr: "ctrl+alt+o",
+        hotkey_repeat: "ctrl+alt+r",
+        hotkey_annotate: "ctrl+alt+a",
+        autostart_enabled: false,
+        ui_theme: "light",
+        audio_input_device: "",
+        log_max_lines: 2000
+      }, parsed));
+    }
+    if (u.indexOf("/api/v1/config") >= 0) {
+      return jsonRes(200, {
+        polish_enabled: true,
+        custom_keywords: [],
+        translate_lang_pair: "zh-en",
+        translate_auto_enabled: true,
+        hotkey_voice: "ctrl+alt+z",
+        hotkey_screenshot: "ctrl+alt+x",
+        hotkey_ocr: "ctrl+alt+o",
+        hotkey_repeat: "ctrl+alt+r",
+        hotkey_annotate: "ctrl+alt+a",
+        autostart_enabled: false,
+        ui_theme: "light",
+        audio_input_device: "",
+        log_max_lines: 2000
+      });
+    }
+    if (u.indexOf("/api/v1/history") >= 0) return jsonRes(200, { records: [], total: 0, skipped_malformed: 0 });
+    if (u.indexOf("/api/v1/lan-access") >= 0) return jsonRes(200, { port: 17945, token: "", token_masked: "", entries: [], message: "" });
+    if (u.indexOf("/api/v1/audio-inputs") >= 0) return jsonRes(200, { ok: true, default_device: null, devices: [] });
+    return jsonRes(404, { ok: false, error: "not_found", message: "missing" });
+  };
+  const persistCtl = PB.createHomeController({
+    client: PB.createHttp({ catalog: pCatalog, context: pLocalCtx, fetch: persistFetch, origin: "https://127.0.0.1:17945" }),
+    context: pLocalCtx,
+    catalog: pCatalog,
+    pollInterval: 10
+  });
+  const persistView = fakeView(persistCtx.V3.defaults.homeState());
+  persistCtl.bind(persistView);
+  await persistCtl.start();
+  const cssPersistMsg = "页面样式表加载失败（css/theme.css），请刷新或重启应用。";
+  persistCtl.setPersistentNotice(cssPersistMsg);
+  const pollSettled = await waitFor(function () { return persistPollCount >= 3 && !persistCtl._debug.polling(); }, 1500);
+  const noticeAfterPoll = persistView.getState().statusNotice;
+  await persistCtl.hooks.onTogglePolish(false);
+  const noticeAfterSaveOk = persistView.getState().statusNotice;
+  let frozenPatchErr = null;
+  const frozenPatch = Object.freeze({ connection: "connected", statusNotice: null });
+  try {
+    capturedHomeSetState(frozenPatch);
+  } catch (err) {
+    frozenPatchErr = err;
+  }
+  const noticeAfterFrozen = persistView.getState().statusNotice;
+  persistFailNextConfig = true;
+  let explicitErrThrown = false;
+  try {
+    await persistCtl.hooks.onTogglePolish(true);
+  } catch (err) {
+    explicitErrThrown = true;
+  }
+  const noticeAfterExplicitErr = persistView.getState().statusNotice;
+  await persistCtl.hooks.onTogglePolish(true);
+  const noticeAfterRecoverSave = persistView.getState().statusNotice;
+  persistCtl.setPersistentNotice(null);
+  const noticeAfterClear = persistView.getState().statusNotice;
+  persistCtl.destroy();
+  persistCtl.setPersistentNotice("destroyed-must-be-ignored");
+  const noticeAfterDestroy = persistView.getState().statusNotice;
+  if (
+    pollSettled
+    && noticeAfterPoll === cssPersistMsg
+    && noticeAfterSaveOk === cssPersistMsg
+    && !frozenPatchErr && frozenPatch.statusNotice === null && noticeAfterFrozen === cssPersistMsg
+    && explicitErrThrown && /显式配置保存报错/.test(noticeAfterExplicitErr || "")
+    && noticeAfterRecoverSave === cssPersistMsg
+    && noticeAfterClear === null
+    && noticeAfterDestroy === null
+  ) {
+    pass("home-controller.setPersistentNotice 防 1s readinessPatch 与 saveConfig 抹除、浅拷贝不改入参、允许显式非空报错并在清空/destroy 后表现正确");
+  } else {
+    fail("home-controller.setPersistentNotice 行为异常：" + JSON.stringify({
+      pollSettled: pollSettled,
+      noticeAfterPoll: noticeAfterPoll,
+      noticeAfterSaveOk: noticeAfterSaveOk,
+      frozenPatchErr: frozenPatchErr && frozenPatchErr.message,
+      noticeAfterFrozen: noticeAfterFrozen,
+      noticeAfterExplicitErr: noticeAfterExplicitErr,
+      noticeAfterRecoverSave: noticeAfterRecoverSave,
+      noticeAfterClear: noticeAfterClear,
+      noticeAfterDestroy: noticeAfterDestroy
+    }));
+  }
+
+  /* 2. 轻量假 DOM 夹具，供 ensureStylesheetsLoaded 与 startPage 并行自愈 / pagehide / loadOpenApi 失败全分支验收 */
+  function createFakeCssEnv(spec) {
+    spec = spec || {};
+    let bgVar = spec.bgVar != null ? spec.bgVar : "#f4f6fa";
+    const createdLinks = [];
+    const insertCalls = [];
+    const consoleErrors = [];
+    const winEvents = {};
+    const timers = [];
+    let nextTimerId = 1;
+
+    function makeLink(href, sheet) {
+      const listeners = {};
+      const attrs = { rel: "stylesheet", href: href || "" };
+      const node = {
+        tagName: "LINK",
+        rel: "stylesheet",
+        href: href || "",
+        media: "",
+        sheet: sheet !== undefined ? sheet : null,
+        parentNode: null,
+        getAttribute: function (k) { return Object.prototype.hasOwnProperty.call(attrs, k) ? attrs[k] : null; },
+        setAttribute: function (k, v) {
+          attrs[k] = String(v);
+          if (k === "href") node.href = String(v);
+          if (k === "rel") node.rel = String(v);
+        },
+        addEventListener: function (ev, fn) { (listeners[ev] = listeners[ev] || []).push(fn); },
+        removeEventListener: function (ev, fn) {
+          if (!listeners[ev]) return;
+          listeners[ev] = listeners[ev].filter(function (item) { return item !== fn; });
+        },
+        dispatch: function (ev) {
+          const list = (listeners[ev] || []).slice();
+          list.forEach(function (fn) { fn({ type: ev, target: node }); });
+        },
+        _listenerCount: function (ev) { return (listeners[ev] || []).length; }
+      };
+      return node;
+    }
+
+    const head = {
+      children: [],
+      insertBefore: function (newNode, refNode) {
+        const idx = head.children.indexOf(refNode);
+        if (idx >= 0) head.children.splice(idx, 0, newNode);
+        else head.children.push(newNode);
+        newNode.parentNode = head;
+        const attempt = insertCalls.length + 1;
+        insertCalls.push({ node: newNode, ref: refNode, index: idx, href: newNode.getAttribute("href") });
+        if (typeof spec.onInsert === "function") {
+          spec.onInsert(newNode, attempt, env);
+        }
+        return newNode;
+      },
+      removeChild: function (oldNode) {
+        const idx = head.children.indexOf(oldNode);
+        if (idx >= 0) head.children.splice(idx, 1);
+        oldNode.parentNode = null;
+        return oldNode;
+      }
+    };
+
+    (spec.links || []).forEach(function (item) {
+      const ln = makeLink(item.href, item.sheet);
+      if (item.media) ln.media = item.media;
+      ln.parentNode = head;
+      head.children.push(ln);
+    });
+
+    const doc = {
+      head: head,
+      documentElement: { tagName: "HTML", dataset: { theme: "light" } },
+      getElementById: function (id) { return id === "app" ? { id: "app" } : null; },
+      querySelectorAll: function (sel) {
+        if (String(sel).indexOf("stylesheet") >= 0) {
+          return head.children.filter(function (el) { return el.tagName === "LINK" && el.rel === "stylesheet"; });
+        }
+        return [];
+      },
+      createElement: function (tag) {
+        if (String(tag).toLowerCase() === "link") {
+          const ln = makeLink("", null);
+          createdLinks.push(ln);
+          return ln;
+        }
+        return { tagName: String(tag).toUpperCase() };
+      }
+    };
+
+    const win = {
+      addEventListener: function (ev, fn) { (winEvents[ev] = winEvents[ev] || []).push(fn); },
+      removeEventListener: function (ev, fn) {
+        if (!winEvents[ev]) return;
+        winEvents[ev] = winEvents[ev].filter(function (item) { return item !== fn; });
+      },
+      getComputedStyle: function (el) {
+        if (el !== doc.documentElement) return { getPropertyValue: function () { return ""; } };
+        return {
+          getPropertyValue: function (prop) {
+            return prop === "--c-bg" ? bgVar : "";
+          }
+        };
+      }
+    };
+
+    const env = {
+      head: head,
+      doc: doc,
+      win: win,
+      winEvents: winEvents,
+      createdLinks: createdLinks,
+      insertCalls: insertCalls,
+      consoleErrors: consoleErrors,
+      console: { error: function () { consoleErrors.push(Array.prototype.slice.call(arguments).join(" ")); } },
+      setBgVar: function (v) { bgVar = v; },
+      setTimeout: function (fn, ms) {
+        const id = nextTimerId++;
+        timers.push({ id: id, fn: fn, ms: ms, cleared: false });
+        return id;
+      },
+      clearTimeout: function (id) {
+        timers.forEach(function (t) { if (t.id === id) t.cleared = true; });
+      },
+      flushTimers: function () {
+        const active = timers.filter(function (t) { return !t.cleared; });
+        active.forEach(function (t) { t.cleared = true; t.fn(); });
+      }
+    };
+    return env;
+  }
+
+  /* 2a. 离线 file:// 零动作跳过 */
+  const fileCssEnv = createFakeCssEnv({ links: [{ href: "css/theme.css", sheet: null }] });
+  const fileCssRes = await B.ensureStylesheetsLoaded({
+    document: fileCssEnv.doc,
+    window: fileCssEnv.win,
+    location: { protocol: "file:", href: "file:///tmp/index.html" },
+    console: fileCssEnv.console
+  });
+  if (
+    fileCssRes.ok === true && fileCssRes.skipped === true
+    && fileCssRes.retried.length === 0 && fileCssRes.failed.length === 0
+    && fileCssEnv.createdLinks.length === 0 && fileCssEnv.consoleErrors.length === 0
+  ) {
+    pass("ensureStylesheetsLoaded 在 file:// 离线模式下直接跳过（零 DOM 改动与网络请求）");
+  } else fail("ensureStylesheetsLoaded file:// 跳过异常：" + JSON.stringify(fileCssRes));
+
+  /* 2b. 全部样式表健康时零额外请求 */
+  const okCssEnv = createFakeCssEnv({
+    bgVar: "#f4f6fa",
+    links: [
+      { href: "css/theme.css", sheet: { cssRules: [{ cssText: ":root{--c-bg:#f4f6fa}" }] } },
+      { href: "css/studio.css", sheet: { cssRules: [{ cssText: ".box-body{}" }] } }
+    ]
+  });
+  const okCssRes = await B.ensureStylesheetsLoaded({
+    document: okCssEnv.doc,
+    window: okCssEnv.win,
+    location: { protocol: "https:", origin: "https://127.0.0.1:17945" },
+    console: okCssEnv.console
+  });
+  if (
+    okCssRes.ok === true && okCssRes.skipped === false
+    && okCssRes.retried.length === 0 && okCssRes.failed.length === 0
+    && okCssEnv.createdLinks.length === 0 && okCssEnv.insertCalls.length === 0
+  ) {
+    pass("ensureStylesheetsLoaded 在样式表全部健康时零多余请求");
+  } else fail("ensureStylesheetsLoaded 健康分支异常：" + JSON.stringify({ res: okCssRes, created: okCssEnv.createdLinks.length }));
+
+  /* 2c. 规范替换 _css_retry（保留原 query 与 #hash，无重复 ?）、原位 insertBefore 保序、load 后缺 cssRules 继续第 2 次重试 */
+  const healCssEnv = createFakeCssEnv({
+    bgVar: "",
+    links: [
+      { href: "css/theme.css?v=3&_css_retry=9&lang=zh#top", sheet: null },
+      { href: "css/studio.css", sheet: { cssRules: [{ cssText: ".studio{}" }] } }
+    ],
+    onInsert: function (fresh, attempt, env) {
+      Promise.resolve().then(function () {
+        if (attempt === 1) {
+          /* 第 1 次触发 load 但 cssRules 为空：重验必须判定失败并继续第 2 次重试 */
+          fresh.sheet = { cssRules: [] };
+          fresh.dispatch("load");
+        } else {
+          fresh.sheet = { cssRules: [{ cssText: ":root{--c-bg:#f4f6fa}" }] };
+          env.setBgVar("#f4f6fa");
+          fresh.dispatch("load");
+        }
+      });
+    }
+  });
+  const studioOrigLink = healCssEnv.head.children[1];
+  const healCssRes = await B.ensureStylesheetsLoaded({
+    document: healCssEnv.doc,
+    window: healCssEnv.win,
+    location: { protocol: "https:", origin: "https://127.0.0.1:17945" },
+    console: healCssEnv.console
+  });
+  const retryHrefs = healCssEnv.insertCalls.map(function (c) { return c.href; });
+  if (
+    healCssRes.ok === true && healCssRes.skipped === false
+    && healCssRes.retried.length === 1 && healCssRes.failed.length === 0
+    && retryHrefs.length === 2
+    && retryHrefs[0] === "css/theme.css?v=3&lang=zh&_css_retry=1#top"
+    && retryHrefs[1] === "css/theme.css?v=3&lang=zh&_css_retry=2#top"
+    && healCssEnv.head.children.length === 2
+    && healCssEnv.head.children[0] === healCssEnv.createdLinks[1]
+    && healCssEnv.head.children[1] === studioOrigLink
+    && healCssEnv.consoleErrors.length === 0
+  ) {
+    pass("ensureStylesheetsLoaded 规范替换 _css_retry、原位 insertBefore 保序，且 load 后缺 cssRules 继续第 2 次重试直至恢复");
+  } else {
+    fail("ensureStylesheetsLoaded 原位重试或规则重验异常：" + JSON.stringify({ res: healCssRes, retryHrefs: retryHrefs, headLen: healCssEnv.head.children.length }));
+  }
+
+  /* 2d. theme.css 虽有 sheet.cssRules 但缺 --c-bg 时必须判定不健康并重试（且第 1 次 load 后仍缺 --c-bg 须继续第 2 次） */
+  const bgMissingEnv = createFakeCssEnv({
+    bgVar: "",
+    links: [
+      { href: "css/theme.css", sheet: { cssRules: [{ cssText: "body{margin:0}" }] } }
+    ],
+    onInsert: function (fresh, attempt, env) {
+      Promise.resolve().then(function () {
+        fresh.sheet = { cssRules: [{ cssText: ":root{--c-bg:#f4f6fa}" }] };
+        if (attempt === 2) env.setBgVar("#f4f6fa");
+        fresh.dispatch("load");
+      });
+    }
+  });
+  const bgMissingRes = await B.ensureStylesheetsLoaded({
+    document: bgMissingEnv.doc,
+    window: bgMissingEnv.win,
+    location: { protocol: "https:", origin: "https://127.0.0.1:17945" },
+    console: bgMissingEnv.console
+  });
+  if (
+    bgMissingRes.ok === true && bgMissingRes.retried.join(",") === "css/theme.css"
+    && bgMissingEnv.createdLinks.length === 2 && bgMissingEnv.consoleErrors.length === 0
+  ) {
+    pass("ensureStylesheetsLoaded 对 theme.css 校验 --c-bg 非空：即使 cssRules 非空但缺 --c-bg 也会触发重试并重验");
+  } else {
+    fail("ensureStylesheetsLoaded --c-bg 校验失效：" + JSON.stringify({ res: bgMissingRes, attempts: bgMissingEnv.createdLinks.length }));
+  }
+
+  /* 2e. 2 次重试全败（含超时与 error）记 console.error 且最多重试 2 次 */
+  const failCssEnv = createFakeCssEnv({
+    bgVar: "",
+    links: [{ href: "css/theme.css", sheet: null }],
+    onInsert: function (fresh, attempt, env) {
+      if (attempt === 1) {
+        Promise.resolve().then(function () { fresh.dispatch("error"); });
+      } else {
+        /* 第 2 次通过超时触发失败 */
+        Promise.resolve().then(function () { env.flushTimers(); });
+      }
+    }
+  });
+  const failCssRes = await B.ensureStylesheetsLoaded({
+    document: failCssEnv.doc,
+    window: failCssEnv.win,
+    location: { protocol: "https:", origin: "https://127.0.0.1:17945" },
+    setTimeout: failCssEnv.setTimeout,
+    clearTimeout: failCssEnv.clearTimeout,
+    console: failCssEnv.console
+  });
+  if (
+    failCssRes.ok === false && failCssRes.skipped === false
+    && failCssRes.retried.join(",") === "css/theme.css"
+    && failCssRes.failed.join(",") === "css/theme.css"
+    && failCssEnv.createdLinks.length === 2
+    && failCssEnv.consoleErrors.length === 1 && /css\/theme\.css/.test(failCssEnv.consoleErrors[0])
+  ) {
+    pass("ensureStylesheetsLoaded 最多重试 2 次，全败返回 failed 并记录 console.error");
+  } else {
+    fail("ensureStylesheetsLoaded 全败分支异常：" + JSON.stringify({ res: failCssRes, created: failCssEnv.createdLinks.length, errs: failCssEnv.consoleErrors }));
+  }
+
+  /* 3. startPage("home") 样式表全败：在 controller.start() 结算后写入持久提示槽，不被后续轮询/saveConfig 抹除 */
+  const homeFailCssEnv = createFakeCssEnv({
+    bgVar: "",
+    links: [{ href: "css/theme.css", sheet: null }],
+    onInsert: function (fresh) {
+      Promise.resolve().then(function () { fresh.dispatch("error"); });
+    }
+  });
+  const homeFailCtx = loadBusiness({ document: homeFailCssEnv.doc });
+  let homeFailView = null;
+  homeFailCtx.window.V3.home = {
+    mount: function (_el, init) {
+      homeFailView = fakeView(Object.assign(homeFailCtx.V3.defaults.homeState(), init || {}));
+      return homeFailView;
+    }
+  };
+  await homeFailCtx.window.V3Business.startPage("home", {
+    openapi: snapshot,
+    fetch: persistFetch,
+    location: bootLoc,
+    document: homeFailCssEnv.doc,
+    window: homeFailCssEnv.win,
+    console: homeFailCssEnv.console
+  });
+  const homeFailCtl = homeFailCtx.window.__v3Business.controller;
+  const noticeAfterStart = homeFailView.getState().statusNotice;
+  await homeFailCtl.hooks.onRefreshStatus();
+  const noticeAfterRefresh = homeFailView.getState().statusNotice;
+  await homeFailCtl.hooks.onTogglePolish(false);
+  const noticeAfterCfg = homeFailView.getState().statusNotice;
+  homeFailCtl.destroy();
+  if (
+    homeFailCssEnv.consoleErrors.length === 1
+    && /样式表加载失败/.test(noticeAfterStart || "") && /css\/theme\.css/.test(noticeAfterStart || "")
+    && noticeAfterRefresh === noticeAfterStart
+    && noticeAfterCfg === noticeAfterStart
+  ) {
+    pass("startPage('home') 样式表全败记 console.error，在 controller.start() 后写入持久提示且不被刷新与 saveConfig 抹除");
+  } else {
+    fail("startPage('home') 样式表全败持久提示异常：" + JSON.stringify({
+      errs: homeFailCssEnv.consoleErrors,
+      start: noticeAfterStart,
+      refresh: noticeAfterRefresh,
+      cfg: noticeAfterCfg
+    }));
+  }
+
+  /* 4. startPage("voice") 样式表全败：在 controller.start() 结算后写入 statusText + statusTone="err" */
+  const voiceFailCssEnv = createFakeCssEnv({
+    bgVar: "",
+    links: [{ href: "css/theme.css", sheet: null }],
+    onInsert: function (fresh) {
+      Promise.resolve().then(function () { fresh.dispatch("error"); });
+    }
+  });
+  const voiceFailCtx = loadBusiness({ document: voiceFailCssEnv.doc });
+  let voiceFailView = null;
+  voiceFailCtx.window.V3.mountVoice = function (_el, opts) {
+    voiceFailView = fakeView(Object.assign(voiceFailCtx.V3.defaults.voiceState(), (opts && opts.initialState) || {}));
+    return voiceFailView;
+  };
+  await voiceFailCtx.window.V3Business.startPage("voice", {
+    openapi: snapshot,
+    fetch: persistFetch,
+    location: bootLoc,
+    document: voiceFailCssEnv.doc,
+    window: voiceFailCssEnv.win,
+    console: voiceFailCssEnv.console
+  });
+  const voiceFailCtl = voiceFailCtx.window.__v3Business.controller;
+  const voiceCssStatus = { text: voiceFailView.getState().statusText, tone: voiceFailView.getState().statusTone };
+  voiceFailCtl.destroy();
+  if (
+    voiceFailCssEnv.consoleErrors.length === 1
+    && /样式表加载失败/.test(voiceCssStatus.text || "")
+    && voiceCssStatus.tone === "err"
+  ) {
+    pass("startPage('voice') 样式表全败记 console.error 并写入 statusText 与 statusTone='err'");
+  } else {
+    fail("startPage('voice') 样式表全败提示异常：" + JSON.stringify({ errs: voiceFailCssEnv.consoleErrors, status: voiceCssStatus }));
+  }
+
+  /* 5. pagehide 设 disposed=true 阻断 home 与 voice 销毁后的迟到样式表失败写入 */
+  const pendingHomeLinks = [];
+  const homeHideEnv = createFakeCssEnv({
+    bgVar: "",
+    links: [{ href: "css/theme.css", sheet: null }],
+    onInsert: function (fresh) { pendingHomeLinks.push(fresh); }
+  });
+  const homeHideCtx = loadBusiness({ document: homeHideEnv.doc });
+  let homeHideWrites = 0;
+  let homeHideView = null;
+  homeHideCtx.window.V3.home = {
+    mount: function (_el, init) {
+      const inner = fakeView(Object.assign(homeHideCtx.V3.defaults.homeState(), init || {}));
+      homeHideView = {
+        getState: inner.getState,
+        setState: function (patch) { homeHideWrites += 1; return inner.setState(patch); }
+      };
+      return homeHideView;
+    }
+  };
+  const homeHidePromise = homeHideCtx.window.V3Business.startPage("home", {
+    openapi: snapshot,
+    fetch: bootFetch,
+    location: bootLoc,
+    document: homeHideEnv.doc,
+    window: homeHideEnv.win,
+    console: homeHideEnv.console
+  });
+  await waitFor(function () { return !!(homeHideCtx.window.__v3Business && homeHideCtx.window.__v3Business.controller && homeHideView.getState().connection === "connected"); }, 1000);
+  const homeHideCtl = homeHideCtx.window.__v3Business.controller;
+  homeHideEnv.winEvents.pagehide.forEach(function (fn) { fn(); });
+  const homeWritesAtHide = homeHideWrites;
+  pendingHomeLinks.shift().dispatch("error");
+  await waitFor(function () { return pendingHomeLinks.length === 1; }, 500);
+  pendingHomeLinks.shift().dispatch("error");
+  await homeHidePromise;
+
+  const pendingVoiceLinks = [];
+  const voiceHideEnv = createFakeCssEnv({
+    bgVar: "",
+    links: [{ href: "css/theme.css", sheet: null }],
+    onInsert: function (fresh) { pendingVoiceLinks.push(fresh); }
+  });
+  const voiceHideCtx = loadBusiness({ document: voiceHideEnv.doc });
+  let voiceHideWrites = 0;
+  let voiceHideView = null;
+  voiceHideCtx.window.V3.mountVoice = function (_el, opts) {
+    const inner = fakeView(Object.assign(voiceHideCtx.V3.defaults.voiceState(), (opts && opts.initialState) || {}));
+    voiceHideView = {
+      getState: inner.getState,
+      setState: function (patch) { voiceHideWrites += 1; return inner.setState(patch); }
+    };
+    return voiceHideView;
+  };
+  const voiceHidePromise = voiceHideCtx.window.V3Business.startPage("voice", {
+    openapi: snapshot,
+    fetch: bootFetch,
+    location: bootLoc,
+    document: voiceHideEnv.doc,
+    window: voiceHideEnv.win,
+    console: voiceHideEnv.console
+  });
+  await waitFor(function () { return !!(voiceHideCtx.window.__v3Business && voiceHideCtx.window.__v3Business.controller && voiceHideView.getState().connection === "connected"); }, 1000);
+  voiceHideEnv.winEvents.pagehide.forEach(function (fn) { fn(); });
+  const voiceWritesAtHide = voiceHideWrites;
+  pendingVoiceLinks.shift().dispatch("error");
+  await waitFor(function () { return pendingVoiceLinks.length === 1; }, 500);
+  pendingVoiceLinks.shift().dispatch("error");
+  await voiceHidePromise;
+
+  if (
+    homeHideCtl._debug.isDestroyed() && homeHideWrites === homeWritesAtHide
+    && voiceHideWrites === voiceWritesAtHide
+  ) {
+    pass("pagehide 设 disposed=true 阻断 home 与 voice 销毁后的迟到样式表失败写入");
+  } else {
+    fail("pagehide 销毁后仍向视图写入：" + JSON.stringify({
+      homeDestroyed: homeHideCtl._debug.isDestroyed(),
+      homeDelta: homeHideWrites - homeWritesAtHide,
+      voiceDelta: voiceHideWrites - voiceWritesAtHide
+    }));
+  }
+
+  /* 6. loadOpenApi 失败仍并行完成样式表自愈 */
+  const openApiFailEnv = createFakeCssEnv({
+    bgVar: "",
+    links: [
+      { href: "css/theme.css", sheet: null },
+      { href: "css/studio.css", sheet: { cssRules: [{ cssText: ".studio{}" }] } }
+    ],
+    onInsert: function (fresh, _attempt, env) {
+      Promise.resolve().then(function () {
+        fresh.sheet = { cssRules: [{ cssText: ":root{--c-bg:#f4f6fa}" }] };
+        env.setBgVar("#f4f6fa");
+        fresh.dispatch("load");
+      });
+    }
+  });
+  const openApiFailCtx = loadBusiness({ document: openApiFailEnv.doc });
+  let openApiFailView = null;
+  openApiFailCtx.window.V3.home = {
+    mount: function (_el, init) {
+      openApiFailView = fakeView(init);
+      return openApiFailView;
+    }
+  };
+  await openApiFailCtx.window.V3Business.startPage("home", {
+    fetch: async function () { return jsonRes(500, { ok: false, error: "internal", message: "openapi down" }); },
+    location: bootLoc,
+    document: openApiFailEnv.doc,
+    window: openApiFailEnv.win,
+    console: openApiFailEnv.console
+  });
+  if (
+    openApiFailView && openApiFailView.getState().connection === "error"
+    && openApiFailEnv.head.children[0].getAttribute("href") === "css/theme.css?_css_retry=1"
+    && openApiFailEnv.head.children[0].sheet && openApiFailEnv.head.children[0].sheet.cssRules.length === 1
+  ) {
+    pass("loadOpenApi 失败时 startPage 仍并行完成样式表原位自愈");
+  } else {
+    fail("loadOpenApi 失败未完成样式表自愈：" + JSON.stringify({
+      conn: openApiFailView && openApiFailView.getState().connection,
+      href: openApiFailEnv.head.children[0] && openApiFailEnv.head.children[0].getAttribute("href")
+    }));
+  }
 }
 
 function runAsgi() {
@@ -3297,6 +3918,21 @@ function runAsgi() {
         if (!logsActRes.ok) throw new Error("/js/business/logs-actions.js HTTP " + logsActRes.status);
         const cssRes = await fetch(origin + "/css/theme.css");
         if (!cssRes.ok) throw new Error("/css 资源 HTTP " + cssRes.status);
+        const cssCc = String(cssRes.headers.get("cache-control") || "").toLowerCase();
+        const cssEtag = cssRes.headers.get("etag") || "";
+        if (cssCc.indexOf("no-cache") < 0 || !cssEtag) {
+          throw new Error("/css/theme.css 缺少 Cache-Control: no-cache 或 ETag：" + JSON.stringify({ cc: cssCc, etag: cssEtag }));
+        }
+        const css304Res = await fetch(origin + "/css/theme.css", { headers: { "If-None-Match": cssEtag } });
+        if (css304Res.status !== 304) {
+          throw new Error("/css/theme.css 携带 If-None-Match 应返回 304，实际 " + css304Res.status);
+        }
+        const cssRetryRes = await fetch(origin + "/css/theme.css?_css_retry=1");
+        const cssRetryCc = String(cssRetryRes.headers.get("cache-control") || "").toLowerCase();
+        const cssRetryText = await cssRetryRes.text();
+        if (cssRetryRes.status !== 200 || cssRetryCc.indexOf("no-cache") < 0 || cssRetryText.indexOf("--c-bg") < 0) {
+          throw new Error("/css/theme.css?_css_retry=1 响应异常：" + JSON.stringify({ status: cssRetryRes.status, cc: cssRetryCc, hasBg: cssRetryText.indexOf("--c-bg") >= 0 }));
+        }
         /* 设置页业务层（home-controller + setup-actions + logs-actions）经真实路由驱动真实一键装齐、日志脱敏与关于信息 */
         const since = "2026-11-20T00:00:00+00:00";
         const reported = await client.call("report_components_api_v1_components_post", { body: { components: [

@@ -5,9 +5,12 @@
 from __future__ import annotations
 
 import asyncio
+from asyncio.proactor_events import _ProactorBasePipeTransport
+from collections.abc import Mapping
 import logging
 from contextlib import asynccontextmanager, suppress
 from pathlib import Path
+from typing import Any
 
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
@@ -186,6 +189,23 @@ class AccessGuardMiddleware:
 SESSION_SWEEP_INTERVAL_S = 30.0
 
 
+def _is_proactor_connection_reset_10054(context: Mapping[str, Any]) -> bool:
+    """仅匹配 Windows ProactorEventLoop `_call_connection_lost` 抛出的 WinError 10054，保留其余一切异常。"""
+    exc = context.get("exception")
+    if not isinstance(exc, ConnectionResetError) or getattr(exc, "winerror", None) != 10054:
+        return False
+    handle = context.get("handle")
+    cb = getattr(handle, "_callback", None)
+    if cb is None:
+        return False
+    if getattr(cb, "__func__", None) is _ProactorBasePipeTransport._call_connection_lost:
+        return True
+    return (
+        getattr(cb, "__name__", None) == "_call_connection_lost"
+        and isinstance(getattr(cb, "__self__", None), _ProactorBasePipeTransport)
+    )
+
+
 def create_app(runtime: Runtime, *, static_v3: Path | None = None) -> FastAPI:
     """static_v3 给出时挂唯一生产界面（static/v3）；不给则只有 API。"""
     if not isinstance(runtime, Runtime):
@@ -206,6 +226,18 @@ def create_app(runtime: Runtime, *, static_v3: Path | None = None) -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
+        loop = asyncio.get_running_loop()
+        prev_handler = loop.get_exception_handler()
+
+        def _exception_handler(active_loop: asyncio.AbstractEventLoop, context: dict[str, Any]) -> None:
+            if _is_proactor_connection_reset_10054(context):
+                return
+            if prev_handler is not None:
+                prev_handler(active_loop, context)
+            else:
+                active_loop.default_exception_handler(context)
+
+        loop.set_exception_handler(_exception_handler)
         stop_event = asyncio.Event()
 
         async def _sweep_loop() -> None:
@@ -229,6 +261,8 @@ def create_app(runtime: Runtime, *, static_v3: Path | None = None) -> FastAPI:
             task.cancel()
             with suppress(asyncio.CancelledError):
                 await task
+            if loop.get_exception_handler() is _exception_handler:
+                loop.set_exception_handler(prev_handler)
 
     app = FastAPI(
         title="ollama-voice-input v1",

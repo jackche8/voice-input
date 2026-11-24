@@ -44,6 +44,7 @@ from _platform._win32_api import (
     Win32Api,
     WinClipboardSnapshot,
     _configure_win32_signatures,
+    read_win32_modifier_mask,
 )
 from _platform.protocol import (
     FocusTarget,
@@ -144,8 +145,20 @@ def _png_to_dib(png: bytes) -> bytes:
     return raw[14:]
 
 
+_WM_KEYDOWN = 0x0100
+_WM_KEYUP = 0x0101
+_WM_SYSKEYDOWN = 0x0104
+_WM_SYSKEYUP = 0x0105
+_WM_PRESS_MESSAGES = (_WM_KEYDOWN, _WM_SYSKEYDOWN)
+_WM_RELEASE_MESSAGES = (_WM_KEYUP, _WM_SYSKEYUP)
+_VK_PACKET = 0xE7
+_LLKHF_LOWER_IL_INJECTED = 0x00000002
+_LLKHF_INJECTED = 0x00000010
+_LLKHF_ANY_INJECTED = _LLKHF_INJECTED | _LLKHF_LOWER_IL_INJECTED
+
+
 class WindowsHotkeyRig(PynputHotkeyRig):
-    """基于 `_hotkey.parse_hotkey_win32` + `PynputHotkeyRig` 的 Windows 五键监听器。"""
+    """基于 `_hotkey.parse_hotkey_win32` + `PynputHotkeyRig` 的 Windows 五键监听器（含低级钩子吞键）。"""
 
     def __init__(
         self,
@@ -160,7 +173,12 @@ class WindowsHotkeyRig(PynputHotkeyRig):
         overlay_active: Callable[[], bool] = always_false,
         close_overlay: Callable[[], bool] = always_false,
         listener_factory: Callable[..., object] | None = None,
+        modifier_state_reader: Callable[[], int | None] | None = None,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
+        resolved_reader = modifier_state_reader
+        if resolved_reader is None and listener_factory is None and os.name == "nt":
+            resolved_reader = read_win32_modifier_mask
         super().__init__(
             bindings,
             backend_name="win32-pynput",
@@ -176,7 +194,32 @@ class WindowsHotkeyRig(PynputHotkeyRig):
             overlay_active=overlay_active,
             close_overlay=close_overlay,
             listener_factory=listener_factory,
+            modifier_state_reader=resolved_reader,
+            clock=clock,
         )
+
+    def _listener_kwargs(self) -> dict[str, object]:
+        return {"win32_event_filter": self._win32_event_filter}
+
+    def _win32_event_filter(self, msg: int, data) -> bool:
+        """WH_KEYBOARD_LL 过滤器：拦截匹配的应用热键并跳过多余 `_WM_PROCESS`；不匹配时返回 False 放行。"""
+        if msg not in _WM_PRESS_MESSAGES and msg not in _WM_RELEASE_MESSAGES:
+            return False
+        flags = int(getattr(data, "flags", 0) or 0)
+        vk = int(getattr(data, "vkCode", 0) or 0)
+        if vk == _VK_PACKET or (flags & _LLKHF_ANY_INJECTED) != 0:
+            return False
+        mod_flag = _VK_TO_WIN32_MOD.get(vk, 0)
+        if msg in _WM_PRESS_MESSAGES:
+            should_suppress = self._handle_press_raw(mod_flag, vk)
+        else:
+            should_suppress = self._handle_release_raw(mod_flag, vk)
+        if should_suppress:
+            listener = self._listener
+            suppress_fn = getattr(listener, "suppress_event", None) if listener is not None else None
+            if callable(suppress_fn):
+                suppress_fn()
+        return False
 
 
 class WindowsPlatformAdapter:
@@ -189,6 +232,7 @@ class WindowsPlatformAdapter:
         win32_api: Win32Api | None = None,
         mss_factory=None,
         listener_factory: Callable[..., object] | None = None,
+        modifier_state_reader: Callable[[], int | None] | None = None,
         sleep: Callable[[float], None] = time.sleep,
         prefer_unicode: bool = True,
         which: Callable[[str], str | None] = shutil.which,
@@ -198,6 +242,7 @@ class WindowsPlatformAdapter:
         self._win32_api = win32_api
         self._mss_factory = mss_factory
         self._listener_factory = listener_factory
+        self._modifier_state_reader = modifier_state_reader
         self._sleep = sleep
         self._prefer_unicode = prefer_unicode
         self._which = which
@@ -339,6 +384,7 @@ class WindowsPlatformAdapter:
             overlay_active=overlay_active,
             close_overlay=close_overlay,
             listener_factory=self._listener_factory,
+            modifier_state_reader=self._modifier_state_reader,
         )
 
     @staticmethod
@@ -449,4 +495,5 @@ __all__ = [
     "WindowsPlatformAdapter",
     "_configure_win32_signatures",
     "_extract_win32_key_info",
+    "read_win32_modifier_mask",
 ]

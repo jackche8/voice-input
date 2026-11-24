@@ -415,3 +415,94 @@ def test_openapi_snapshot_is_the_generated_document(tmp_path):
     ):
         assert schema in snapshot["components"]["schemas"]
     assert TEST_TOKEN not in json.dumps(snapshot)
+
+
+def test_v3_app_lifespan_filters_only_proactor_connection_reset_10054_and_restores_handler(tmp_path):
+    """B3：_v3_app lifespan 仅过滤源自 _ProactorBasePipeTransport._call_connection_lost 的 WinError 10054，其余全保留且退出条件还原。"""
+    import asyncio
+    from asyncio.proactor_events import _ProactorBasePipeTransport, _ProactorSocketTransport
+
+    _rt, app = _app(tmp_path)
+
+    def _make_reset(winerror: int | None) -> ConnectionResetError:
+        exc = ConnectionResetError("connection reset")
+        if winerror is not None:
+            exc.winerror = winerror  # type: ignore[attr-defined]
+        return exc
+
+    class _SubTransport(_ProactorBasePipeTransport):
+        def _call_connection_lost(self, exc):  # 子类覆写分支校验 isinstance(__self__, _ProactorBasePipeTransport)
+            pass
+
+    class _UnrelatedTransport:
+        def _call_connection_lost(self, exc):
+            pass
+
+    def _fake_handle(cb):
+        return type("_H", (), {"_callback": cb})()
+
+    async def _run_cases() -> None:
+        loop = asyncio.get_running_loop()
+        forwarded: list[dict] = []
+
+        def prev_handler(_loop, ctx):
+            forwarded.append(ctx)
+
+        loop.set_exception_handler(prev_handler)
+        try:
+            async with app.router.lifespan_context(app):
+                active = loop.get_exception_handler()
+                assert active is not None and active is not prev_handler
+
+                # 1. 真实 _ProactorSocketTransport / 子类覆写的 _call_connection_lost + WinError 10054 → 精准吞掉
+                sock_inst = object.__new__(_ProactorSocketTransport)
+                sock_inst._sock = None
+                sub_inst = object.__new__(_SubTransport)
+                sub_inst._sock = None
+                loop.call_exception_handler(
+                    {"message": "cb", "exception": _make_reset(10054), "handle": _fake_handle(sock_inst._call_connection_lost)}
+                )
+                loop.call_exception_handler(
+                    {"message": "cb", "exception": _make_reset(10054), "handle": _fake_handle(sub_inst._call_connection_lost)}
+                )
+                assert forwarded == []
+
+                # 2. 其他 winerror / 无 winerror / 其他异常类型 / 非 Proactor 回调 / 缺 handle → 全部透传
+                other_inst = _UnrelatedTransport()
+                non_matching = [
+                    {"message": "other_winerror", "exception": _make_reset(10053), "handle": _fake_handle(sock_inst._call_connection_lost)},
+                    {"message": "no_winerror", "exception": _make_reset(None), "handle": _fake_handle(sock_inst._call_connection_lost)},
+                    {"message": "runtime_err", "exception": RuntimeError("real bug"), "handle": _fake_handle(sock_inst._call_connection_lost)},
+                    {"message": "unrelated_cb", "exception": _make_reset(10054), "handle": _fake_handle(other_inst._call_connection_lost)},
+                    {"message": "plain_fn", "exception": _make_reset(10054), "handle": _fake_handle(lambda: None)},
+                    {"message": "no_handle", "exception": _make_reset(10054)},
+                ]
+                for ctx in non_matching:
+                    loop.call_exception_handler(ctx)
+                assert [c["message"] for c in forwarded] == [c["message"] for c in non_matching]
+
+            # 3. lifespan 退出后还原 prev_handler
+            assert loop.get_exception_handler() is prev_handler
+
+            # 4. 若外部在 lifespan 期间替换了自定义 handler，退出不得覆盖外部 handler
+            custom_handler = lambda _l, _c: None  # noqa: E731
+            async with app.router.lifespan_context(app):
+                loop.set_exception_handler(custom_handler)
+            assert loop.get_exception_handler() is custom_handler
+
+            # 5. prev_handler 为 None 时，非命中异常走 loop.default_exception_handler
+            loop.set_exception_handler(None)
+            default_seen: list[dict] = []
+            orig_default = loop.default_exception_handler
+            loop.default_exception_handler = lambda ctx: default_seen.append(ctx)  # type: ignore[method-assign]
+            try:
+                async with app.router.lifespan_context(app):
+                    loop.call_exception_handler({"message": "to_default", "exception": RuntimeError("keep")})
+                assert len(default_seen) == 1 and default_seen[0]["message"] == "to_default"
+                assert loop.get_exception_handler() is None
+            finally:
+                loop.default_exception_handler = orig_default  # type: ignore[method-assign]
+        finally:
+            loop.set_exception_handler(None)
+
+    asyncio.run(_run_cases())

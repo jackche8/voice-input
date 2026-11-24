@@ -369,6 +369,8 @@ body.v3-studio {
   gap: var(--sp-3);
   overflow: auto;
   min-height: 240px;
+  -webkit-user-select: text;
+  user-select: text;
 }
 
 .box-empty {
@@ -540,8 +542,17 @@ body.v3-studio {
   color: var(--c-muted);
 }
 .rec-head .btn { margin-left: auto; padding: 2px 10px; font-size: var(--fs-xs); }
-.rec-text { margin-top: var(--sp-1); line-height: 1.6; }
+.rec-text {
+  margin-top: var(--sp-1);
+  line-height: 1.6;
+  -webkit-user-select: text;
+  user-select: text;
+}
 .rec details { margin-top: var(--sp-1); font-size: var(--fs-xs); }
+.rec details p {
+  -webkit-user-select: text;
+  user-select: text;
+}
 .more { display: flex; width: 100%; margin-top: var(--sp-2); justify-content: center; }
 .empty { padding: var(--sp-4); color: var(--c-muted); font-size: var(--fs-sm); overflow-wrap: anywhere; }
 
@@ -923,6 +934,7 @@ select.field[data-role="setup-audio-input"] {
 .log-ln {
   text-align: right;
   color: var(--c-muted);
+  -webkit-user-select: none;
   user-select: none;
   font-variant-numeric: tabular-nums;
   opacity: 0.72;
@@ -933,6 +945,8 @@ select.field[data-role="setup-audio-input"] {
   overflow-wrap: anywhere;
   word-break: break-word;
   min-width: 0;
+  -webkit-user-select: text;
+  user-select: text;
 }
 .log-viewport.nowrap .log-msg {
   white-space: pre;
@@ -1109,6 +1123,8 @@ select.field[data-role="setup-audio-input"] {
   align-items: center;
   gap: var(--sp-2);
   flex-wrap: wrap;
+  -webkit-user-select: text;
+  user-select: text;
 }
 .kv-v-stack {
   display: flex;

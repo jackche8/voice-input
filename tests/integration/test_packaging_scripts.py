@@ -76,6 +76,11 @@ def test_pyinstaller_spec_compiles_and_enforces_single_exe_isolated_asr_and_lgpl
         return None
 
     exe_call = calls["EXE"][0]
+    assert len(exe_call.args) >= 3
+    exe_options = ast.literal_eval(exe_call.args[2])
+    assert isinstance(exe_options, list) and ("X utf8", None, "OPTION") in exe_options, (
+        f"EXE 缺少 UTF-8 模式引导选项: {exe_options!r}"
+    )
     assert ast.literal_eval(_kw(exe_call, "exclude_binaries")) is True
     assert ast.literal_eval(_kw(exe_call, "name")) == "ollama-voice-input"
     assert ast.literal_eval(_kw(exe_call, "console")) is False

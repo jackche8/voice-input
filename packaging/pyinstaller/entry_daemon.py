@@ -27,7 +27,22 @@ def _run_child_guard(rest: list[str]) -> int:
     return int(child_guard.main(rest))
 
 
+def _configure_windows_server_event_loop(*, platform: str | None = None) -> bool:
+    """Windows 服务端改用 SelectorEventLoop，避免 ProactorEventLoop 在 TLS 断开时抛 WinError 10054 刷屏。"""
+    resolved = sys.platform if platform is None else platform
+    if resolved != "win32":
+        return False
+    import asyncio
+
+    policy_cls = getattr(asyncio, "WindowsSelectorEventLoopPolicy", None)
+    if policy_cls is None:
+        return False
+    asyncio.set_event_loop_policy(policy_cls())
+    return True
+
+
 def _run_server(rest: list[str]) -> int:
+    _configure_windows_server_event_loop()
     import app as _app  # noqa: F401  # 确保 PyInstaller 静态分析追踪整个服务端依赖树
     import uvicorn
 
@@ -58,6 +73,17 @@ def _run_daemon() -> int:
 
     daemon.main()
     return 0
+
+
+def configure_utf8_stdio() -> None:
+    """冻结入口统一将非空 stdout/stderr 重配为 UTF-8（errors='replace'），消除 Windows GBK 日志乱码。"""
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if callable(reconfigure):
+            try:
+                reconfigure(encoding="utf-8", errors="replace")
+            except (OSError, ValueError):
+                pass
 
 
 def flush_stdio() -> None:
@@ -92,6 +118,7 @@ def dispatch(
 
 
 if __name__ == "__main__":
+    configure_utf8_stdio()
     exit_code = dispatch(sys.argv)
     flush_stdio()
     if len(sys.argv) > 1 and sys.argv[1] == INTERNAL_SETUP_WORKER_FLAG:

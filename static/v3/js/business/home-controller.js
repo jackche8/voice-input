@@ -78,6 +78,7 @@
     var histObj = opts.history || (typeof history !== "undefined" ? history : null);
     var view = null;
     var destroyed = false;
+    var persistentNotice = null;
     var lanToken = null;
     var lanUrls = [];
     var loadReqId = 0;
@@ -99,7 +100,24 @@
 
     function setState(patch) {
       if (destroyed) return;
-      if (view && typeof view.setState === "function") view.setState(patch);
+      var effective = patch;
+      if (
+        persistentNotice
+        && patch
+        && typeof patch === "object"
+        && Object.prototype.hasOwnProperty.call(patch, "statusNotice")
+        && patch.statusNotice === null
+      ) {
+        effective = Object.assign({}, patch, { statusNotice: persistentNotice });
+      }
+      if (view && typeof view.setState === "function") view.setState(effective);
+    }
+
+    function setPersistentNotice(msg) {
+      if (destroyed) return;
+      var normalized = (msg != null && String(msg).trim()) ? String(msg) : null;
+      persistentNotice = normalized;
+      setState({ statusNotice: normalized });
     }
 
     function getState() {
@@ -1000,6 +1018,7 @@
       start: function () { return loadAll(); },
       loadAll: loadAll,
       saveConfig: setupActions.saveConfig,
+      setPersistentNotice: setPersistentNotice,
       destroy: destroy,
       _debug: {
         getLanToken: function () { return lanToken; },

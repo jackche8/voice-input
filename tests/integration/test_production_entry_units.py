@@ -232,15 +232,62 @@ def test_entry_daemon_dispatches_five_modes_and_handles_none_stdio(monkeypatch):
         ("daemon", []),
     ]
 
-    # _run_server 将 uvicorn Click 的 SystemExit 转为整型退出码
+    # _run_server 先配置 Windows SelectorEventLoopPolicy，再将 uvicorn Click 的 SystemExit 转为整型退出码
+    import asyncio
     import uvicorn
 
+    call_order: list[str] = []
+
+    class _FakeSelectorPolicy:
+        pass
+
+    installed_policies: list[object] = []
+    monkeypatch.setattr(asyncio, "WindowsSelectorEventLoopPolicy", _FakeSelectorPolicy, raising=False)
+    monkeypatch.setattr(
+        asyncio,
+        "set_event_loop_policy",
+        lambda policy: (installed_policies.append(policy), call_order.append("set_policy")),
+    )
+    assert entry._configure_windows_server_event_loop(platform="linux") is False
+    assert installed_policies == []
+
+    monkeypatch.setattr(sys, "platform", "win32")
+
     def fake_uvicorn_main(*, args, prog_name):
+        call_order.append("uvicorn")
         assert args == ["--port", "17945"] and prog_name == "uvicorn"
         raise SystemExit(3)
 
     monkeypatch.setattr(uvicorn.main, "main", fake_uvicorn_main)
     assert entry._run_server(["--port", "17945"]) == 3
+    assert len(installed_policies) == 1 and isinstance(installed_policies[0], _FakeSelectorPolicy)
+    assert call_order == ["set_policy", "uvicorn"]
+
+    # configure_utf8_stdio：重配非空可重配流为 utf-8/replace，容忍 None、无 reconfigure 与抛 OSError/ValueError 的流
+    reconfigured: list[tuple[str, str, str]] = []
+
+    class _RecStream:
+        def __init__(self, name: str, err: Exception | None = None) -> None:
+            self.name = name
+            self.err = err
+
+        def reconfigure(self, *, encoding: str, errors: str) -> None:
+            if self.err is not None:
+                raise self.err
+            reconfigured.append((self.name, encoding, errors))
+
+    monkeypatch.setattr(sys, "stdout", _RecStream("out"))
+    monkeypatch.setattr(sys, "stderr", _RecStream("err"))
+    entry.configure_utf8_stdio()
+    assert reconfigured == [("out", "utf-8", "replace"), ("err", "utf-8", "replace")]
+
+    monkeypatch.setattr(sys, "stdout", _RecStream("bad_os", OSError("not a tty")))
+    monkeypatch.setattr(sys, "stderr", _RecStream("bad_val", ValueError("closed")))
+    entry.configure_utf8_stdio()
+
+    monkeypatch.setattr(sys, "stdout", object())
+    monkeypatch.setattr(sys, "stderr", None)
+    entry.configure_utf8_stdio()
 
     # Windows console=False 冻结态下 stdout/stderr 为 None 时 flush_stdio 不报错
     monkeypatch.setattr(sys, "stdout", None)
@@ -250,6 +297,11 @@ def test_entry_daemon_dispatches_five_modes_and_handles_none_stdio(monkeypatch):
 
 def test_entry_daemon_does_not_preimport_pyside6_on_import_or_internal_dispatch():
     entry_path = ROOT / "packaging" / "pyinstaller" / "entry_daemon.py"
+    entry_src = entry_path.read_text(encoding="utf-8")
+    main_idx = entry_src.index('if __name__ == "__main__":')
+    assert "configure_utf8_stdio()" in entry_src[main_idx:]
+    assert entry_src.index("configure_utf8_stdio()", main_idx) < entry_src.index("dispatch(sys.argv)", main_idx)
+
     env = {**os.environ, "PYTHONPATH": str(ROOT), "PYTHONDONTWRITEBYTECODE": "1"}
     probe = subprocess.run(
         [
@@ -259,7 +311,7 @@ def test_entry_daemon_does_not_preimport_pyside6_on_import_or_internal_dispatch(
                 "import importlib.util, sys; "
                 "s = importlib.util.spec_from_file_location('ovi_entry_daemon', sys.argv[1]); "
                 "m = importlib.util.module_from_spec(s); s.loader.exec_module(m); "
-                "bad = [k for k in ('PySide6', 'daemon', 'uvicorn', 'webview') if k in sys.modules]; "
+                "bad = [k for k in ('PySide6', 'daemon', 'uvicorn', 'webview', 'asyncio') if k in sys.modules]; "
                 "assert not bad, f'preimported: {bad}'"
             ),
             str(entry_path),

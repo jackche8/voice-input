@@ -1785,6 +1785,161 @@ def test_hotkey_rig_reset_voice_recovers_after_watchdog_timeout():
     assert mgr.dispatcher.voice_active is True and linux_starts == ["start", "start"]
 
 
+def test_pynput_hotkey_rig_async_generation_residual_window_uac_and_lifecycle_invariants(capsys):
+    """B1 硬不变量：返回 None/injected 清状态、代际防竞态、1.5s 超窗防永久吞键、UAC 止损、worker 异常隔离与 start 回滚。"""
+    from _platform._pynput_hotkeys import RESIDUAL_SUPPRESS_WINDOW_S, PynputHotkeyRig
+
+    def parse_simple(hk: str) -> tuple[int, int]:
+        parts = hk.lower().split("+")
+        mask = 0
+        for p in parts[:-1]:
+            mask |= {"ctrl": 1, "alt": 2, "shift": 4, "super": 8}[p]
+        return mask, 27 if parts[-1] == "escape" else ord(parts[-1])
+
+    def extract_simple(key: tuple[int, int]) -> tuple[int, int]:
+        return key
+
+    now = [100.0]
+    real_mask_box: list[int | None] = [None]
+    voice_started_gate = threading.Event()
+    allow_voice_finish = threading.Event()
+    voice_results = [False, True]
+    log: list[str] = []
+
+    def on_voice_start() -> bool:
+        res = voice_results.pop(0) if voice_results else True
+        log.append(f"v_start:{res}")
+        if not res:
+            voice_started_gate.set()
+            allow_voice_finish.wait(timeout=3.0)
+        return res
+
+    def on_shot() -> None:
+        log.append("shot_boom")
+        raise RuntimeError("transient screenshot error")
+
+    class _StubListener:
+        def __init__(self, *, on_press, on_release, fail_start: bool = False):
+            self.on_press = on_press
+            self.on_release = on_release
+            self.fail_start = fail_start
+            self.stopped = False
+
+        def start(self) -> None:
+            if self.fail_start:
+                raise RuntimeError("hook install failed")
+
+        def stop(self) -> None:
+            self.stopped = True
+
+    # 1. start() 遇 listener.start() 异常必须回滚停止 worker 且置 _listener=None
+    fail_rig = PynputHotkeyRig(
+        DEFAULTS,
+        backend_name="test-fail",
+        hotkey_parser=parse_simple,
+        key_extractor=extract_simple,
+        on_voice_start=lambda: True,
+        on_voice_stop=lambda: None,
+        on_screenshot=lambda: None,
+        listener_factory=lambda **kw: _StubListener(**kw, fail_start=True),
+    )
+    with pytest.raises(RuntimeError, match="hook install failed"):
+        fail_rig.start()
+    assert fail_rig._listener is None and fail_rig._action_queue is None and fail_rig._action_thread is None
+
+    # 2. 异步不阻塞钩子 + _voice_generation 防旧 on_voice_start()==False 误清新一轮 voice_active
+    rig = PynputHotkeyRig(
+        DEFAULTS,
+        backend_name="test-pynput",
+        hotkey_parser=parse_simple,
+        key_extractor=extract_simple,
+        on_voice_start=on_voice_start,
+        on_voice_stop=lambda: log.append("v_stop"),
+        on_screenshot=on_shot,
+        on_ocr=lambda: log.append("ocr"),
+        on_repeat=lambda: log.append("repeat"),
+        on_annotate=lambda: log.append("annotate"),
+        listener_factory=lambda **kw: _StubListener(**kw),
+        modifier_state_reader=lambda: real_mask_box[0],
+        clock=lambda: now[0],
+    )
+    rig.start()
+    assert rig.handle_press((1, 101)) is None
+    assert rig.handle_press((2, 102)) is None
+    # 第 1 轮按下 Z：钩子不阻塞（即使 on_voice_start 正阻塞在 allow_voice_finish）
+    assert rig.handle_press((0, ord("z"))) is None
+    assert voice_started_gate.wait(timeout=2.0)
+    assert rig.voice_active is True
+    # 第 1 轮尚未返回前快速松开 Z 再按下 Z（进入第 2 轮）
+    assert rig.handle_release((0, ord("z"))) is None
+    assert rig.handle_press((0, ord("z"))) is None
+    assert rig.voice_active is True
+    # 放行第 1 轮返回 False：因代际已前进，不得误清第 2 轮 voice_active
+    allow_voice_finish.set()
+    rig.drain_actions()
+    assert rig.voice_active is True
+    assert log[:3] == ["v_start:False", "v_stop", "v_start:True"]
+
+    # 3. reset_voice() 必须清 _suppressed_codes 并递增 _voice_generation
+    gen_before = rig._voice_generation
+    assert ord("z") in rig._suppressed_codes
+    rig.reset_voice()
+    assert rig.voice_active is False
+    assert rig._voice_generation == gen_before + 1
+    assert ord("z") not in rig._suppressed_codes
+
+    # 4. injected=True 必先清 _last_suppress=False 且返回 None
+    assert rig.handle_press((1, 101)) is None
+    assert rig.handle_press((2, 102)) is None
+    assert rig.handle_press((0, ord("o"))) is None  # 命中 OCR -> _last_suppress=True
+    assert rig._last_suppress is True
+    assert rig.handle_press((0, ord("v")), injected=True) is None
+    assert rig._last_suppress is False
+    assert rig.handle_release((0, ord("o"))) is None
+    assert rig._last_suppress is True
+    assert rig.handle_release((0, ord("v")), injected=True) is None
+    assert rig._last_suppress is False
+
+    # 5. 非语音热键长按 1.5s 内吞连发、超 1.5s 自动恢复防永久吞键；worker 抛异常打 stderr 不死
+    assert rig._handle_press_raw(0, ord("x")) is True               # 命中 screenshot（回调抛异常）
+    now[0] += RESIDUAL_SUPPRESS_WINDOW_S - 0.1
+    assert rig._handle_press_raw(0, ord("x")) is True               # <=1.5s 连发吞掉
+    now[0] += 0.2
+    # 模拟丢失 KEYUP 后超过 1.5s（先松修饰键再按 X）：自动驱逐陈旧状态，正常打字放行且后续抬起不误吞
+    assert rig.handle_release((1, 101)) is None
+    assert rig.handle_release((2, 102)) is None
+    assert rig._handle_press_raw(0, ord("x")) is False
+    assert ord("x") not in rig._suppressed_codes
+    assert rig._handle_release_raw(0, ord("x")) is False
+    # 校验 worker 异常被隔离并输出 stderr，且后续按键仍能正常执行
+    assert rig.handle_press((1, 101)) is None
+    assert rig.handle_press((2, 102)) is None
+    assert rig.handle_press((0, ord("r"))) is None
+    assert rig.handle_release((0, ord("r"))) is None
+    rig.drain_actions()
+    assert "shot_boom" in log and "repeat" in log
+    assert "transient screenshot error" in capsys.readouterr().err
+
+    # 6. UAC / Ctrl+Alt+Del 修饰键实态对账：仅裁过期 token（绝不插合成 token）+ voice_active 止损清 _suppressed_codes
+    real_mask_box[0] = 3  # ctrl|alt 真按下
+    assert rig._handle_press_raw(0, ord("z")) is True
+    assert rig.voice_active is True and ord("z") in rig._suppressed_codes
+    # UAC 切走丢失 Ctrl/Alt/Z 的 KEYUP，返回后真实修饰键为 0，用户普通敲 'z'
+    real_mask_box[0] = 0
+    assert rig._handle_press_raw(0, ord("z")) is False
+    assert rig.voice_active is False
+    assert rig._held_mod_tokens == set()
+    assert rig._suppressed_codes == {}
+    # real_mask 含未跟踪的 shift(4) 时只用作本次匹配，绝不往 _held_mod_tokens 插合成 token
+    real_mask_box[0] = 4
+    assert rig._handle_press_raw(0, ord("k")) is False
+    assert rig._held_mod_tokens == set()
+    rig.drain_actions()
+    assert log[-1] == "v_stop"
+    rig.stop()
+    assert rig._action_thread is None and rig._listener is None
+
+
 # ------------------------------------------------------------------ Actions / Repeat / SSE / Lock
 
 

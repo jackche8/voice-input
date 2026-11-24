@@ -14,7 +14,7 @@ from ctypes import wintypes
 from dataclasses import dataclass
 from typing import Literal, Protocol
 
-from _hotkey import KEY_TABLE
+from _hotkey import KEY_TABLE, WIN32_MODIFIERS
 
 VK_SHIFT = 0x10
 VK_CONTROL = 0x11
@@ -22,6 +22,14 @@ VK_MENU = 0x12
 VK_LWIN = 0x5B
 VK_RWIN = 0x5C
 VK_V = KEY_TABLE["v"].vk
+
+_WIN32_ASYNC_MOD_KEYS = (
+    (VK_CONTROL, WIN32_MODIFIERS["ctrl"]),
+    (VK_MENU, WIN32_MODIFIERS["alt"]),
+    (VK_SHIFT, WIN32_MODIFIERS["shift"]),
+    (VK_LWIN, WIN32_MODIFIERS["super"]),
+    (VK_RWIN, WIN32_MODIFIERS["super"]),
+)
 
 KEYEVENTF_KEYUP = 0x0002
 KEYEVENTF_UNICODE = 0x0004
@@ -75,6 +83,7 @@ def _configure_win32_signatures(user32, kernel32) -> None:
         "GetWindowTextLengthW": ([wintypes.HWND], ctypes.c_int),
         "GetWindowTextW": ([wintypes.HWND, wintypes.LPWSTR, ctypes.c_int], ctypes.c_int),
         "SendInput": ([wintypes.UINT, ctypes.c_void_p, ctypes.c_int], wintypes.UINT),
+        "GetAsyncKeyState": ([ctypes.c_int], ctypes.c_short),
         "OpenClipboard": ([wintypes.HWND], wintypes.BOOL),
         "CloseClipboard": ([], wintypes.BOOL),
         "EmptyClipboard": ([], wintypes.BOOL),
@@ -405,3 +414,28 @@ def set_windows_app_user_model_id(app_id: str, *, shell32=None) -> bool:
     fn.restype = ctypes.c_long
     hr = int(fn(app_id.strip()))
     return hr == 0
+
+
+def read_win32_modifier_mask(*, user32=None) -> int | None:
+    """通过 Win32 `GetAsyncKeyState` 读取当前真实物理修饰键掩码（防 UAC / Ctrl+Alt+Del 丢 KEYUP 粘滞）。
+
+    内部自行显式声明 `argtypes`/`restype`，不依赖 `CtypesWin32Api.__init__` 先执行；
+    非 Windows 且未注入 `user32` 时返回 `None`。
+    """
+    if user32 is None:
+        if os.name != "nt":
+            return None
+        windll = getattr(ctypes, "windll", None)
+        if windll is None:
+            return None
+        user32 = windll.user32
+    fn = getattr(user32, "GetAsyncKeyState", None)
+    if fn is None:
+        return None
+    fn.argtypes = [ctypes.c_int]
+    fn.restype = ctypes.c_short
+    mask = 0
+    for vk, flag in _WIN32_ASYNC_MOD_KEYS:
+        if int(fn(vk)) & 0x8000:
+            mask |= flag
+    return mask

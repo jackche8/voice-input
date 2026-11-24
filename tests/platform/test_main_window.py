@@ -163,11 +163,34 @@ class _FakeCertAction:
     Cancel = "CANCEL"
 
 
+class _FakeCoreSettings:
+    def __init__(self, timeline: list[tuple]) -> None:
+        self._timeline = timeline
+        self._ctx_menu = False
+        self.AreDevToolsEnabled = False
+
+    @property
+    def AreDefaultContextMenusEnabled(self) -> bool:
+        return self._ctx_menu
+
+    @AreDefaultContextMenusEnabled.setter
+    def AreDefaultContextMenusEnabled(self, value: bool) -> None:
+        self._ctx_menu = bool(value)
+        self._timeline.append(("set_context_menu", self._ctx_menu))
+
+
 class _FakeCoreWebView2:
     def __init__(self, timeline: list[tuple]) -> None:
         self.timeline = timeline
+        self.Settings = _FakeCoreSettings(timeline)
         self.ServerCertificateErrorDetected = _FakeEventSlot(
             on_add=lambda _h: timeline.append(("bind_cert_handler",))
+        )
+        self.NavigationCompleted = _FakeEventSlot(
+            on_add=lambda _h: timeline.append(("bind_nav_completed",))
+        )
+        self.WebResourceResponseReceived = _FakeEventSlot(
+            on_add=lambda _h: timeline.append(("bind_resource_response",))
         )
 
     def Navigate(self, url: str) -> None:
@@ -234,8 +257,26 @@ class _FakePyWebViewModule:
         self.start_calls: list[dict] = []
         self.window: _FakePyWebViewWindow | None = None
 
-    def create_window(self, title: str, url: str | None = None, *, html: str | None = None, width: int = 0, height: int = 0):
-        self.created.append({"title": title, "url": url, "html": html, "width": width, "height": height})
+    def create_window(
+        self,
+        title: str,
+        url: str | None = None,
+        *,
+        html: str | None = None,
+        width: int = 0,
+        height: int = 0,
+        text_select: bool = False,
+    ):
+        self.created.append(
+            {
+                "title": title,
+                "url": url,
+                "html": html,
+                "width": width,
+                "height": height,
+                "text_select": text_select,
+            }
+        )
         self.window = _FakePyWebViewWindow(title, url, html, self._native_factory(), self.timeline)
         return self.window
 
@@ -303,12 +344,38 @@ def test_pywebview_windows_defers_navigation_binds_cert_first_and_sets_icon_and_
         stdin_q.put('{"cmd": "show", "route": "/setup"}\n')
         assert first_handled.wait(timeout=5.0)
         assert not any(ev[0] == "load_url" for ev in timeline)
-        # WebView2 完成初始化：必须先绑 ServerCertificateErrorDetected 再 Navigate("/setup")
+        # WebView2 完成初始化：必须先绑证错、启用右键菜单、绑导航/资源诊断，再 Navigate("/setup")
         wv.CoreWebView2 = core
         wv.CoreWebView2InitializationCompleted.fire(wv, type("E", (), {"IsSuccess": True})())
-        assert ("bind_cert_handler",) in timeline and ("navigate", "https://127.0.0.1:17945/setup") in timeline
-        assert timeline.index(("bind_cert_handler",)) < timeline.index(("navigate", "https://127.0.0.1:17945/setup"))
+        nav_idx = timeline.index(("navigate", "https://127.0.0.1:17945/setup"))
+        assert timeline.index(("bind_cert_handler",)) < nav_idx
+        assert timeline.index(("set_context_menu", True)) < nav_idx
+        assert timeline.index(("bind_nav_completed",)) < nav_idx
+        assert timeline.index(("bind_resource_response",)) < nav_idx
+        assert core.Settings.AreDefaultContextMenusEnabled is True
+        assert core.Settings.AreDevToolsEnabled is False
         assert len(core.ServerCertificateErrorDetected.handlers) == 1
+        assert len(core.NavigationCompleted.handlers) == 1
+        assert len(core.WebResourceResponseReceived.handlers) == 1
+
+        # 导航与子资源响应诊断：成功与非本机静默；失败写 stderr 且剥离 #fragment
+        nav_h = core.NavigationCompleted.handlers[0]
+        nav_h(core, type("NavOk", (), {"IsSuccess": True, "WebErrorStatus": "Unknown", "NavigationId": 1})())
+        nav_h(core, type("NavFail", (), {"IsSuccess": False, "WebErrorStatus": "ConnectionAborted", "NavigationId": 2})())
+
+        res_h = core.WebResourceResponseReceived.handlers[0]
+
+        def _res_ev(uri: str, status: int | None, reason: str = "", *, missing_resp: bool = False):
+            req = type("Req", (), {"Uri": uri})()
+            resp = None if missing_resp else type("Resp", (), {"StatusCode": status, "ReasonPhrase": reason})()
+            return type("ResEv", (), {"Request": req, "Response": resp})()
+
+        res_h(core, _res_ev("https://127.0.0.1:17945/css/theme.css", 200, "OK"))
+        res_h(core, _res_ev("https://127.0.0.1:17945/css/theme.css", 304, "Not Modified"))
+        res_h(core, _res_ev("https://example.com/external.css", 500, "Server Error"))
+        res_h(core, _res_ev("https://127.0.0.1:17945/css/theme.css#token=secret_frag", 0, ""))
+        res_h(core, _res_ev("https://127.0.0.1:17945/css/studio.css?_css_retry=1", 404, "Not Found"))
+        res_h(core, _res_ev("https://127.0.0.1:17945/js/home.js#frag2", None, missing_resp=True))
 
         # 校证：1) ToPemEncoding + set_Action 放行本应用证书 + 127.0.0.1
         actions: list[str] = []
@@ -375,13 +442,21 @@ def test_pywebview_windows_defers_navigation_binds_cert_first_and_sets_icon_and_
     assert rc == 0
     assert aumids == [APP_USER_MODEL_ID]
     assert mod.settings.get("OPEN_EXTERNAL_LINKS_IN_BROWSER") is True
-    assert mod.created == [{"title": APP_DISPLAY_NAME, "url": None, "html": "", "width": 1180, "height": 820}]
+    assert mod.created == [
+        {"title": APP_DISPLAY_NAME, "url": None, "html": "", "width": 1180, "height": 820, "text_select": True}
+    ]
     assert mod.start_calls == [{"icon": str(ico_path)}]
     assert icon_instances == [str(ico_path)] and isinstance(form.Icon, _FakeDrawingIcon)
     assert ("load_url", "https://127.0.0.1:17945/history") in timeline
     err_text = capsys.readouterr().err
     assert "主界面证书校验失败" in err_text
     assert "证书校验异常" in err_text
+    assert "WebView2 导航失败：status=ConnectionAborted nav_id=2" in err_text
+    assert "WebView2 本地资源加载失败：status=0 reason= uri=https://127.0.0.1:17945/css/theme.css" in err_text
+    assert "WebView2 本地资源加载失败：status=404 reason=Not Found uri=https://127.0.0.1:17945/css/studio.css?_css_retry=1" in err_text
+    assert "WebView2 本地资源加载失败：status=None reason= uri=https://127.0.0.1:17945/js/home.js" in err_text
+    assert "secret_frag" not in err_text and "frag2" not in err_text
+    assert "example.com" not in err_text and "Not Modified" not in err_text and "status=200" not in err_text
 
 
 def test_pywebview_windows_invoke_marshalling_disposed_guard_and_init_failure(tmp_path, capsys):
@@ -480,7 +555,16 @@ def test_pywebview_macos_untouched_and_missing_backend_and_no_ignore_ssl(tmp_pat
     )
     assert rc == 0 and aumids == []
     assert mod.settings.get("OPEN_EXTERNAL_LINKS_IN_BROWSER") is True
-    assert mod.created == [{"title": APP_DISPLAY_NAME, "url": "https://127.0.0.1:17945/", "html": None, "width": 1180, "height": 820}]
+    assert mod.created == [
+        {
+            "title": APP_DISPLAY_NAME,
+            "url": "https://127.0.0.1:17945/",
+            "html": None,
+            "width": 1180,
+            "height": 820,
+            "text_select": True,
+        }
+    ]
     assert mod.start_calls == [{}]  # macOS 不传 icon
 
     # 缺少 pywebview 抛 BackendMissing
@@ -488,9 +572,100 @@ def test_pywebview_macos_untouched_and_missing_backend_and_no_ignore_ssl(tmp_pat
     with pytest.raises(BackendMissing):
         pywebview_host.run(args, platform="darwin")
 
-    # 严禁代码使用 IGNORE_SSL_ERRORS
+    # 严禁代码使用全局 SSL 忽略或无 await 盲清证书白名单
     src = (ROOT / "_window" / "pywebview_host.py").read_text(encoding="utf-8")
     assert "IGNORE_SSL_ERRORS" not in src
+    assert "ignore-certificate-errors" not in src
+    assert "ClearServerCertificateErrorActionsAsync" not in src
+
+
+def test_pywebview_windows_diagnostics_and_settings_errors_are_isolated_from_cert_init(tmp_path, capsys):
+    """B2 异常隔离：Settings 与诊断事件绑定/回调异常仅写 stderr 不毁窗；证书绑定异常仍致命毁窗。"""
+    import argparse
+
+    cert_path, _der, _pem = _write_fake_cert(tmp_path)
+    args = argparse.Namespace(title=APP_DISPLAY_NAME, url="https://127.0.0.1:17945/", cert=str(cert_path))
+
+    class _BrokenSettings:
+        @property
+        def AreDefaultContextMenusEnabled(self) -> bool:
+            return False
+
+        @AreDefaultContextMenusEnabled.setter
+        def AreDefaultContextMenusEnabled(self, _value: bool) -> None:
+            raise RuntimeError("settings com error")
+
+    class _BrokenSlot:
+        def __iadd__(self, _handler):
+            raise RuntimeError("slot subscribe error")
+
+    # 1. Settings 写失败 + 诊断事件绑定失败 → 仅记 stderr，仍完成 Navigate 且不毁窗
+    timeline1: list[tuple] = []
+    core1 = _FakeCoreWebView2(timeline1)
+    core1.Settings = _BrokenSettings()  # type: ignore[assignment]
+    core1.NavigationCompleted = _BrokenSlot()  # type: ignore[assignment]
+    core1.WebResourceResponseReceived = _BrokenSlot()  # type: ignore[assignment]
+    wv1 = _FakeWebView2Control(timeline1, initial_core=core1)
+    form1 = _FakeWinForm(wv1, timeline1, invoke_required=False)
+    mod1 = _FakePyWebViewModule(
+        lambda: form1,
+        timeline1,
+        lambda win, started: (win.events.before_show.fire(win), started(), _wait_until(lambda: win.destroyed)),
+    )
+    rc1 = pywebview_host.run(
+        args,
+        webview_mod=mod1,
+        platform="win32",
+        resources_dir=tmp_path,
+        stdin=io.StringIO('{"cmd": "quit"}\n'),
+        set_aumid=lambda _a: True,
+        cert_action_cls=_FakeCertAction,
+    )
+    err1 = capsys.readouterr().err
+    assert rc1 == 0
+    assert ("navigate", "https://127.0.0.1:17945/") in timeline1
+    assert "启用默认右键菜单失败" in err1
+    assert "绑定 NavigationCompleted 失败" in err1
+    assert "绑定 WebResourceResponseReceived 失败" in err1
+
+    # 2. 诊断回调内部遇到损坏 event 属性 → 仅写 stderr，不抛出崩溃 UI 线程
+    class _ExplodingEvent:
+        @property
+        def IsSuccess(self):
+            raise RuntimeError("nav arg broken")
+
+        @property
+        def Request(self):
+            raise RuntimeError("req arg broken")
+
+    pywebview_host._make_navigation_completed_handler()(None, _ExplodingEvent())
+    pywebview_host._make_resource_response_handler()(None, _ExplodingEvent())
+    err2 = capsys.readouterr().err
+    assert "导航诊断回调异常" in err2 and "资源诊断回调异常" in err2
+
+    # 3. 证书校验事件绑定失败 → 依然走致命 _fail_init 毁窗并返回非 0
+    timeline3: list[tuple] = []
+    core3 = _FakeCoreWebView2(timeline3)
+    core3.ServerCertificateErrorDetected = _BrokenSlot()  # type: ignore[assignment]
+    wv3 = _FakeWebView2Control(timeline3, initial_core=core3)
+    form3 = _FakeWinForm(wv3, timeline3, invoke_required=False)
+    mod3 = _FakePyWebViewModule(
+        lambda: form3,
+        timeline3,
+        lambda win, started: (win.events.before_show.fire(win), started()),
+    )
+    rc3 = pywebview_host.run(
+        args,
+        webview_mod=mod3,
+        platform="win32",
+        resources_dir=tmp_path,
+        stdin=io.StringIO(""),
+        set_aumid=lambda _a: True,
+        cert_action_cls=_FakeCertAction,
+    )
+    assert rc3 != 0 and mod3.window.destroyed is True
+    assert not any(ev[0] == "navigate" for ev in timeline3)
+    assert "证书校验初始化失败" in capsys.readouterr().err
 
 
 def test_external_links_policy_and_webkit_gtk_signal_wiring(monkeypatch):

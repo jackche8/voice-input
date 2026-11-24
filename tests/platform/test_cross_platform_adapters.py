@@ -23,6 +23,7 @@ from _platform._win32_api import (
     CF_UNICODETEXT,
     CtypesWin32Api,
     _configure_win32_signatures,
+    read_win32_modifier_mask,
     set_windows_app_user_model_id,
 )
 from _platform.detect import create_platform_adapter, detect_os
@@ -49,6 +50,7 @@ from _platform.windows import (
     VK_V,
     WINDOWS_TERMINAL_EXES,
     WinClipboardSnapshot,
+    WindowsHotkeyRig,
     WindowsPlatformAdapter,
 )
 
@@ -84,18 +86,58 @@ class _FakeMss:
         return _FakeMssShot((16, 8))
 
 
+class _FakeSuppressException(Exception):
+    """模拟 pynput SystemHook.SuppressException。"""
+
+
 class _FakeListener:
-    def __init__(self, on_press, on_release):
+    def __init__(self, on_press, on_release, **kwargs):
         self.on_press = on_press
         self.on_release = on_release
+        self.win32_event_filter = kwargs.get("win32_event_filter")
+        self.darwin_intercept = kwargs.get("darwin_intercept")
+        self.kwargs = dict(kwargs)
         self.started = False
         self.stopped = False
+        self.suppressed_count = 0
 
     def start(self):
         self.started = True
 
     def stop(self):
         self.stopped = True
+
+    def suppress_event(self):
+        self.suppressed_count += 1
+        raise _FakeSuppressException()
+
+    def send_win32(self, msg: int, vk: int, flags: int = 0) -> tuple[bool, bool | None]:
+        """模拟 pynput SystemHook._handler -> _convert -> win32_event_filter，返回 (suppressed, filter_ret)。"""
+        data = type("_KbdData", (), {"vkCode": vk, "scanCode": 0, "flags": flags, "time": 0, "dwExtraInfo": 0})()
+        assert self.win32_event_filter is not None
+        try:
+            ret = self.win32_event_filter(msg, data)
+            return False, ret
+        except _FakeSuppressException:
+            return True, None
+
+    def send_darwin(self, event_type: int, key, *, injected: bool = False):
+        """模拟 pynput darwin._handler：先调 _handle_message(on_press/on_release)，再调 darwin_intercept。"""
+        if event_type == 10:
+            ret = self.on_press(key, injected)
+            assert ret is None
+        elif event_type == 11:
+            ret = self.on_release(key, injected)
+            assert ret is None
+        elif event_type == 12:
+            # FlagsChanged：由调用方直接先走 on_press/on_release 或按 key.pressed 判断
+            if getattr(key, "pressed", True):
+                assert self.on_press(key, injected) is None
+            else:
+                assert self.on_release(key, injected) is None
+        sentinel = ("cg_event", event_type, key)
+        assert self.darwin_intercept is not None
+        return self.darwin_intercept(event_type, sentinel)
 
 
 class _FakeKey:
@@ -390,8 +432,8 @@ def test_windows_adapter_focus_terminals_sendinput_clipboard_hotkeys_and_autosta
     adapter = WindowsPlatformAdapter(
         win32_api=api,
         mss_factory=lambda: _FakeMss({"left": -1920, "top": 0, "width": 4480, "height": 1440}),
-        listener_factory=lambda on_press, on_release: (
-            listeners.append(_FakeListener(on_press, on_release)) or listeners[-1]
+        listener_factory=lambda **kw: (
+            listeners.append(_FakeListener(**kw)) or listeners[-1]
         ),
         sleep=sleeps.append,
         ocr_languages=lambda: ["chi_sim", "chi_tra", "eng"],
@@ -484,11 +526,13 @@ def test_windows_adapter_focus_terminals_sendinput_clipboard_hotkeys_and_autosta
     lst.on_release(_FakeKey(char="r", vk=0x52))
     lst.on_release(_FakeKey(name="alt_l", vk=0xA4))
     lst.on_release(_FakeKey(name="ctrl_l", vk=0xA2))
+    rig.drain_actions()
     assert events == ["v_start", "v_stop", "shot", "ocr", "repeat"]
     assert overlay_open["v"] is True
     # 非修饰键且未命中自身热键（如 Esc）触发关闭浮窗
     lst.on_press(_FakeKey(name="esc", vk=0x1B))
     lst.on_release(_FakeKey(name="esc", vk=0x1B))
+    rig.drain_actions()
     assert overlay_open["v"] is False and events[-1] == "close_ov"
     rig.stop()
     assert lst.stopped is True
@@ -573,8 +617,8 @@ def test_macos_adapter_bundles_paste_hotkeys_plist_and_permissions(tmp_path: Pat
 
     adapter = MacOSPlatformAdapter(
         macos_api=api,
-        listener_factory=lambda on_press, on_release: (
-            listeners.append(_FakeListener(on_press, on_release)) or listeners[-1]
+        listener_factory=lambda **kw: (
+            listeners.append(_FakeListener(**kw)) or listeners[-1]
         ),
         sleep=sleeps.append,
         temp_dir=tmp_path / "mac_tmp",
@@ -666,6 +710,7 @@ def test_macos_adapter_bundles_paste_hotkeys_plist_and_permissions(tmp_path: Pat
     lst.on_release(_FakeKey(char="r", vk=0x0F))
     lst.on_release(_FakeKey(name="alt", vk=0x3A))
     lst.on_release(_FakeKey(name="cmd", vk=0x37))
+    rig.drain_actions()
     assert events == ["v_start", "v_stop", "shot", "ocr", "repeat"]
     rig.stop()
 
@@ -776,6 +821,7 @@ def test_configure_win32_signatures_sets_64bit_safe_types():
         "GetWindowTextLengthW": ([wintypes.HWND], ctypes.c_int),
         "GetWindowTextW": ([wintypes.HWND, wintypes.LPWSTR, ctypes.c_int], ctypes.c_int),
         "SendInput": ([wintypes.UINT, ctypes.c_void_p, ctypes.c_int], wintypes.UINT),
+        "GetAsyncKeyState": ([ctypes.c_int], ctypes.c_short),
         "OpenClipboard": ([wintypes.HWND], wintypes.BOOL),
         "CloseClipboard": ([], wintypes.BOOL),
         "EmptyClipboard": ([], wintypes.BOOL),
@@ -856,8 +902,8 @@ def test_extract_macos_key_info_handles_none_vk_and_zero_keycode_a():
         on_voice_start=lambda: (events.append("start_a") or True),
         on_voice_stop=lambda: events.append("stop_a"),
         on_screenshot=lambda: events.append("shot"),
-        listener_factory=lambda on_press, on_release: (
-            listeners.append(_FakeListener(on_press, on_release)) or listeners[-1]
+        listener_factory=lambda **kw: (
+            listeners.append(_FakeListener(**kw)) or listeners[-1]
         ),
     )
     rig.start()
@@ -866,6 +912,7 @@ def test_extract_macos_key_info_handles_none_vk_and_zero_keycode_a():
     lst.on_press(_FakeKey(char="a", vk=0))
     lst.on_release(_FakeKey(char="a", vk=0))
     lst.on_release(FakeModifierKey(name="cmd", value=FakeVal(vk=None)))
+    rig.drain_actions()
     assert events == ["start_a", "stop_a"]
     rig.stop()
 
@@ -1265,8 +1312,8 @@ def test_pynput_hotkeys_modifier_and_own_binding_do_not_close_overlay():
         on_repeat=lambda: events.append("repeat"),
         overlay_active=lambda: overlay_open["v"],
         close_overlay=lambda: (overlay_open.__setitem__("v", False) or events.append("close_ov") or True),
-        listener_factory=lambda on_press, on_release: (
-            listeners.append(_FakeListener(on_press, on_release)) or listeners[-1]
+        listener_factory=lambda **kw: (
+            listeners.append(_FakeListener(**kw)) or listeners[-1]
         ),
     )
     rig.start()
@@ -1280,6 +1327,7 @@ def test_pynput_hotkeys_modifier_and_own_binding_do_not_close_overlay():
     ):
         lst.on_press(mod)
         lst.on_release(mod)
+    rig.drain_actions()
     assert events == [] and overlay_open["v"] is True
 
     # 自身四个绑定组合键在浮窗活跃时直接派发动作，不先额外关闭浮窗
@@ -1297,16 +1345,19 @@ def test_pynput_hotkeys_modifier_and_own_binding_do_not_close_overlay():
     lst.on_release(_FakeKey(char="z", vk=0x06))
     lst.on_release(_FakeKey(name="alt", vk=0x3A))
     lst.on_release(_FakeKey(name="cmd", vk=0x37))
+    rig.drain_actions()
     assert events == ["shot", "ocr", "repeat", "v_start", "v_stop"]
     assert overlay_open["v"] is True
 
     # 普通键（如 'a'）不再关闭浮窗，只有 Esc 关闭
     lst.on_press(_FakeKey(char="a", vk=0x00))
     lst.on_release(_FakeKey(char="a", vk=0x00))
+    rig.drain_actions()
     assert overlay_open["v"] is True and "close_ov" not in events
 
     lst.on_press(_FakeKey(name="esc", vk=0x35))
     lst.on_release(_FakeKey(name="esc", vk=0x35))
+    rig.drain_actions()
     assert overlay_open["v"] is False and events[-1] == "close_ov"
     rig.stop()
 
@@ -2079,3 +2130,217 @@ def test_resolve_audio_input_device_and_sound_device_source_hotplug():
     with pytest.raises(RuntimeError) as ei_ambig:
         resolve_audio_input_device(prefix_31, sounddevice_mod=sd_ambig, os_name="windows")
     assert "歧义" in str(ei_ambig.value) and len(str(ei_ambig.value)) <= 80
+
+
+def test_read_win32_modifier_mask_self_configures_signature_and_windows_rig_offline_isolation(monkeypatch):
+    """B1：GetAsyncKeyState 自配 64 位签名，且注入 listener_factory 的离线测试绝不自动挂真实 user32。"""
+    import os
+    from _hotkey import WIN32_MODIFIERS
+
+    # 1. 独立调用 read_win32_modifier_mask（不依赖 CtypesWin32Api.__init__）自配 argtypes/restype 并解析有符号/无符号高位
+    state = {
+        0x11: -32768,  # VK_CONTROL: signed c_short 0x8000 (pressed)
+        0x12: 0x8001,  # VK_MENU: pressed
+        0x10: 0x0001,  # VK_SHIFT: only low bit (not currently down)
+        0x5B: 0,       # VK_LWIN: up
+        0x5C: -32767,  # VK_RWIN: pressed
+    }
+    user32 = _FakeWinDll({"GetAsyncKeyState": lambda vk: state.get(vk, 0)})
+    mask = read_win32_modifier_mask(user32=user32)
+    assert mask == (WIN32_MODIFIERS["ctrl"] | WIN32_MODIFIERS["alt"] | WIN32_MODIFIERS["super"])
+    fn = user32._m["GetAsyncKeyState"]
+    assert fn.argtypes == [ctypes.c_int] and fn.restype is ctypes.c_short
+
+    # 非 Windows 且未注入 user32 返回 None
+    if os.name != "nt":
+        assert read_win32_modifier_mask() is None
+
+    # 2. 离线隔离：即使在 os.name == "nt" 下，注入假 listener_factory 也不得自动挂真实 user32
+    monkeypatch.setattr("_platform.windows.os.name", "nt")
+    rig_fake = WindowsHotkeyRig(
+        BINDINGS,
+        on_voice_start=lambda: True,
+        on_voice_stop=lambda: None,
+        on_screenshot=lambda: None,
+        listener_factory=lambda **kw: _FakeListener(**kw),
+    )
+    assert rig_fake._modifier_state_reader is None
+
+    # 无 listener_factory 且 os.name == "nt" 时默认绑定 read_win32_modifier_mask
+    rig_real_win = WindowsHotkeyRig(
+        BINDINGS,
+        on_voice_start=lambda: True,
+        on_voice_stop=lambda: None,
+        on_screenshot=lambda: None,
+    )
+    assert rig_real_win._modifier_state_reader is read_win32_modifier_mask
+
+
+def test_windows_hotkey_rig_win32_event_filter_suppresses_five_bindings_and_passes_others():
+    """B1：Windows WH_KEYBOARD_LL 精确吞掉 5 条应用组合热键（含连发、1.5s 残留窗与孤立抬起），放行注入键/修饰键/普通键/Esc。"""
+    WM_KEYDOWN, WM_KEYUP, WM_SYSKEYDOWN, WM_SYSKEYUP = 0x0100, 0x0101, 0x0104, 0x0105
+    LLKHF_LOWER_IL_INJECTED, LLKHF_INJECTED, VK_PACKET = 0x02, 0x10, 0xE7
+
+    now = [10.0]
+    events: list[str] = []
+    listeners: list[_FakeListener] = []
+    overlay_open = {"v": True}
+
+    rig = WindowsHotkeyRig(
+        HotkeyBindings(
+            voice="ctrl+alt+z",
+            screenshot="ctrl+alt+x",
+            ocr="ctrl+alt+o",
+            repeat="ctrl+alt+r",
+            annotate="ctrl+alt+a",
+        ),
+        on_voice_start=lambda: (events.append("v_start") or True),
+        on_voice_stop=lambda: events.append("v_stop"),
+        on_screenshot=lambda: events.append("shot"),
+        on_ocr=lambda: events.append("ocr"),
+        on_repeat=lambda: events.append("repeat"),
+        on_annotate=lambda: events.append("annotate"),
+        overlay_active=lambda: overlay_open["v"],
+        close_overlay=lambda: (overlay_open.__setitem__("v", False) or events.append("close_ov") or True),
+        listener_factory=lambda **kw: (listeners.append(_FakeListener(**kw)) or listeners[-1]),
+        clock=lambda: now[0],
+    )
+    rig.start()
+    lst = listeners[-1]
+    assert lst.win32_event_filter is not None
+
+    # 1. 注入键（LLKHF_INJECTED / LLKHF_LOWER_IL_INJECTED）与 VK_PACKET、非按键消息一律放行且不污染修饰键态
+    for msg, vk, flags in (
+        (WM_KEYDOWN, 0xA2, LLKHF_INJECTED),
+        (WM_KEYDOWN, 0xA4, LLKHF_LOWER_IL_INJECTED),
+        (WM_KEYDOWN, 0x5A, LLKHF_INJECTED),
+        (WM_KEYDOWN, VK_PACKET, 0),
+        (0x0200, 0x5A, 0),
+    ):
+        assert lst.send_win32(msg, vk, flags) == (False, False)
+    assert rig._held_mod_tokens == set()
+
+    # 2. 语音热键 Ctrl+Alt+Z：修饰键放行；Z 按下、长按连发、先松 Ctrl 后 1.5s 内残留连发、Z 抬起全吞
+    assert lst.send_win32(WM_KEYDOWN, 0xA2) == (False, False)       # Ctrl down
+    assert lst.send_win32(WM_SYSKEYDOWN, 0xA4) == (False, False)    # Alt down
+    assert lst.send_win32(WM_SYSKEYDOWN, 0x5A) == (True, None)      # Z down -> suppressed
+    now[0] += 5.0  # 说话 5s 期间持续连发仍全吞
+    assert lst.send_win32(WM_SYSKEYDOWN, 0x5A) == (True, None)
+    now[0] += 0.1
+    assert lst.send_win32(WM_KEYUP, 0xA2) == (False, False)         # 先松 Ctrl -> 放行并停录音
+    now[0] += 0.3
+    assert lst.send_win32(WM_KEYDOWN, 0x5A) == (True, None)         # 修饰键先松开后的残留 Z 连发（<=1.5s）全吞
+    now[0] += 0.1
+    assert lst.send_win32(WM_KEYUP, 0x5A) == (True, None)           # 孤立 Z 抬起一并吞掉
+    assert lst.send_win32(WM_SYSKEYUP, 0xA4) == (False, False)      # Alt up -> 放行
+
+    # 3. 其余 4 条热键（原位翻译 X / 纯 OCR O / 重复 R / 截屏标注 A）按下、1.5s 内长按连发、抬起均吞
+    assert lst.send_win32(WM_KEYDOWN, 0xA2) == (False, False)
+    assert lst.send_win32(WM_SYSKEYDOWN, 0xA4) == (False, False)
+    for vk in (0x58, 0x4F, 0x52, 0x41):
+        now[0] += 0.1
+        assert lst.send_win32(WM_SYSKEYDOWN, vk) == (True, None)
+        now[0] += 0.4
+        assert lst.send_win32(WM_SYSKEYDOWN, vk) == (True, None)    # 长按连发吞掉
+        now[0] += 0.1
+        assert lst.send_win32(WM_SYSKEYUP, vk) == (True, None)      # 孤立抬起吞掉
+    assert lst.send_win32(WM_SYSKEYUP, 0xA4) == (False, False)
+    assert lst.send_win32(WM_KEYUP, 0xA2) == (False, False)
+
+    # 4. 普通打字（单按 Z/A）与其他应用快捷键（Ctrl+C / Alt+Z）全放行
+    assert lst.send_win32(WM_KEYDOWN, 0x5A) == (False, False)
+    assert lst.send_win32(WM_KEYUP, 0x5A) == (False, False)
+    assert lst.send_win32(WM_KEYDOWN, 0xA2) == (False, False)
+    assert lst.send_win32(WM_KEYDOWN, 0x43) == (False, False)       # Ctrl+C
+    assert lst.send_win32(WM_KEYUP, 0x43) == (False, False)
+    assert lst.send_win32(WM_KEYUP, 0xA2) == (False, False)
+    assert lst.send_win32(WM_SYSKEYDOWN, 0xA4) == (False, False)
+    assert lst.send_win32(WM_SYSKEYDOWN, 0x5A) == (False, False)    # Alt+Z
+    assert lst.send_win32(WM_SYSKEYUP, 0x5A) == (False, False)
+    assert lst.send_win32(WM_SYSKEYUP, 0xA4) == (False, False)
+
+    # 5. Option A：浮窗激活态 Esc 不吞键（保 U12 聚焦态 Qt keyPressEvent），仍异步调 close_overlay()
+    assert lst.send_win32(WM_KEYDOWN, 0x1B) == (False, False)
+    assert lst.send_win32(WM_KEYUP, 0x1B) == (False, False)
+
+    rig.drain_actions()
+    assert events == ["v_start", "v_stop", "shot", "ocr", "repeat", "annotate", "close_ov"]
+    assert overlay_open["v"] is False
+    rig.stop()
+
+
+def test_macos_hotkey_rig_darwin_intercept_symmetrically_suppresses_five_bindings():
+    """B1：macOS darwin_intercept 对称复用同一状态机吞掉 5 条应用组合热键，放行修饰键/注入键/普通键/Esc。"""
+    KCG_DOWN, KCG_UP, KCG_FLAGS = 10, 11, 12
+    now = [20.0]
+    events: list[str] = []
+    listeners: list[_FakeListener] = []
+    overlay_open = {"v": True}
+
+    def _mod_key(name: str, vk: int, pressed: bool):
+        k = _FakeKey(name=name, vk=vk)
+        k.pressed = pressed  # type: ignore[attr-defined]
+        return k
+
+    rig = MacOSHotkeyRig(
+        HotkeyBindings(
+            voice="super+alt+z",
+            screenshot="super+shift+x",
+            ocr="super+shift+o",
+            repeat="super+alt+r",
+            annotate="super+shift+a",
+        ),
+        on_voice_start=lambda: (events.append("v_start") or True),
+        on_voice_stop=lambda: events.append("v_stop"),
+        on_screenshot=lambda: events.append("shot"),
+        on_ocr=lambda: events.append("ocr"),
+        on_repeat=lambda: events.append("repeat"),
+        on_annotate=lambda: events.append("annotate"),
+        overlay_active=lambda: overlay_open["v"],
+        close_overlay=lambda: (overlay_open.__setitem__("v", False) or events.append("close_ov") or True),
+        listener_factory=lambda **kw: (listeners.append(_FakeListener(**kw)) or listeners[-1]),
+        clock=lambda: now[0],
+    )
+    rig.start()
+    lst = listeners[-1]
+    assert lst.darwin_intercept is not None
+
+    # 1. 语音热键 Cmd+Alt+Z：修饰键 FlagsChanged 放行；Z 按下/连发/早松 Cmd 后 1.5s 残留连发/抬起全返回 None 拦截
+    assert lst.send_darwin(KCG_FLAGS, _mod_key("cmd", 0x37, True)) is not None
+    assert lst.send_darwin(KCG_FLAGS, _mod_key("alt", 0x3A, True)) is not None
+    assert lst.send_darwin(KCG_DOWN, _FakeKey(char="z", vk=0x06)) is None
+    now[0] += 3.0
+    assert lst.send_darwin(KCG_DOWN, _FakeKey(char="z", vk=0x06)) is None
+    assert lst.send_darwin(KCG_FLAGS, _mod_key("cmd", 0x37, False)) is not None  # 早松修饰键放行并停语音
+    now[0] += 0.4
+    assert lst.send_darwin(KCG_DOWN, _FakeKey(char="z", vk=0x06)) is None        # 残留连发吞掉
+    assert lst.send_darwin(KCG_UP, _FakeKey(char="z", vk=0x06)) is None          # 孤立抬起吞掉
+    assert lst.send_darwin(KCG_FLAGS, _mod_key("alt", 0x3A, False)) is not None
+
+    # 2. 其余 4 条热键（含 kVK_ANSI_A == 0）按下/连发/抬起全拦截
+    assert lst.send_darwin(KCG_FLAGS, _mod_key("cmd", 0x37, True)) is not None
+    assert lst.send_darwin(KCG_FLAGS, _mod_key("shift", 0x38, True)) is not None
+    for ch, kc in (("x", 0x07), ("o", 0x1F), ("a", 0x00)):
+        assert lst.send_darwin(KCG_DOWN, _FakeKey(char=ch, vk=kc)) is None
+        now[0] += 0.2
+        assert lst.send_darwin(KCG_DOWN, _FakeKey(char=ch, vk=kc)) is None
+        assert lst.send_darwin(KCG_UP, _FakeKey(char=ch, vk=kc)) is None
+    assert lst.send_darwin(KCG_FLAGS, _mod_key("shift", 0x38, False)) is not None
+    assert lst.send_darwin(KCG_FLAGS, _mod_key("alt", 0x3A, True)) is not None
+    assert lst.send_darwin(KCG_DOWN, _FakeKey(char="r", vk=0x0F)) is None
+    assert lst.send_darwin(KCG_UP, _FakeKey(char="r", vk=0x0F)) is None
+    assert lst.send_darwin(KCG_FLAGS, _mod_key("alt", 0x3A, False)) is not None
+    assert lst.send_darwin(KCG_FLAGS, _mod_key("cmd", 0x37, False)) is not None
+
+    # 3. 自身 CGEventPost 注入键（injected=True）、普通键与浮窗 Esc（Option A）均返回 event 放行
+    assert lst.send_darwin(KCG_DOWN, _FakeKey(char="v", vk=0x09), injected=True) is not None
+    assert lst.send_darwin(KCG_UP, _FakeKey(char="v", vk=0x09), injected=True) is not None
+    assert lst.send_darwin(KCG_DOWN, _FakeKey(char="z", vk=0x06)) is not None
+    assert lst.send_darwin(KCG_UP, _FakeKey(char="z", vk=0x06)) is not None
+    assert lst.send_darwin(KCG_DOWN, _FakeKey(name="esc", vk=0x35)) is not None
+    assert lst.send_darwin(KCG_UP, _FakeKey(name="esc", vk=0x35)) is not None
+
+    rig.drain_actions()
+    assert events == ["v_start", "v_stop", "shot", "ocr", "annotate", "repeat", "close_ov"]
+    assert overlay_open["v"] is False
+    rig.stop()

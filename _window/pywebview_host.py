@@ -150,6 +150,78 @@ def _make_cert_error_handler(action_cls, app_cert_der: bytes):
     return on_error
 
 
+def _make_navigation_completed_handler():
+    """WebView2：导航失败时记录状态到 stderr（window.log），成功静默；内部异常隔离不崩 UI 线程。"""
+
+    def on_nav_completed(_sender, event) -> None:
+        try:
+            if bool(getattr(event, "IsSuccess", True)):
+                return
+            status = getattr(event, "WebErrorStatus", "unknown")
+            nav_id = getattr(event, "NavigationId", "")
+            print(
+                f"[window] WebView2 导航失败：status={status} nav_id={nav_id}",
+                file=sys.stderr,
+                flush=True,
+            )
+        except Exception as exc:
+            print(f"[window] WebView2 导航诊断回调异常：{exc}", file=sys.stderr, flush=True)
+
+    return on_nav_completed
+
+
+def _make_resource_response_handler():
+    """WebView2：仅对 127.0.0.1 本机子资源失败（无响应 / 0 / >=400）记录 stderr，剥离 #fragment。"""
+
+    def on_resource_response(_sender, event) -> None:
+        try:
+            req = getattr(event, "Request", None)
+            uri = str(getattr(req, "Uri", "") or "")
+            parts = urlsplit(uri)
+            if (parts.hostname or "").lower() != "127.0.0.1":
+                return
+            resp = getattr(event, "Response", None)
+            status = None if resp is None else getattr(resp, "StatusCode", None)
+            status_int = None if status is None else int(status)
+            if resp is not None and status_int is not None and 0 < status_int < 400:
+                return
+            reason = "" if resp is None else str(getattr(resp, "ReasonPhrase", "") or "")
+            clean_uri = urlunsplit((parts.scheme, parts.netloc, parts.path, parts.query, ""))
+            print(
+                f"[window] WebView2 本地资源加载失败：status={status_int} reason={reason} uri={clean_uri}",
+                file=sys.stderr,
+                flush=True,
+            )
+        except Exception as exc:
+            print(f"[window] WebView2 资源诊断回调异常：{exc}", file=sys.stderr, flush=True)
+
+    return on_resource_response
+
+
+def _enable_default_context_menu(core) -> None:
+    """启用 WebView2 默认右键菜单（支持选中复制），严禁开启 AreDevToolsEnabled；异常仅记 stderr。"""
+    try:
+        core_settings = getattr(core, "Settings", None)
+        if core_settings is not None and hasattr(core_settings, "AreDefaultContextMenusEnabled"):
+            core_settings.AreDefaultContextMenusEnabled = True
+    except Exception as exc:
+        print(f"[window] WebView2 启用默认右键菜单失败：{exc}", file=sys.stderr, flush=True)
+
+
+def _bind_diagnostics(core) -> None:
+    """绑定导航与子资源响应失败日志到 stderr；与证书校验异常隔离，失败仅记日志不毁窗。"""
+    if getattr(core, "NavigationCompleted", None) is not None:
+        try:
+            core.NavigationCompleted += _make_navigation_completed_handler()
+        except Exception as exc:
+            print(f"[window] WebView2 绑定 NavigationCompleted 失败：{exc}", file=sys.stderr, flush=True)
+    if getattr(core, "WebResourceResponseReceived", None) is not None:
+        try:
+            core.WebResourceResponseReceived += _make_resource_response_handler()
+        except Exception as exc:
+            print(f"[window] WebView2 绑定 WebResourceResponseReceived 失败：{exc}", file=sys.stderr, flush=True)
+
+
 def _apply_form_icon(native_form, ico_str: str | None, drawing_icon_cls=None) -> None:
     if not ico_str or native_form is None or _is_disposed(native_form):
         return
@@ -183,7 +255,7 @@ def run(
     resolved_platform = sys.platform if platform is None else platform
 
     if resolved_platform != "win32":
-        window = webview.create_window(args.title, args.url, width=1180, height=820)
+        window = webview.create_window(args.title, args.url, width=1180, height=820, text_select=True)
 
         def started_non_win() -> None:
             threading.Thread(
@@ -202,7 +274,7 @@ def run(
     set_aumid(APP_USER_MODEL_ID)
     ico_path = Path(resources_dir) / _WINDOWS_ICON_FILENAME
     icon_arg = str(ico_path) if ico_path.is_file() else None
-    window = webview.create_window(args.title, html="", width=1180, height=820)
+    window = webview.create_window(args.title, html="", width=1180, height=820, text_select=True)
 
     state_lock = threading.Lock()
     pending_url = args.url
@@ -237,11 +309,20 @@ def run(
                     return
                 core.ServerCertificateErrorDetected += on_error
                 cert_bound = True
-                ready = True
-                target_url = pending_url
-            core.Navigate(target_url)
         except Exception as exc:
             _fail_init(f"WebView2 证书校验初始化失败：{exc}")
+            return
+        _enable_default_context_menu(core)
+        _bind_diagnostics(core)
+        with state_lock:
+            if init_failed:
+                return
+            ready = True
+            target_url = pending_url
+        try:
+            core.Navigate(target_url)
+        except Exception as exc:
+            _fail_init(f"WebView2 首次导航失败：{exc}")
 
     def _attach_on_ui() -> None:
         nonlocal attached

@@ -122,8 +122,13 @@ def _extract_macos_key_info(key) -> tuple[int, int]:
     return 0, -1
 
 
+_KCG_EVENT_KEY_DOWN = 10
+_KCG_EVENT_KEY_UP = 11
+_KCG_SUPPRESSIBLE_EVENTS = (_KCG_EVENT_KEY_DOWN, _KCG_EVENT_KEY_UP)
+
+
 class MacOSHotkeyRig(PynputHotkeyRig):
-    """基于 `_hotkey.parse_hotkey_macos` + `PynputHotkeyRig` 的 macOS 五键监听器。"""
+    """基于 `_hotkey.parse_hotkey_macos` + `PynputHotkeyRig` 的 macOS 五键监听器（含 CGEventTap 吞键）。"""
 
     def __init__(
         self,
@@ -138,6 +143,7 @@ class MacOSHotkeyRig(PynputHotkeyRig):
         overlay_active: Callable[[], bool] = always_false,
         close_overlay: Callable[[], bool] = always_false,
         listener_factory: Callable[..., object] | None = None,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
         super().__init__(
             bindings,
@@ -154,7 +160,18 @@ class MacOSHotkeyRig(PynputHotkeyRig):
             overlay_active=overlay_active,
             close_overlay=close_overlay,
             listener_factory=listener_factory,
+            clock=clock,
         )
+
+    def _listener_kwargs(self) -> dict[str, object]:
+        return {"darwin_intercept": self._darwin_intercept}
+
+    def _darwin_intercept(self, event_type: int, event):
+        """CGEventTap 拦截回调：紧随 `_handle_message` 同线程执行，仅拦截被状态机标记吞键的按键事件。"""
+        suppress = self._consume_last_suppress()
+        if suppress and event_type in _KCG_SUPPRESSIBLE_EVENTS:
+            return None
+        return event
 
 
 class MacOSPlatformAdapter:

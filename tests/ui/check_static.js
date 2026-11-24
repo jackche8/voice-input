@@ -387,6 +387,30 @@ if (overflowGuardErrors.length) {
   pass("theme.css / studio.css 长报错防溢出规则齐全（overflow-wrap / min-width / flex-shrink / max-width）");
 }
 
+/* 只读结果区与运行日志行号文本选中 CSS 规则核验（复用顶层 CSS 规则解析器） */
+const userSelectGuardChecks = [
+  { selector: ".box-body", expect: { "-webkit-user-select": "text", "user-select": "text" } },
+  { selector: ".log-msg", expect: { "-webkit-user-select": "text", "user-select": "text" } },
+  { selector: ".rec-text", expect: { "-webkit-user-select": "text", "user-select": "text" } },
+  { selector: ".rec details p", expect: { "-webkit-user-select": "text", "user-select": "text" } },
+  { selector: ".kv-v", expect: { "-webkit-user-select": "text", "user-select": "text" } },
+  { selector: ".log-ln", expect: { "-webkit-user-select": "none", "user-select": "none" } }
+];
+const userSelectGuardErrors = [];
+for (const item of userSelectGuardChecks) {
+  const decls = mergedDeclsForSelector(studioRules, item.selector);
+  for (const [prop, expected] of Object.entries(item.expect)) {
+    if (decls[prop] !== expected) {
+      userSelectGuardErrors.push("studio.css " + item.selector + " 缺少 " + prop + ": " + expected + "（实际：" + (decls[prop] || "未声明") + "）");
+    }
+  }
+}
+if (userSelectGuardErrors.length) {
+  for (const msg of userSelectGuardErrors) fail(msg);
+} else {
+  pass("studio.css 只读区（.box-body / .log-msg / .rec-text / .rec details p / .kv-v）均为 user-select: text，.log-ln 为 user-select: none");
+}
+
 /* 全站单源不确定态进度条动画守卫（直接对 stripCssComments 结果扫描 @keyframes，并用顶层规则表核验 .progress.indeterminate > i 单源） */
 function extractAtKeyframes(cssText, name) {
   const clean = stripCssComments(cssText);

@@ -225,6 +225,14 @@
     assert(trResOut.indexOf("Release notes 3.2") !== -1, "主页翻译成功在次级块展示 OCR 原文");
     assert(dirBadge.classList.contains("accent") && dirBadge.textContent === "自动：中 → 英", "自动译文态展示蓝色方向徽章 自动：中 → 英");
     assert(trMetaText.indexOf("共 3 段") !== -1, "多段长文本在底部元信息展示分段数");
+    const trOutEl = homeRoot.querySelector('[data-role="translate-output"]');
+    const trOutResultEl = trOutEl ? trOutEl.querySelector(".studio-result-text") : null;
+    assert(
+      !!trOutEl && !!trOutResultEl
+        && window.getComputedStyle(trOutEl).userSelect === "text"
+        && window.getComputedStyle(trOutResultEl).userSelect === "text",
+      "翻译输出区 .box-body 与译文正文计算样式 userSelect 为 text"
+    );
     homeRoot.querySelector('button[data-role="copy-translation"]').click();
     assert(
       copies.length >= 1 && copies[copies.length - 1].kind === "translation" && copies[copies.length - 1].text === "版本说明 3.2",
@@ -312,6 +320,14 @@
     const ocrOut = homeRoot.querySelector('[data-role="ocr-output"]').innerText;
     assert(ocrOut.indexOf("Hello OCR world") !== -1 && ocrOut.indexOf("你好 OCR 世界") !== -1, "主页 OCR 面板展示原文与可选译文");
     assert(ocrOut.indexOf("译文（英 → 中）") !== -1, "OCR 面板译文块标题使用 directionLabel 渲染方向");
+    const ocrOutEl = homeRoot.querySelector('[data-role="ocr-output"]');
+    const ocrOutResultEl = ocrOutEl ? ocrOutEl.querySelector(".studio-result-text") : null;
+    assert(
+      !!ocrOutEl && !!ocrOutResultEl
+        && window.getComputedStyle(ocrOutEl).userSelect === "text"
+        && window.getComputedStyle(ocrOutResultEl).userSelect === "text",
+      "OCR 输出区 .box-body 与识别正文计算样式 userSelect 为 text"
+    );
     homeRoot.querySelector('button[data-role="copy-ocr"]').click();
     assert(
       copies[copies.length - 1].kind === "ocr" && copies[copies.length - 1].text === "Hello OCR world",
@@ -323,6 +339,17 @@
     assert(homeHistText.indexOf("已润色") !== -1 && homeHistText.indexOf("润色失败") !== -1, "主页历史面板展示润色状态");
     assert(homeHistText.indexOf("本机") !== -1 && homeHistText.indexOf("手机") !== -1, "主页历史面板展示来源");
     assert(!/已输入(?!到)/.test(homeHistText), "主页历史面板不谎称已输入");
+    const histRecText = homeRoot.querySelector('[data-role="history-list"] .rec-text');
+    const histDetails = homeRoot.querySelector('[data-role="history-list"] .rec details');
+    const histDetailsP = histDetails ? histDetails.querySelector("p") : null;
+    if (histDetails) histDetails.open = true;
+    assert(
+      !!histRecText && !!histDetailsP
+        && window.getComputedStyle(histRecText).userSelect === "text"
+        && window.getComputedStyle(histDetailsP).userSelect === "text",
+      "历史记录正文 .rec-text 与展开原文 .rec details p 计算样式 userSelect 为 text"
+    );
+    if (histDetails) histDetails.open = false;
 
     homeRoot.querySelector('button[data-panel="lan"]').click();
     const lanDom = homeRoot.querySelector('[data-role="lan-list"]');
@@ -1666,6 +1693,14 @@
         && logViewport.querySelectorAll(".log-line.lvl-err").length === 1,
       "日志视口正确渲染 10 行、*** 脱敏胶囊与 warn/error 分级底色"
     );
+    const firstLogMsg = logViewport.querySelector(".log-msg");
+    const firstLogLn = logViewport.querySelector(".log-ln");
+    assert(
+      !!firstLogMsg && !!firstLogLn
+        && window.getComputedStyle(firstLogMsg).userSelect === "text"
+        && window.getComputedStyle(firstLogLn).userSelect === "none",
+      "运行日志正文 .log-msg 计算样式 userSelect 为 text，行号 .log-ln 为 none"
+    );
 
     logFilterInput.value = "span";
     logFilterInput.dispatchEvent(new Event("input", { bubbles: true }));
@@ -1874,6 +1909,12 @@
         && aboutPane.innerText.indexOf("Python 3.12.3（源码运行）") !== -1
         && aboutPane.innerText.indexOf("AGPL-3.0 + 商业授权") !== -1,
       "关于面板渲染聚焦头卡（v3.4.6）与全部 9 行键值信息"
+    );
+    const aboutKvVals = Array.prototype.slice.call(aboutPane.querySelectorAll('[data-role="about-kv"] .kv-v'));
+    assert(
+      aboutKvVals.length === 9
+        && aboutKvVals.every(function (el) { return window.getComputedStyle(el).userSelect === "text"; }),
+      "关于面板全部 9 处键值 .kv-v 计算样式 userSelect 均为 text"
     );
 
     const aboutLinks = Array.prototype.slice.call(aboutPane.querySelectorAll('[data-role="about-links"] a.linkbtn'));
