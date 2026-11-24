@@ -29,6 +29,8 @@ jobs:
           test -s docs/site/index.html
           test -s docs/site/styles.css
           test -s docs/site/site.js
+          test -s docs/site/robots.txt
+          test -s docs/site/sitemap.xml
           test -s docs/site/assets/workbench-light.png
           test -s docs/site/assets/workbench-dark.png
           test -s docs/site/assets/annotate-icons.png

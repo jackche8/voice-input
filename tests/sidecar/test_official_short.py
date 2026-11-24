@@ -15,7 +15,7 @@ import pytest
 from _asr import AsrSidecarClient
 from _contracts import RecognizeSessionCreate, SessionFinalEvent, SessionPartialEvent
 
-OFFICIAL_WAV = Path("/opt/ollama-voice-input/.cache/v3-feasibility/audio/qwen-official-asr_zh.wav")
+OFFICIAL_WAV = Path(__file__).resolve().parents[2] / ".cache" / "v3-feasibility" / "audio" / "qwen-official-asr_zh.wav"
 OFFICIAL_TEXT = "甚至出现交易几乎停滞的情况。"
 BASE = os.environ.get("SIDECAR_BASE_URL", "http://127.0.0.1:17946")
 

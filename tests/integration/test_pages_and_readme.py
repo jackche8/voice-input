@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+from html.parser import HTMLParser
 import http.server
 import json
 import os
@@ -10,6 +11,8 @@ import shutil
 import socketserver
 import subprocess
 import threading
+import urllib.request
+import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Any
 
@@ -19,6 +22,13 @@ from PIL import Image
 from _paths import PROGRAM_ROOT
 from _version import APP_VERSION
 from tests.integration.test_packaging_scripts import _load_yaml
+from tests.integration.test_repo_privacy import (
+    PAGES_URL,
+    REPO_URL,
+    repo_tracked_and_unignored_files,
+    validate_png_privacy,
+    validate_text_privacy,
+)
 
 ROOT = PROGRAM_ROOT
 SITE_DIR = ROOT / "docs" / "site"
@@ -29,14 +39,12 @@ LINUX_CONTROL = ROOT / "packaging" / "linux" / "control.in"
 README_ZH = ROOT / "README.md"
 README_EN = ROOT / "README.en.md"
 
-REPO_URL = "https://github.com/jackche8/voice-input"
-PAGES_URL = "https://jackche8.github.io/voice-input/"
-LEGACY_OWNER = "legacy-owner-removed"
-
 EXPECTED_SITE_NONEMPTY = (
     SITE_DIR / "index.html",
     SITE_DIR / "styles.css",
     SITE_DIR / "site.js",
+    SITE_DIR / "robots.txt",
+    SITE_DIR / "sitemap.xml",
     ASSETS_DIR / "workbench-light.png",
     ASSETS_DIR / "workbench-dark.png",
     ASSETS_DIR / "annotate-icons.png",
@@ -113,27 +121,6 @@ def _run_chrome_dump_dom(
     return proc.stdout
 
 
-def _repo_non_ignored_files() -> list[Path]:
-    """返回所有已追踪与未忽略的仓库文件（排除 .gitignore 条目及 .pp/ 工作目录）。"""
-    proc = subprocess.run(
-        ["git", "ls-files", "-z", "--cached", "--others", "--exclude-standard"],
-        cwd=str(ROOT),
-        capture_output=True,
-        check=True,
-    )
-    out: list[Path] = []
-    for raw in proc.stdout.split(b"\x00"):
-        if not raw:
-            continue
-        rel = raw.decode("utf-8")
-        if rel == ".pp" or rel.startswith(".pp/"):
-            continue
-        p = ROOT / rel
-        if p.is_file():
-            out.append(p)
-    return out
-
-
 def _release_asset_names_from_workflow() -> list[str]:
     """从 .github/workflows/release.yml 解析权威产物文件名集合。"""
     src = RELEASE_WORKFLOW.read_text(encoding="utf-8")
@@ -190,8 +177,6 @@ def test_site_assets_dimensions_budget_and_privacy() -> None:
         total_bytes += size
         assert raw[:8] == b"\x89PNG\r\n\x1a\n", f"{name} 不是合法 PNG 头"
         assert size <= 300 * 1024, f"{name} 超出单张 300KB 预算：{size}B"
-        for forbidden in (b"/home/", LEGACY_OWNER.encode("ascii"), b"192.168.", b"token="):
-            assert forbidden not in raw, f"{name} 原始字节含隐私或旧归属信息 {forbidden!r}"
 
         with Image.open(path) as im:
             im.verify()
@@ -204,9 +189,7 @@ def test_site_assets_dimensions_budget_and_privacy() -> None:
                 assert min_alpha == 255, f"{name} 存在半透明像素（min_alpha={min_alpha}）"
             else:
                 pytest.fail(f"{name} 图像色彩模式不受支持：{im.mode}")
-            for k, v in im.info.items():
-                val_s = str(v)
-                assert "/home/" not in val_s and LEGACY_OWNER not in val_s, f"{name} 元数据 {k} 含隐私：{val_s}"
+            validate_png_privacy(path, raw, im.info)
             gray = im.convert("L").tobytes()
             luma[name] = sum(gray) / len(gray)
 
@@ -221,7 +204,7 @@ def test_site_assets_dimensions_budget_and_privacy() -> None:
     # 全仓非忽略/已追踪文件严禁存在这 3 张 PNG 的重复副本
     target_hash_set = set(asset_hashes.values())
     allowed_paths = {(ASSETS_DIR / name).resolve() for name in expected_specs}
-    for repo_file in _repo_non_ignored_files():
+    for repo_file in repo_tracked_and_unignored_files():
         if repo_file.suffix.lower() != ".png":
             continue
         if repo_file.resolve() in allowed_paths:
@@ -251,13 +234,15 @@ def test_site_static_offline_and_single_source_version() -> None:
         (r"\bXMLHttpRequest\b", "XMLHttpRequest"),
         (r"navigator\.mediaDevices", "navigator.mediaDevices"),
         (r"\brequestAnimationFrame\b", "requestAnimationFrame"),
-        (re.escape(LEGACY_OWNER), "legacy repo owner"),
         (r"(?:href|src)\s*=\s*[\"']\.\./", "parent-escape ../ attribute"),
         (r"(?:href|src)\s*=\s*[\"']/assets/", "root-absolute /assets/ path"),
         (r"url\(\s*['\"]?\s*(?:https?:|//|/|\.\./)", "external/root/parent CSS url()"),
     )
     for pattern, label in forbidden_patterns:
         assert not re.search(pattern, joined, flags=re.IGNORECASE), f"docs/site/ 违规包含 {label}"
+
+    site_violations, _ = validate_text_privacy(joined, "docs/site", strict_own_site_only=True)
+    assert not site_violations, f"docs/site/ 含未授权归属或隐私信息：{site_violations}"
 
     # 外部资源加载禁用（仅 <a> 允许外链；<script>/<link rel="stylesheet">/<img> 严禁外链或根路径）
     for tag_re, desc in (
@@ -560,6 +545,8 @@ def test_site_real_browser_file_and_subpath_interactions() -> None:
             ".css": "text/css; charset=utf-8",
             ".js": "application/javascript; charset=utf-8",
             ".png": "image/png",
+            ".txt": "text/plain; charset=utf-8",
+            ".xml": "application/xml; charset=utf-8",
         }
 
         class SubpathHandler(http.server.BaseHTTPRequestHandler):
@@ -678,6 +665,18 @@ def test_site_real_browser_file_and_subpath_interactions() -> None:
                 "prefers-reduced-motion 模式下未静态停留在 typed + paused=true"
             )
 
+            # ④ /voice-input/ 子路径下 robots.txt 与 sitemap.xml 静态直出 200（禁用环境代理防劫持环回）
+            local_opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+            for seo_rel, expect_ctype, expect_tok in (
+                ("robots.txt", "text/plain", f"Sitemap: {PAGES_URL}sitemap.xml"),
+                ("sitemap.xml", "application/xml", f"<loc>{PAGES_URL}</loc>"),
+            ):
+                with local_opener.open(f"http://127.0.0.1:{port}/voice-input/{seo_rel}", timeout=5) as resp:
+                    assert resp.status == 200, f"/voice-input/{seo_rel} HTTP 状态异常：{resp.status}"
+                    assert expect_ctype in (resp.headers.get("Content-Type") or "")
+                    seo_body = resp.read().decode("utf-8")
+                    assert expect_tok in seo_body, f"/voice-input/{seo_rel} 缺少 {expect_tok!r}"
+
             # 全部本地请求零 404 且严禁越出 /voice-input/ 子路径
             assert not not_found_paths, f"出现 404 请求：{not_found_paths}"
             assert all(p.startswith("/voice-input/") for p in requested_paths), f"出现越界请求：{requested_paths}"
@@ -748,19 +747,6 @@ def test_bilingual_readme_links_hotkeys_downloads_and_license() -> None:
     for dep in ("libxcb-cursor0", "libxkbcommon-x11-0", "gir1.2-gtk-3.0", "python3-dbus"):
         assert dep in control_text
 
-    # 全仓非忽略/已追踪非归档文件严禁残留旧仓库账号（排除本测试文件自身）
-    self_resolved = Path(__file__).resolve()
-    legacy_hits: list[str] = []
-    for path in _repo_non_ignored_files():
-        if path.resolve() == self_resolved:
-            continue
-        if path.suffix.lower() in {".png", ".jpg", ".jpeg", ".gif", ".ico", ".whl", ".deb", ".zip"}:
-            continue
-        raw = path.read_bytes()
-        if LEGACY_OWNER.encode("ascii") in raw.lower():
-            legacy_hits.append(path.relative_to(ROOT).as_posix())
-    assert not legacy_hits, f"以下文件仍残留旧仓库地址：{legacy_hits}"
-
     specs = (
         (
             README_ZH,
@@ -789,7 +775,8 @@ def test_bilingual_readme_links_hotkeys_downloads_and_license() -> None:
     for readme_path, lang_tokens in specs:
         text = readme_path.read_text(encoding="utf-8")
         name = readme_path.name
-        assert LEGACY_OWNER not in text.lower()
+        readme_violations, _ = validate_text_privacy(text, name)
+        assert not readme_violations, f"{name} 存在隐私或归属违规：{readme_violations}"
         assert "cd ollama-voice-input" not in text, f"{name} 仍含错误目录名 cd ollama-voice-input"
         assert "cd voice-input" in text, f"{name} 缺少修正后的 cd voice-input"
 
@@ -839,3 +826,143 @@ def test_bilingual_readme_links_hotkeys_downloads_and_license() -> None:
         )
         for tok in (*common_tokens, *lang_tokens):
             assert tok in text, f"{name} 缺少关键内容 {tok!r}"
+
+
+# ---------------------------------------------------------------------------
+# 6. docs/site/ Google SEO 契约（robots.txt / sitemap.xml / canonical / OG / Twitter / JSON-LD）
+# ---------------------------------------------------------------------------
+class _HeadSeoParser(HTMLParser):
+    """仅解析 <head> 内的 SEO 元标签、canonical 与 JSON-LD 脚本块（天然免疫 HTML 注释与 body 干扰）。"""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._in_head = False
+        self._in_ld_json = False
+        self._ld_buf: list[str] = []
+        self.meta_name: dict[str, list[str]] = {}
+        self.meta_prop: dict[str, list[str]] = {}
+        self.canonicals: list[str] = []
+        self.ld_json_blocks: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        low = tag.lower()
+        if low == "head":
+            self._in_head = True
+            return
+        if not self._in_head:
+            return
+        attr_map = {k.lower(): (v or "").strip() for k, v in attrs}
+        if low == "meta":
+            content = attr_map.get("content", "")
+            if attr_map.get("name"):
+                self.meta_name.setdefault(attr_map["name"].lower(), []).append(content)
+            if attr_map.get("property"):
+                self.meta_prop.setdefault(attr_map["property"].lower(), []).append(content)
+        elif low == "link":
+            rels = {part.lower() for part in attr_map.get("rel", "").split()}
+            if "canonical" in rels:
+                self.canonicals.append(attr_map.get("href", ""))
+        elif low == "script" and attr_map.get("type", "").lower() == "application/ld+json":
+            self._in_ld_json = True
+            self._ld_buf = []
+
+    def handle_endtag(self, tag: str) -> None:
+        low = tag.lower()
+        if low == "head":
+            self._in_head = False
+        elif low == "script" and self._in_ld_json:
+            self._in_ld_json = False
+            self.ld_json_blocks.append("".join(self._ld_buf).strip())
+            self._ld_buf = []
+
+    def handle_data(self, data: str) -> None:
+        if self._in_ld_json:
+            self._ld_buf.append(data)
+
+
+def _assert_site_image_url_exists(url: str, label: str) -> None:
+    assert url.startswith(PAGES_URL), f"{label} 必须位于官网域下：{url!r}"
+    rel = url[len(PAGES_URL) :]
+    assert rel and not rel.startswith(("/", "..")), f"{label} 相对路径非法：{url!r}"
+    target = (SITE_DIR / rel).resolve()
+    assert str(target).startswith(str(SITE_DIR.resolve())) and target.is_file(), f"{label} 指向不存在的资源：{url!r}"
+
+
+def test_site_seo_metadata_robots_and_sitemap() -> None:
+    # 1. robots.txt 逐行契约
+    robots_lines = [
+        line.strip()
+        for line in (SITE_DIR / "robots.txt").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert robots_lines == [
+        "User-agent: *",
+        "Allow: /",
+        f"Sitemap: {PAGES_URL}sitemap.xml",
+    ], f"docs/site/robots.txt 内容不符合契约：{robots_lines}"
+
+    # 2. sitemap.xml 仅收规范根 URL，防止 GSC 报非规范 URL 告警
+    ns = {"sm": "http://www.sitemaps.org/schemas/sitemap/0.9"}
+    tree = ET.fromstring((SITE_DIR / "sitemap.xml").read_text(encoding="utf-8"))
+    assert tree.tag == "{http://www.sitemaps.org/schemas/sitemap/0.9}urlset"
+    urls = tree.findall("sm:url", ns)
+    assert len(urls) == 1, f"sitemap.xml 应仅含 1 条规范 URL，实际 {len(urls)}"
+    locs = [el.text.strip() for el in tree.findall("sm:url/sm:loc", ns) if el.text]
+    assert locs == [PAGES_URL], f"sitemap.xml <loc> 异常：{locs}"
+    lastmod = urls[0].findtext("sm:lastmod", default="", namespaces=ns).strip()
+    assert re.fullmatch(r"\d{4}-\d{2}-\d{2}", lastmod), f"sitemap.xml <lastmod> 格式非法：{lastmod!r}"
+
+    # 3. index.html <head> 元数据、canonical、OpenGraph、Twitter Card 与 JSON-LD
+    parser = _HeadSeoParser()
+    parser.feed((SITE_DIR / "index.html").read_text(encoding="utf-8"))
+
+    desc = parser.meta_name.get("description", [])
+    assert len(desc) == 1 and len(desc[0]) >= 40, f"<meta name=description> 缺失或过短：{desc}"
+    robots_meta = parser.meta_name.get("robots", [])
+    assert len(robots_meta) == 1 and "index" in robots_meta[0].lower() and "follow" in robots_meta[0].lower(), (
+        f"<meta name=robots> 缺失或禁索引：{robots_meta}"
+    )
+    assert parser.canonicals == [PAGES_URL], f"<link rel=canonical> 异常：{parser.canonicals}"
+
+    expected_og_image = f"{PAGES_URL}assets/workbench-light.png"
+    assert parser.meta_prop.get("og:type") == ["website"]
+    assert parser.meta_prop.get("og:site_name") == ["Ollama Voice Input"]
+    assert parser.meta_prop.get("og:url") == [PAGES_URL]
+    assert len(parser.meta_prop.get("og:title", [])) == 1 and parser.meta_prop["og:title"][0]
+    assert len(parser.meta_prop.get("og:description", [])) == 1 and parser.meta_prop["og:description"][0]
+    assert parser.meta_prop.get("og:image") == [expected_og_image]
+    assert parser.meta_prop.get("og:image:width") == ["1280"]
+    assert parser.meta_prop.get("og:image:height") == ["800"]
+    assert len(parser.meta_prop.get("og:image:alt", [])) == 1 and parser.meta_prop["og:image:alt"][0]
+    assert parser.meta_prop.get("og:locale") == ["zh_CN"]
+    assert parser.meta_prop.get("og:locale:alternate") == ["en_US"]
+    _assert_site_image_url_exists(parser.meta_prop["og:image"][0], "og:image")
+
+    assert parser.meta_name.get("twitter:card") == ["summary_large_image"]
+    assert len(parser.meta_name.get("twitter:title", [])) == 1 and parser.meta_name["twitter:title"][0]
+    assert len(parser.meta_name.get("twitter:description", [])) == 1 and parser.meta_name["twitter:description"][0]
+    assert parser.meta_name.get("twitter:image") == [expected_og_image]
+    assert len(parser.meta_name.get("twitter:image:alt", [])) == 1 and parser.meta_name["twitter:image:alt"][0]
+    _assert_site_image_url_exists(parser.meta_name["twitter:image"][0], "twitter:image")
+
+    assert len(parser.ld_json_blocks) == 1, f"应仅含 1 个 JSON-LD 块，实际 {len(parser.ld_json_blocks)}"
+    ld = json.loads(parser.ld_json_blocks[0])
+    assert ld.get("@context") == "https://schema.org"
+    assert ld.get("@type") == "SoftwareApplication"
+    assert ld.get("name") == "Ollama Voice Input"
+    assert ld.get("url") == PAGES_URL
+    assert ld.get("sameAs") == REPO_URL
+    assert ld.get("downloadUrl") == f"{REPO_URL}/releases"
+    assert ld.get("softwareVersion") == APP_VERSION, (
+        f"JSON-LD softwareVersion={ld.get('softwareVersion')!r} != _version.APP_VERSION={APP_VERSION!r}"
+    )
+    assert ld.get("applicationCategory") == "UtilitiesApplication"
+    os_str = str(ld.get("operatingSystem", ""))
+    for os_tok in ("Linux", "Windows", "macOS"):
+        assert os_tok in os_str, f"JSON-LD operatingSystem 缺少 {os_tok}"
+    assert ld.get("inLanguage") == ["zh-CN", "en"]
+    assert ld.get("license") == f"{REPO_URL}/blob/main/LICENSE"
+    assert ld.get("offers") == {"@type": "Offer", "price": "0", "priceCurrency": "USD"}
+    assert ld.get("author") == {"@type": "Person", "name": "jackche8", "url": "https://github.com/jackche8"}
+    _assert_site_image_url_exists(str(ld.get("image", "")), "JSON-LD image")
+    _assert_site_image_url_exists(str(ld.get("screenshot", "")), "JSON-LD screenshot")

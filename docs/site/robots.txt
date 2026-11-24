@@ -1,0 +1,4 @@
+User-agent: *
+Allow: /
+
+Sitemap: https://jackche8.github.io/voice-input/sitemap.xml

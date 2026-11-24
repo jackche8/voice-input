@@ -19,7 +19,7 @@ from _procfs import (
 )
 from runtimes.asr.process_guard import ChildProcessGuard
 
-ROOT = Path("/opt/ollama-voice-input")
+ROOT = Path(__file__).resolve().parents[2]
 TMP = ROOT / ".pp" / "tmp" / "sidecar" / "process-guard"
 HOST = r'''
 import os, signal, sys, time, subprocess
