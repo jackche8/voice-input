@@ -9,11 +9,17 @@
 """
 from __future__ import annotations
 
+import gc
 import math
+import sys
 import time
+import traceback
 from collections.abc import Callable
+from contextlib import suppress
 from dataclasses import dataclass
 from typing import Any
+
+from runtimes.asr.protocol import DEFAULT_CUDA_CACHE_FLUSH_THRESHOLD_BYTES
 
 SAMPLE_RATE = 16000
 MIN_FINISH_SAMPLES = SAMPLE_RATE // 2  # 0.5s @ 16kHz = 8000 samples
@@ -67,6 +73,82 @@ def _collect_eos_ids(raw_eos: Any, target: set[int]) -> None:
         for item in raw_eos:
             if isinstance(item, int):
                 target.add(item)
+
+
+def _normalize_cuda_device(device: Any) -> Any | None:
+    """规范化 CUDA 设备标识；非 CUDA 或畸形字符串返回 None，绝不触发 `import torch`。"""
+    if device is None:
+        return None
+    if isinstance(device, str):
+        text = device.strip().lower()
+        if text == "cuda":
+            return "cuda"
+        if text.startswith("cuda:"):
+            idx = text[5:]
+            if idx.isascii() and idx.isdigit():
+                return text
+        return None
+    dev_type = getattr(device, "type", None)
+    if isinstance(dev_type, str) and dev_type.strip().lower() == "cuda":
+        return device
+    return None
+
+
+def is_cuda_reclaim_target(backend: str | None, device: Any) -> bool:
+    """仅 `transformers + cuda` 需要主动回收 PyTorch CUDA 缓存段（vLLM / CPU / MPS 返回 False）。"""
+    return (backend or "").strip().lower() == "transformers" and _normalize_cuda_device(device) is not None
+
+
+def _clear_exception_frames(exc: BaseException) -> None:
+    """清空异常链中已退出内层栈帧的局部变量（避免 GPU 张量被 traceback 钉住），保留行号、类型与消息。"""
+    seen: set[int] = set()
+    stack: list[BaseException] = [exc]
+    while stack:
+        cur = stack.pop()
+        obj_id = id(cur)
+        if obj_id in seen:
+            continue
+        seen.add(obj_id)
+        if cur.__traceback__ is not None:
+            traceback.clear_frames(cur.__traceback__)
+        if cur.__cause__ is not None:
+            stack.append(cur.__cause__)
+        if cur.__context__ is not None:
+            stack.append(cur.__context__)
+        if isinstance(cur, BaseExceptionGroup):
+            stack.extend(cur.exceptions)
+
+
+def reclaim_cuda_cache(
+    *,
+    backend: str | None,
+    device: Any,
+    force: bool = False,
+    threshold_bytes: int = DEFAULT_CUDA_CACHE_FLUSH_THRESHOLD_BYTES,
+    torch_module: Any = None,
+) -> bool:
+    """仅对 Transformers + CUDA 回收 PyTorch CUDA caching allocator 冗余缓存段，返回本次是否执行了 empty_cache()。
+
+    从不执行 `import torch`（若 `sys.modules` 未加载 `torch` 则本进程物理上不可能持有 PyTorch CUDA 缓存）。
+    """
+    if (backend or "").strip().lower() != "transformers":
+        return False
+    query_device = _normalize_cuda_device(device)
+    if query_device is None:
+        return False
+    torch = torch_module if torch_module is not None else sys.modules.get("torch")
+    if torch is None:
+        return False
+    cuda = getattr(torch, "cuda", None)
+    if cuda is None or not callable(getattr(cuda, "is_available", None)) or not cuda.is_available():
+        return False
+    if not force:
+        reserved = int(cuda.memory_reserved(query_device))
+        allocated = int(cuda.memory_allocated(query_device))
+        if reserved - allocated < threshold_bytes:
+            return False
+    cuda.empty_cache()
+    return True
 
 
 class BoundedOfficialStream:
@@ -152,6 +234,11 @@ class BoundedOfficialStream:
 
     def _backend(self) -> str:
         return str(getattr(self._asr, "backend", "vllm") or "vllm")
+
+    def _transformers_device(self) -> Any:
+        return getattr(self._asr, "device", None) or getattr(
+            getattr(self._asr, "model", None), "device", None
+        )
 
     def _tokenizer(self) -> Any:
         # vLLM 后端优先直接取 vLLM 引擎内部同一分词器实例，彻底消除 fix_mistral_regex 错位
@@ -247,9 +334,7 @@ class BoundedOfficialStream:
             return_tensors="pt",
             padding=True,
         )
-        device = getattr(self._asr, "device", None) or getattr(
-            self._asr.model, "device", None
-        )
+        device = self._transformers_device()
         dtype = getattr(self._asr, "dtype", None) or getattr(
             self._asr.model, "dtype", None
         )
@@ -302,8 +387,26 @@ class BoundedOfficialStream:
         max_tokens = self.max_tokens_for(prefix, rollback, pending_s=pending_s)
         prompt = state.prompt_raw + prefix
         if self._backend() == "transformers":
-            out_text, gen_tokens, prompt_tokens, finish_reason, dt = (
-                self._generate_transformers(prompt, state.audio_accum, max_tokens)
+            device = self._transformers_device()
+            try:
+                out_text, gen_tokens, prompt_tokens, finish_reason, dt = (
+                    self._generate_transformers(prompt, state.audio_accum, max_tokens)
+                )
+            except BaseException as exc:
+                if is_cuda_reclaim_target("transformers", device):
+                    _clear_exception_frames(exc)
+                    gc.collect()
+                    with suppress(Exception):
+                        reclaim_cuda_cache(
+                            backend="transformers",
+                            device=device,
+                            force=True,
+                        )
+                raise
+            reclaim_cuda_cache(
+                backend="transformers",
+                device=device,
+                force=False,
             )
         else:
             out_text, gen_tokens, prompt_tokens, finish_reason, dt = (
@@ -360,5 +463,7 @@ __all__ = [
     "SLACK_TOKENS",
     "StepReport",
     "decode_whole",
+    "is_cuda_reclaim_target",
     "numpy_pcm_ops",
+    "reclaim_cuda_cache",
 ]

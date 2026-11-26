@@ -7,8 +7,11 @@ from __future__ import annotations
 
 import io
 import os
+import sys
 import threading
 import time
+import types
+import weakref
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
@@ -39,6 +42,7 @@ from runtimes.asr.engine import (
 from runtimes.asr.process_guard import ChildProcessGuard
 from runtimes.asr.protocol import (
     DEFAULT_BACKEND,
+    DEFAULT_CUDA_CACHE_FLUSH_THRESHOLD_BYTES,
     DEFAULT_GPU_MEMORY_UTILIZATION,
     DEFAULT_MAX_MODEL_LEN,
     DEFAULT_VLLM_MAX_NUM_SEQS,
@@ -52,9 +56,11 @@ from runtimes.asr.stream_step import (
     SAMPLE_RATE,
     BoundedOfficialStream,
     decode_whole,
+    is_cuda_reclaim_target,
+    reclaim_cuda_cache,
 )
 from tests.sidecar.fake_engine import FakeEngine
-from tests.sidecar.test_stream_step import LIST_PCM, CharTokenizer, _chunks, _speech, _state
+from tests.sidecar.test_stream_step import LIST_PCM, CharTokenizer, FakeAsr, FakeLLM, _chunks, _speech, _state
 
 
 # ---------------------------------------------------------------------------
@@ -655,3 +661,461 @@ def test_process_guard_starttime_prevents_signalling_recycled_pid(monkeypatch):
     assert guard._signal_verified(201, 15) is False
     assert killed == []
     assert 201 not in guard.owned
+
+
+# ---------------------------------------------------------------------------
+# 5. Transformers + CUDA 显存缓存段按需阈值回收与全生命周期清理（零真实 torch 导入）
+# ---------------------------------------------------------------------------
+
+
+class _FakeCudaAllocator:
+    def __init__(
+        self,
+        *,
+        allocated: int = 4 * 1024 * 1024 * 1024,
+        reserved: int = 4 * 1024 * 1024 * 1024,
+        available: bool = True,
+    ) -> None:
+        self.allocated = allocated
+        self.reserved = reserved
+        self.available = available
+        self.empty_cache_calls = 0
+        self.reserved_queries: list[object] = []
+        self.allocated_queries: list[object] = []
+        self.on_empty_cache = None
+
+    def set_gap(self, gap_bytes: int) -> None:
+        self.reserved = self.allocated + gap_bytes
+
+    def build_torch_module(self) -> types.ModuleType:
+        mod = types.ModuleType("torch")
+        mod.float16 = "fp16"
+        mod.bfloat16 = "bf16"
+        mod.float32 = "fp32"
+
+        def _device(spec):
+            if isinstance(spec, str):
+                kind = spec.strip().lower().split(":", 1)[0]
+                return SimpleNamespace(type=kind, spec=spec)
+            return spec
+
+        def _memory_reserved(device=None):
+            self.reserved_queries.append(device)
+            return self.reserved
+
+        def _memory_allocated(device=None):
+            self.allocated_queries.append(device)
+            return self.allocated
+
+        def _empty_cache():
+            self.empty_cache_calls += 1
+            if callable(self.on_empty_cache):
+                self.on_empty_cache()
+
+        mod.device = _device
+        mod.cuda = SimpleNamespace(
+            is_available=lambda: self.available,
+            is_bf16_supported=lambda: True,
+            memory_reserved=_memory_reserved,
+            memory_allocated=_memory_allocated,
+            empty_cache=_empty_cache,
+        )
+        mod.backends = SimpleNamespace(mps=SimpleNamespace(is_available=lambda: False))
+        return mod
+
+
+def test_reclaim_cuda_cache_threshold_force_and_backend_device_isolation(monkeypatch):
+    threshold = DEFAULT_CUDA_CACHE_FLUSH_THRESHOLD_BYTES
+    assert threshold == 512 * 1024 * 1024
+
+    alloc = _FakeCudaAllocator()
+    fake_torch = alloc.build_torch_module()
+
+    # 1) 阈值边界：gap == threshold - 1 不回收；gap == threshold 回收；" CUDA:0 " 规范化传 "cuda:0"
+    alloc.set_gap(threshold - 1)
+    assert reclaim_cuda_cache(backend="transformers", device=" CUDA:0 ", force=False, torch_module=fake_torch) is False
+    assert alloc.empty_cache_calls == 0
+    assert alloc.reserved_queries == ["cuda:0"]
+    assert alloc.allocated_queries == ["cuda:0"]
+
+    alloc.set_gap(threshold)
+    assert reclaim_cuda_cache(backend="transformers", device=" CUDA:0 ", force=False, torch_module=fake_torch) is True
+    assert alloc.empty_cache_calls == 1
+    assert alloc.reserved_queries[-1] == "cuda:0"
+    assert alloc.allocated_queries[-1] == "cuda:0"
+
+    # 2) torch.device-like 对象与 force=True（gap == 0 也强制回收）
+    cuda_dev_obj = SimpleNamespace(type="cuda", index=0)
+    alloc.set_gap(0)
+    assert reclaim_cuda_cache(backend="transformers", device=cuda_dev_obj, force=True, torch_module=fake_torch) is True
+    assert alloc.empty_cache_calls == 2
+
+    # 3) 畸形 CUDA 字符串与非目标后端/设备全部拦截，零调用 memory_reserved / empty_cache
+    q_before = len(alloc.reserved_queries)
+    for bad_dev in ("cuda:", "cuda:-1", "cuda:abc", "cuda:０", "cuda_fake", "cpu", "mps", "", None, SimpleNamespace(type="mps")):
+        assert is_cuda_reclaim_target("transformers", bad_dev) is False
+        assert reclaim_cuda_cache(backend="transformers", device=bad_dev, force=True, torch_module=fake_torch) is False
+    for non_tf in ("vllm", "auto", "", None):
+        assert is_cuda_reclaim_target(non_tf, "cuda") is False
+        assert reclaim_cuda_cache(backend=non_tf, device="cuda", force=True, torch_module=fake_torch) is False
+    alloc.available = False
+    assert reclaim_cuda_cache(backend="transformers", device="cuda", force=True, torch_module=fake_torch) is False
+    assert alloc.empty_cache_calls == 2
+    assert len(alloc.reserved_queries) == q_before
+
+    # 4) sys.modules 无 torch 且 torch_module=None：直接返回 False，绝不触发 import torch
+    monkeypatch.delitem(sys.modules, "torch", raising=False)
+    assert reclaim_cuda_cache(backend="transformers", device="cuda", force=True) is False
+    assert "torch" not in sys.modules
+
+
+def test_bounded_stream_transformers_cuda_reclaims_on_threshold_and_step_exception(monkeypatch):
+    threshold = DEFAULT_CUDA_CACHE_FLUSH_THRESHOLD_BYTES
+    alloc = _FakeCudaAllocator()
+    monkeypatch.setitem(sys.modules, "torch", alloc.build_torch_module())
+
+    class _FakeCudaAsr(_FakeTransformersAsr):
+        device = " CUDA:0 "
+
+    pieces = ["第一", "第二", "第三", "第四"]
+    stream = BoundedOfficialStream(
+        _FakeCudaAsr(_FakeTransformersModel(_speech(pieces))),
+        _state(),
+        sampling_params_factory=None,
+        parse_output=lambda raw, lang: (lang or "", raw),
+        pcm=LIST_PCM,
+    )
+    chunks = _chunks(len(pieces))
+
+    # 第 1 步 gap == threshold - 1 不触发；第 2 步 gap == threshold 触发一次并传入规范化 "cuda:0"
+    alloc.set_gap(threshold - 1)
+    stream.feed(chunks[0])
+    assert alloc.empty_cache_calls == 0
+    assert alloc.reserved_queries == ["cuda:0"]
+
+    alloc.set_gap(threshold)
+    stream.feed(chunks[1])
+    assert alloc.empty_cache_calls == 1
+    assert alloc.reserved_queries[-1] == "cuda:0"
+
+    # failed=False 正常步：empty_cache() 自身抛错绝不被吞（响亮暴露接线错误）
+    def _boom_normal():
+        raise RuntimeError("normal-step empty_cache wiring bug")
+
+    alloc.on_empty_cache = _boom_normal
+    with pytest.raises(RuntimeError, match="normal-step empty_cache wiring bug"):
+        stream.feed(chunks[2])
+    assert alloc.empty_cache_calls == 2
+    alloc.on_empty_cache = None
+
+    # failed=True 步内异常：先 _clear_exception_frames + gc.collect 释放 generate() 内层局部对象，再强回收并保原异常
+    class _HeldActivation:
+        pass
+
+    held_refs: list[weakref.ref] = []
+    alive_at_flush: list[bool] = []
+
+    class _OomTransformersModel:
+        def generate(self, **kwargs):
+            local_activation = _HeldActivation()
+            held_refs.append(weakref.ref(local_activation))
+            raise RuntimeError("simulated CUDA OOM in generate")
+
+    alloc.set_gap(0)
+    alloc.on_empty_cache = lambda: alive_at_flush.append(held_refs[-1]() is not None)
+    oom_stream = BoundedOfficialStream(
+        _FakeCudaAsr(_OomTransformersModel()),
+        _state(),
+        sampling_params_factory=None,
+        parse_output=lambda raw, lang: (lang or "", raw),
+        pcm=LIST_PCM,
+    )
+    with pytest.raises(RuntimeError, match="simulated CUDA OOM in generate") as oom_err:
+        oom_stream.feed(chunks[0])
+    assert oom_err.value.__traceback__ is not None
+    assert alloc.empty_cache_calls == 3
+    assert alive_at_flush == [False], "generate() 内层帧局部对象必须在 empty_cache() 前释放"
+
+    # failed=True 且 empty_cache() 二次抛 CUDA 粘滞错：二次错被抑制，原 OOM 异常完整保留
+    def _sticky_cuda_err():
+        alive_at_flush.append(held_refs[-1]() is not None)
+        raise RuntimeError("secondary sticky CUDA error")
+
+    alloc.on_empty_cache = _sticky_cuda_err
+    oom_stream2 = BoundedOfficialStream(
+        _FakeCudaAsr(_OomTransformersModel()),
+        _state(),
+        sampling_params_factory=None,
+        parse_output=lambda raw, lang: (lang or "", raw),
+        pcm=LIST_PCM,
+    )
+    with pytest.raises(RuntimeError, match="simulated CUDA OOM in generate"):
+        oom_stream2.feed(chunks[0])
+    assert alloc.empty_cache_calls == 4
+    assert alive_at_flush[-1] is False
+    alloc.on_empty_cache = None
+
+    # 负向接线：vllm / transformers+cpu / transformers+mps 均零调用 empty_cache
+    alloc.set_gap(threshold * 2)
+    before_non_cuda = alloc.empty_cache_calls
+
+    vllm_asr = FakeAsr(FakeLLM(_speech(pieces)))
+    vllm_asr.backend = "vllm"
+    vllm_asr.device = "cuda"
+    vllm_stream = BoundedOfficialStream(
+        vllm_asr,
+        _state(),
+        sampling_params_factory=lambda n: n,
+        parse_output=lambda raw, lang: (lang or "", raw),
+        pcm=LIST_PCM,
+    )
+    for c in chunks[:2]:
+        vllm_stream.feed(c)
+    vllm_stream.finish()
+
+    for dev_name in ("cpu", "mps"):
+        non_cuda_asr = _FakeTransformersAsr(_FakeTransformersModel(_speech(pieces)))
+        non_cuda_asr.device = dev_name
+        non_cuda_stream = BoundedOfficialStream(
+            non_cuda_asr,
+            _state(),
+            sampling_params_factory=None,
+            parse_output=lambda raw, lang: (lang or "", raw),
+            pcm=LIST_PCM,
+        )
+        for c in chunks[:2]:
+            non_cuda_stream.feed(c)
+        non_cuda_stream.finish()
+
+    assert alloc.empty_cache_calls == before_non_cuda
+
+
+def test_official_engine_cuda_lifecycle_reclaims_on_success_and_error_without_swallowing(tmp_path, monkeypatch):
+    threshold = DEFAULT_CUDA_CACHE_FLUSH_THRESHOLD_BYTES
+    alloc = _FakeCudaAllocator()
+    monkeypatch.setitem(sys.modules, "torch", alloc.build_torch_module())
+
+    @dataclass
+    class _FakeASRStreamingState:
+        unfixed_chunk_num: int
+        unfixed_token_num: int
+        chunk_size_sec: float
+        chunk_size_samples: int
+        chunk_id: int
+        buffer: object
+        audio_accum: object
+        prompt_raw: str
+        context: str
+        force_language: str | None
+        language: str
+        text: str
+        _raw_decoded: str
+
+    def _norm_lang(name: str) -> str:
+        return name[:1].upper() + name[1:].lower()
+
+    def _validate_lang(name: str) -> None:
+        if name not in {"Chinese", "English"}:
+            raise ValueError(f"unsupported {name}")
+
+    class _FakeLoadModel(_FakeTransformersModel):
+        def __init__(self, speech_fn, *, runaway_at=None, fail_on_to=False):
+            super().__init__(speech_fn, runaway_at=runaway_at)
+            self._fail_on_to = fail_on_to
+
+        def to(self, dev):
+            if self._fail_on_to:
+                raise RuntimeError("OOM during model.to")
+            self.device = dev
+            return self
+
+        def eval(self):
+            return self
+
+    class _FakeTfLoadedAsr:
+        backend = "transformers"
+
+        def __init__(self, model):
+            self.model = model
+            self.processor = _FakeTransformersProcessor()
+            self.device = None
+            self.dtype = None
+
+        def _build_text_prompt(self, context: str, force_language: str | None) -> str:
+            return "P:"
+
+    class _FakeVllmLoadedAsr:
+        backend = "vllm"
+
+        def __init__(self, llm):
+            self.model = llm
+            self.processor = SimpleNamespace(tokenizer=CharTokenizer())
+
+        def init_streaming_state(self, *, context, language, unfixed_chunk_num, unfixed_token_num, chunk_size_sec):
+            return _FakeASRStreamingState(
+                unfixed_chunk_num=unfixed_chunk_num,
+                unfixed_token_num=unfixed_token_num,
+                chunk_size_sec=chunk_size_sec,
+                chunk_size_samples=max(1, int(round(chunk_size_sec * SAMPLE_RATE))),
+                chunk_id=0,
+                buffer=np.zeros((0,), dtype=np.float32),
+                audio_accum=np.zeros((0,), dtype=np.float32),
+                prompt_raw="P:",
+                context=context,
+                force_language=language,
+                language="",
+                text="",
+                _raw_decoded="",
+            )
+
+    load_cfg = {"fail_on_to": False, "runaway_at": set(), "last_model_ref": None}
+    step_samples = int(round(0.4 * SAMPLE_RATE))  # 6400
+    pieces = [f"词{i}，" for i in range(6)]
+
+    def _speech_step(n: int) -> str:
+        k = max(1, -(-n // step_samples))
+        return "".join(pieces[:k])
+
+    class _FakeQwen3ASRModel:
+        @classmethod
+        def from_pretrained(cls, _path, dtype=None):
+            m = _FakeLoadModel(_speech_step, runaway_at=set(load_cfg["runaway_at"]), fail_on_to=load_cfg["fail_on_to"])
+            load_cfg["last_model_ref"] = weakref.ref(m)
+            return _FakeTfLoadedAsr(m)
+
+        @classmethod
+        def LLM(cls, **kwargs):
+            return _FakeVllmLoadedAsr(FakeLLM(_speech_step))
+
+    qwen_mod = types.ModuleType("qwen_asr")
+    qwen_mod.Qwen3ASRModel = _FakeQwen3ASRModel
+    qwen_inf = types.ModuleType("qwen_asr.inference")
+    qwen_q3 = types.ModuleType("qwen_asr.inference.qwen3_asr")
+    qwen_q3.ASRStreamingState = _FakeASRStreamingState
+    qwen_utils = types.ModuleType("qwen_asr.inference.utils")
+    qwen_utils.normalize_language_name = _norm_lang
+    qwen_utils.validate_language = _validate_lang
+    vllm_mod = types.ModuleType("vllm")
+    vllm_mod.SamplingParams = lambda temperature=0.0, max_tokens=50: int(max_tokens)
+
+    monkeypatch.setitem(sys.modules, "qwen_asr", qwen_mod)
+    monkeypatch.setitem(sys.modules, "qwen_asr.inference", qwen_inf)
+    monkeypatch.setitem(sys.modules, "qwen_asr.inference.qwen3_asr", qwen_q3)
+    monkeypatch.setitem(sys.modules, "qwen_asr.inference.utils", qwen_utils)
+    monkeypatch.setitem(sys.modules, "vllm", vllm_mod)
+
+    pcm_0_4s = b"\x00\x00" * step_samples
+
+    # 1) load(warmup=True) 经 transcribe finally 强制回收一次；load(warmup=False) 结束也强制回收一次
+    alloc.set_gap(0)
+    eng = OfficialEngine(model_path=tmp_path, backend="transformers", device="cuda")
+    eng.load(warmup=True)
+    assert eng.loaded is True and eng.resolved_backend == "transformers" and eng.resolved_device == "cuda"
+    assert alloc.empty_cache_calls == 1
+
+    eng_no_warm = OfficialEngine(model_path=tmp_path, backend="transformers", device="cuda")
+    eng_no_warm.load(warmup=False)
+    assert alloc.empty_cache_calls == 2
+    eng_no_warm.unload()
+    assert alloc.empty_cache_calls == 3
+
+    # 2) load() 失败（model.to 抛 OOM）：半加载模型 weakref 在 empty_cache 前已释放、resolved_* 清零、二次清理错不吞原错
+    load_cfg["fail_on_to"] = True
+    fail_model_alive: list[bool] = []
+
+    def _check_fail_load_flush():
+        fail_model_alive.append(load_cfg["last_model_ref"]() is not None)
+        raise RuntimeError("secondary cleanup error after load OOM")
+
+    alloc.on_empty_cache = _check_fail_load_flush
+    bad_eng = OfficialEngine(model_path=tmp_path, backend="transformers", device="cuda")
+    with pytest.raises(RuntimeError, match="OOM during model.to"):
+        bad_eng.load(warmup=True)
+    assert alloc.empty_cache_calls == 4
+    assert fail_model_alive == [False], "半搬移模型必须在 empty_cache() 执行前被彻底释放"
+    assert bad_eng._asr is None and bad_eng.loaded is False
+    assert bad_eng.resolved_backend is None and bad_eng.resolved_device is None
+    alloc.on_empty_cache = None
+    load_cfg["fail_on_to"] = False
+
+    # 未加载态 drop_all_streams() 与重复 unload() 为安全幂等 no-op
+    bad_eng.drop_all_streams()
+    bad_eng.unload()
+    assert alloc.empty_cache_calls == 4
+
+    # 3) transcribe() 成功强制回收 + 失控失败在二次清理错下仍保原 LogicError
+    alloc.set_gap(0)
+    res = eng.transcribe(pcm_0_4s * 2, language="zh")
+    assert res.text == pieces[0] + pieces[1]
+    assert alloc.empty_cache_calls == 5
+
+    eng._asr.model.runaway_at = {step_samples * 2}
+    alloc.on_empty_cache = lambda: (_ for _ in ()).throw(RuntimeError("secondary transcribe cleanup err"))
+    with pytest.raises(LogicError) as tr_err:
+        eng.transcribe(pcm_0_4s * 2, language="zh")
+    assert tr_err.value.code == ErrorCode.asr_unavailable
+    assert alloc.empty_cache_calls == 6
+    alloc.on_empty_cache = None
+    eng._asr.model.runaway_at = set()
+
+    # 4) finish_stream() 整块对齐（tail_n == 0 跳过 _decode）仍强回收；失控失败在二次清理错下仍保原 LogicError
+    alloc.set_gap(0)
+    eng.start_stream("s-aligned", language="zh")
+    eng.push_pcm("s-aligned", pcm_0_4s)
+    eng.push_pcm("s-aligned", pcm_0_4s)
+    assert alloc.empty_cache_calls == 6  # gap=0，两步 push_pcm 均未触发阈值
+    fin = eng.finish_stream("s-aligned")
+    assert fin.text == pieces[0] + pieces[1]
+    assert len(eng.last_finished_reports) == 2 and not eng.last_finished_reports[-1].final  # 确已跳过 _decode
+    assert alloc.empty_cache_calls == 7
+
+    eng.start_stream("s-runaway", language="zh")
+    eng._asr.model.runaway_at = {step_samples * 2}
+    eng.push_pcm("s-runaway", pcm_0_4s * 2)
+    alloc.on_empty_cache = lambda: (_ for _ in ()).throw(RuntimeError("secondary finish cleanup err"))
+    with pytest.raises(LogicError) as fin_err:
+        eng.finish_stream("s-runaway")
+    assert fin_err.value.code == ErrorCode.asr_unavailable
+    assert alloc.empty_cache_calls == 8
+    alloc.on_empty_cache = None
+    eng._asr.model.runaway_at = set()
+
+    # 5) cancel_stream() 命中活动会话强回收；404 不触发
+    eng.start_stream("s-cancel", language="zh")
+    eng.cancel_stream("s-cancel")
+    assert alloc.empty_cache_calls == 9
+    with pytest.raises(LogicError) as nf_err:
+        eng.cancel_stream("s-missing")
+    assert nf_err.value.code == ErrorCode.not_found
+    assert alloc.empty_cache_calls == 9
+
+    # 6) drop_all_streams() 强回收
+    eng.start_stream("s-drop", language="zh")
+    eng.drop_all_streams()
+    assert alloc.empty_cache_calls == 10
+
+    # 7) unload() 先置空 _asr 再强回收，且二次 unload() 幂等 no-op
+    asr_none_at_flush: list[bool] = []
+    alloc.on_empty_cache = lambda: asr_none_at_flush.append(eng._asr is None)
+    eng.unload()
+    assert alloc.empty_cache_calls == 11
+    assert asr_none_at_flush == [True]
+    assert eng.loaded is False and eng.resolved_backend is None and eng.resolved_device is None
+    eng.unload()
+    assert alloc.empty_cache_calls == 11
+    alloc.on_empty_cache = None
+
+    # 8) Linux vLLM 全生命周期零调用 empty_cache（即便 gap >= 2 * threshold）
+    alloc.set_gap(threshold * 2)
+    vllm_before = alloc.empty_cache_calls
+    vllm_eng = OfficialEngine(model_path=tmp_path, backend="vllm")
+    vllm_eng.load(warmup=False)
+    vllm_eng.transcribe(pcm_0_4s * 2, language="zh")
+    vllm_eng.start_stream("v1", language="zh")
+    vllm_eng.push_pcm("v1", pcm_0_4s)
+    vllm_eng.finish_stream("v1")
+    vllm_eng.start_stream("v2", language="zh")
+    vllm_eng.cancel_stream("v2")
+    vllm_eng.drop_all_streams()
+    vllm_eng.unload()
+    assert alloc.empty_cache_calls == vllm_before

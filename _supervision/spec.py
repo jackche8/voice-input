@@ -17,6 +17,7 @@ import httpx
 from _contracts import ComponentName
 from _jobs_client import build_tls_context
 from _paths import INTERNAL_SERVER_FLAG, AppPaths, asr_runtime_root, internal_subcommand
+from _platform.child_process import set_env_var
 from _platform.protocol import OsName
 from _platform.system_proxy import SystemProxyReader, merge_proxy_env, read_os_system_proxy
 from _ports import LocalPorts, local_ports
@@ -24,6 +25,7 @@ from _supervision.gpu_preflight import asr_gpu_preflight, asr_windows_cuda_prefl
 from _v3.setup_probe import ASR_VARIANTS, asr_variant, probe_asr_sidecar, probe_asr_weights, probe_ollama
 
 READY_TIMEOUT_S = 3.0
+DEFAULT_OLLAMA_KEEP_ALIVE = "5m"
 Runner = Callable[..., subprocess.CompletedProcess]
 
 
@@ -90,8 +92,9 @@ def _ollama(
         return None if paths.ollama_binary.is_file() else f"未安装 Ollama（{paths.ollama_binary} 不存在）"
 
     env = merge_proxy_env(environ, os_name=paths.os_name, read_system_proxy=read_system_proxy)
-    env["OLLAMA_HOST"] = f"127.0.0.1:{ports.ollama}"
-    env["OLLAMA_MODELS"] = str(paths.ollama_models)
+    set_env_var(env, "OLLAMA_HOST", f"127.0.0.1:{ports.ollama}", os_name=paths.os_name, overwrite=True)
+    set_env_var(env, "OLLAMA_MODELS", str(paths.ollama_models), os_name=paths.os_name, overwrite=True)
+    set_env_var(env, "OLLAMA_KEEP_ALIVE", DEFAULT_OLLAMA_KEEP_ALIVE, os_name=paths.os_name, overwrite=True)
     return ComponentSpec(
         name=ComponentName.ollama, argv=(str(paths.ollama_binary), "serve"), env=env, cwd=paths.data_root,
         log_path=paths.logs / "ollama.log", port=ports.ollama, ready=ready, installed=installed,
@@ -197,4 +200,12 @@ def build_specs(
     )
 
 
-__all__ = ["ASR_VARIANTS", "ComponentSpec", "READY_TIMEOUT_S", "ReadyResult", "asr_variant", "build_specs"]
+__all__ = [
+    "ASR_VARIANTS",
+    "ComponentSpec",
+    "DEFAULT_OLLAMA_KEEP_ALIVE",
+    "READY_TIMEOUT_S",
+    "ReadyResult",
+    "asr_variant",
+    "build_specs",
+]

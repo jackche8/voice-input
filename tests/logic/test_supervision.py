@@ -19,7 +19,7 @@ from _ports import DEFAULT_ASR_PORT as ASR_PORT, DEFAULT_OLLAMA_PORT, DEFAULT_SE
 from _supervision import machine as sm
 from _supervision.ports import port_owner
 from _supervision.records import ChildrenRecord, clean_stale_children, read_record, write_record
-from _supervision.spec import ReadyResult, build_specs
+from _supervision.spec import DEFAULT_OLLAMA_KEEP_ALIVE, ReadyResult, build_specs
 
 
 @pytest.fixture
@@ -103,6 +103,67 @@ def test_build_specs_merges_proxy_only_into_ollama(tmp_path):
     assert ollama.env["OLLAMA_MODELS"] == str(win_paths.ollama_models)
     for other in (asr, server):
         assert "HTTP_PROXY" not in other.env and "HTTPS_PROXY" not in other.env and "NO_PROXY" not in other.env
+
+
+@pytest.mark.parametrize("os_name", ["linux", "macos", "windows"])
+def test_ollama_spec_pins_keep_alive_5m_and_isolates_external_env_across_platforms(tmp_path, os_name):
+    assert DEFAULT_OLLAMA_KEEP_ALIVE == "5m"
+    path_kwargs = (
+        {"environ": {"APPDATA": str(tmp_path / "live-app"), "LOCALAPPDATA": str(tmp_path / "live-local")}}
+        if os_name == "windows"
+        else {}
+    )
+    os_paths = AppPaths.for_roots(
+        config_root=tmp_path / f"{os_name}-c",
+        data_root=tmp_path / f"{os_name}-d",
+        runtime_dir=tmp_path / f"{os_name}-r",
+        os_name=os_name,
+        **path_kwargs,
+    )
+
+    # 1) 默认环境：三端均显式锁定 OLLAMA_KEEP_ALIVE="5m"，不修改入参，不注入 asr / server
+    clean_env = {"PATH": "/usr/bin"}
+    clean_snapshot = dict(clean_env)
+    clean_specs = {
+        s.name: s
+        for s in build_specs(os_paths, clean_env, read_system_proxy=lambda _os: ({}, []))
+    }
+    assert clean_env == clean_snapshot
+    assert clean_specs[ComponentName.ollama].env["OLLAMA_KEEP_ALIVE"] == "5m"
+    for other in (clean_specs[ComponentName.asr], clean_specs[ComponentName.server]):
+        assert "OLLAMA_KEEP_ALIVE" not in other.env
+
+    # 2) 外部污染环境：覆盖外部 OLLAMA_KEEP_ALIVE="-1" 等，Windows 下三键大小写变体唯一去重，入参不可变
+    polluted_env = {
+        "PATH": "/usr/bin",
+        "OLLAMA_KEEP_ALIVE": "-1",
+        "OLLAMA_HOST": "0.0.0.0:11434",
+        "OLLAMA_MODELS": "/external/models",
+    }
+    if os_name == "windows":
+        polluted_env.update(
+            {
+                "ollama_keep_alive": "-1",
+                "Ollama_Keep_Alive": "24h",
+                "ollama_host": "0.0.0.0:9999",
+                "Ollama_Models": r"D:\external\ollama",
+            }
+        )
+    polluted_snapshot = dict(polluted_env)
+    specs = {
+        s.name: s
+        for s in build_specs(os_paths, polluted_env, read_system_proxy=lambda _os: ({}, []))
+    }
+    assert polluted_env == polluted_snapshot
+    ollama, asr, server = specs[ComponentName.ollama], specs[ComponentName.asr], specs[ComponentName.server]
+    assert ollama.env["OLLAMA_KEEP_ALIVE"] == "5m"
+    assert ollama.env["OLLAMA_HOST"] == f"127.0.0.1:{DEFAULT_OLLAMA_PORT}"
+    assert ollama.env["OLLAMA_MODELS"] == str(os_paths.ollama_models)
+    for other in (asr, server):
+        assert other.env.get("OLLAMA_KEEP_ALIVE") == "-1"
+    if os_name == "windows":
+        for canon in ("OLLAMA_KEEP_ALIVE", "OLLAMA_HOST", "OLLAMA_MODELS"):
+            assert [k for k in ollama.env if k.upper() == canon] == [canon]
 
 
 @pytest.mark.parametrize(("variant", "tail"), [

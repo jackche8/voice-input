@@ -4,10 +4,12 @@
 """
 from __future__ import annotations
 
+import gc
 import importlib.util
 import threading
 import time
 from collections.abc import Callable
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
@@ -38,8 +40,11 @@ from runtimes.asr.protocol import (
 from runtimes.asr.stream_step import (
     BoundedOfficialStream,
     StepReport,
+    _clear_exception_frames,
     decode_whole,
+    is_cuda_reclaim_target,
     numpy_pcm_ops,
+    reclaim_cuda_cache,
 )
 
 MIN_INPUT_S = 0.5
@@ -272,17 +277,34 @@ class OfficialEngine:
             import torch
 
             dev, dtype = resolve_transformers_device(self.device, torch_module=torch)
-            self._asr = Qwen3ASRModel.from_pretrained(
-                str(self.model_path),
-                dtype=dtype,
-            )
-            self._asr.model.to(dev)
-            if callable(getattr(self._asr.model, "eval", None)):
-                self._asr.model.eval()
-            self._asr.device = torch.device(dev)
-            self._asr.dtype = dtype
-            self.resolved_backend = "transformers"
-            self.resolved_device = dev
+            try:
+                self._asr = Qwen3ASRModel.from_pretrained(
+                    str(self.model_path),
+                    dtype=dtype,
+                )
+                self._asr.model.to(dev)
+                if callable(getattr(self._asr.model, "eval", None)):
+                    self._asr.model.eval()
+                self._asr.device = torch.device(dev)
+                self._asr.dtype = dtype
+                self.resolved_backend = "transformers"
+                self.resolved_device = dev
+            except BaseException as exc:
+                self._asr = None
+                self.loaded = False
+                self.resolved_backend = None
+                self.resolved_device = None
+                if is_cuda_reclaim_target("transformers", dev):
+                    _clear_exception_frames(exc)
+                    gc.collect()
+                    with suppress(Exception):
+                        reclaim_cuda_cache(
+                            backend="transformers",
+                            device=dev,
+                            force=True,
+                            torch_module=torch,
+                        )
+                raise
 
         self.loaded = True
         self.load_s = time.perf_counter() - started
@@ -291,6 +313,34 @@ class OfficialEngine:
             silence = b"\x00\x00" * int(self.sample_rate * MIN_INPUT_S)
             self.transcribe(silence, language="zh")
             self.warmup_s = time.perf_counter() - warm_started
+        else:
+            self._reclaim_cuda_cache(force=True)
+
+    def _cuda_cache_target(self) -> tuple[str | None, Any]:
+        if self._asr is None:
+            return None, None
+        backend = getattr(self._asr, "backend", None) or self.resolved_backend
+        device = (
+            getattr(self._asr, "device", None)
+            or getattr(getattr(self._asr, "model", None), "device", None)
+            or self.resolved_device
+        )
+        return backend, device
+
+    def _reclaim_cuda_cache(
+        self, *, force: bool = True, suppress_errors: bool = False
+    ) -> bool:
+        backend, device = self._cuda_cache_target()
+        if suppress_errors:
+            with suppress(Exception):
+                return reclaim_cuda_cache(backend=backend, device=device, force=force)
+            return False
+        return reclaim_cuda_cache(backend=backend, device=device, force=force)
+
+    def _clear_streams_unlocked(self) -> None:
+        for stream in self._streams.values():
+            stream.decoder = None
+        self._streams.clear()
 
     def _require(self) -> Any:
         if self._asr is None or not self.loaded:
@@ -400,14 +450,19 @@ class OfficialEngine:
                 },
             )
         decoder = self._new_decoder(language=language, context=context)
+        failed = False
         try:
             decode_whole(
                 decoder,
                 pcm_s16le_to_float32(pcm),
                 min_samples=int(self.sample_rate * MIN_INPUT_S),
             )
+        except BaseException:
+            failed = True
+            raise
         finally:
             self.last_transcribe_reports = list(decoder.reports)
+            self._reclaim_cuda_cache(force=True, suppress_errors=failed)
         state = decoder.state
         return SttResponse(
             text=getattr(state, "text", "") or "",
@@ -484,10 +539,15 @@ class OfficialEngine:
                 raise LogicError(ErrorCode.not_found, f"会话不存在: {session_id}")
             decoder = stream.decoder
             stream.decoder = None
+            failed = False
             try:
                 decoder.finish()
+            except BaseException:
+                failed = True
+                raise
             finally:
                 self.last_finished_reports = list(decoder.reports)
+                self._reclaim_cuda_cache(force=True, suppress_errors=failed)
             state = decoder.state
             text = getattr(state, "text", "") or ""
             language = getattr(state, "language", None) or None
@@ -499,6 +559,7 @@ class OfficialEngine:
             if stream is None:
                 raise LogicError(ErrorCode.not_found, f"会话不存在: {session_id}")
             stream.decoder = None
+            self._reclaim_cuda_cache(force=True)
 
     def has_stream(self, session_id: str) -> bool:
         with self._guard:
@@ -506,14 +567,20 @@ class OfficialEngine:
 
     def drop_all_streams(self) -> None:
         with self._guard:
-            for stream in self._streams.values():
-                stream.decoder = None
-            self._streams.clear()
+            self._clear_streams_unlocked()
+            self._reclaim_cuda_cache(force=True)
 
     def unload(self) -> None:
-        self.drop_all_streams()
-        self._asr = None
-        self.loaded = False
+        with self._guard:
+            backend, device = self._cuda_cache_target()
+            self._clear_streams_unlocked()
+            self._asr = None
+            self.loaded = False
+            self.resolved_backend = None
+            self.resolved_device = None
+        if is_cuda_reclaim_target(backend, device):
+            gc.collect()
+            reclaim_cuda_cache(backend=backend, device=device, force=True)
 
 
 __all__ = [
