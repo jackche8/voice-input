@@ -32,6 +32,7 @@ REQUIRED_PATHS = {
     "/api/v1/stt",
     "/api/v1/polish",
     "/api/v1/translate",
+    "/api/v1/ocr/preview",
     "/api/v1/ocr-translate",
     "/api/v1/ocr-inplace",
     "/api/v1/history",
@@ -73,6 +74,12 @@ def test_generated_openapi_has_real_paths_and_sse_schemas(tmp_path: Path):
         "UtteranceResendNeedsConfirmation",
         "OcrInplaceResponse",
         "OcrTextBlock",
+        "OcrPreprocessParams",
+        "OcrPreprocessPreset",
+        "OcrPreprocessStarterTemplate",
+        "OcrAttemptSummary",
+        "OcrRunMeta",
+        "OcrPreprocessPreviewResponse",
         "LogLineEntry",
         "LogSourceInfo",
         "LogSourceListResponse",
@@ -125,6 +132,7 @@ def test_openapi_security_and_errors_are_derived(tmp_path: Path):
     audio_inputs = spec["paths"]["/api/v1/audio-inputs"]["get"]
     claim = spec["paths"]["/api/v1/jobs/claim"]["post"]
     ocr_inplace = spec["paths"]["/api/v1/ocr-inplace"]["post"]
+    ocr_preview = spec["paths"]["/api/v1/ocr/preview"]["post"]
     assert lan["security"] == [{"VoiceToken": []}]
     assert local.get("security") == []
     assert audio_inputs.get("security") == []
@@ -133,6 +141,9 @@ def test_openapi_security_and_errors_are_derived(tmp_path: Path):
     assert claim.get("security") == []
     assert ocr_inplace.get("security") == []
     assert "403" in ocr_inplace["responses"] and "413" in ocr_inplace["responses"]
+    assert ocr_preview.get("operationId") == "ocr_preview_api_v1_ocr_preview_post"
+    assert ocr_preview.get("security") == []
+    assert "403" in ocr_preview["responses"] and "413" in ocr_preview["responses"]
     assert "403" in lan["responses"] and "413" in lan["responses"]
     assert "403" in local["responses"]
     assert "413" not in local["responses"]

@@ -19,6 +19,7 @@ from _contracts import (
     AudioInputListResponse,
     ErrorCode,
     LogicError,
+    OcrPreprocessPreviewResponse,
     OcrTextBlock,
     PolishRequest,
     PolishResponse,
@@ -33,6 +34,8 @@ from _history_service import HistoryService
 from _jobs import JobStore
 from _jobs_service import JobsService
 from _logs import LogService
+from _ocr_layout import OcrLayoutResult, OcrTextResult
+from _ocr_preprocess import render_ocr_preprocess_preview
 from _ocr_text import block_segments, block_translated_text
 from _paths import AppPaths, default_app_paths
 from _platform.detect import detect_os
@@ -50,8 +53,9 @@ TranscribeFn = Callable[..., SttResponse]
 PolishFn = Callable[[PolishRequest], PolishResponse]
 TranslateFn = Callable[[TranslateRequest], TranslateResponse]
 TranslateBlocksFn = Callable[..., list[OcrTextBlock]]
-OcrFn = Callable[..., str]
-OcrLayoutFn = Callable[..., tuple[int, int, str, list[OcrTextBlock]]]
+OcrFn = Callable[..., OcrTextResult]
+OcrLayoutFn = Callable[..., OcrLayoutResult]
+OcrPreviewFn = Callable[..., OcrPreprocessPreviewResponse]
 DecodeAudioFn = Callable[..., bytes]
 ListAudioInputsFn = Callable[[], AudioInputListResponse]
 AboutProviderFn = Callable[[], AboutInfoResponse]
@@ -145,6 +149,7 @@ class Runtime:
     translate_blocks: TranslateBlocksFn | None = None
     ocr: OcrFn | None = None
     ocr_layout: OcrLayoutFn | None = None
+    ocr_preview: OcrPreviewFn | None = render_ocr_preprocess_preview
     decode_audio: DecodeAudioFn = decode_audio_to_pcm16k
     stream_provider: StreamingAsrProvider | None = None
     setup: SetupService | None = None
@@ -173,6 +178,7 @@ def build_sandbox_runtime(
     translate_blocks: TranslateBlocksFn | None = None,
     ocr: OcrFn | None = None,
     ocr_layout: OcrLayoutFn | None = None,
+    ocr_preview: OcrPreviewFn | None = render_ocr_preprocess_preview,
     decode_audio: DecodeAudioFn | None = None,
     stream_provider: StreamingAsrProvider | None = None,
     setup: SetupService | None = None,
@@ -236,6 +242,7 @@ def build_sandbox_runtime(
         translate_blocks=effective_translate_blocks,
         ocr=ocr,
         ocr_layout=ocr_layout,
+        ocr_preview=ocr_preview,
         decode_audio=decode_audio_to_pcm16k if decode_audio is None else decode_audio,
         stream_provider=stream_provider,
         setup=setup,

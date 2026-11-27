@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import contextlib
 import inspect
-import io
 import os
 import re
 import shutil
@@ -13,10 +12,16 @@ from collections.abc import Callable, Iterator, Mapping
 from pathlib import Path
 from typing import Any, NoReturn
 
-import numpy as np
-from PIL import Image, ImageOps
+from PIL import Image
 
 from _contracts import ErrorCode, LogicError
+from _ocr_preprocess import (
+    OCR_BORDER_PX,
+    OCR_UPSCALE,
+    OCR_UPSCALE_MAX_PIXELS,
+    build_ocr_input_image,
+    prepare_ocr_base,
+)
 from _ocr_text import clean_cjk_spaces
 from _paths import PROGRAM_ROOT
 from _platform.child_process import windows_subprocess_kwargs
@@ -27,16 +32,7 @@ DEFAULT_OCR_LANG = "chi_sim+chi_tra+eng"
 DEFAULT_OCR_LANGS = DEFAULT_OCR_LANG
 # 默认识别语言的能力项标签：设置页与各平台能力自检都经 default_ocr_languages() 从 DEFAULT_OCR_LANG 派生
 OCR_LANG_LABELS = {"chi_sim": "OCR 简体中文", "chi_tra": "OCR 繁体中文", "eng": "OCR 英文"}
-OCR_BORDER_PX = 12
 OCR_TIMEOUT_S = 30
-OCR_UPSCALE = 2
-# 放大后像素上限：实测（默认 chi_sim+chi_tra+eng，tests/logic/ocr_samples.py）：
-# 全部 11 项精度样本最大 1280×860（2× = 4,403,200 px，4.17s 全过）、1920×1080 整屏 2× = 8,294,400 px（2.53–5.76s）；
-# 3440×1440 密集整屏 2× 需 10.25–10.40s（高负载易撞 15s 超时），降 1× 后 7.22s（-30.6%）且与 OCR_TIMEOUT_S=30 留足裕度。
-OCR_UPSCALE_MAX_PIXELS = 1920 * 1080 * 4
-
-_LIGHT_CANVAS_RGB = (255, 255, 255)  # #ffffff
-_DARK_CANVAS_RGB = (17, 24, 39)      # #111827
 
 _lang_cache_lock = threading.Lock()
 _tesseract_env_lock = threading.Lock()
@@ -275,27 +271,6 @@ def ensure_ocr_languages(
         )
 
 
-def _perceptual_luma_rgb(rgb: np.ndarray) -> float:
-    return float(
-        0.299 * float(np.mean(rgb[:, 0]))
-        + 0.587 * float(np.mean(rgb[:, 1]))
-        + 0.114 * float(np.mean(rgb[:, 2]))
-    )
-
-
-def _edge_border_fill(rgb_img: Image.Image) -> tuple[int, int, int]:
-    arr = np.asarray(rgb_img, dtype=np.uint8)
-    if arr.size == 0:
-        return _LIGHT_CANVAS_RGB
-    top = arr[0, :, :]
-    bottom = arr[-1, :, :]
-    left = arr[:, 0, :]
-    right = arr[:, -1, :]
-    edges = np.concatenate([top, bottom, left, right], axis=0)
-    luma = _perceptual_luma_rgb(edges)
-    return _DARK_CANVAS_RGB if luma < 140.0 else _LIGHT_CANVAS_RGB
-
-
 def prepare_ocr_image(
     image_bytes: bytes,
     *,
@@ -303,49 +278,31 @@ def prepare_ocr_image(
 ) -> tuple[Image.Image, Image.Image, int]:
     """返回 (合成后不透明原尺寸 RGB 图（供采色）, 灰度 + 放大 + 四周 border_px 留白的 OCR 输入图, 实际倍数)。
 
-    透明图（RGBA / LA / P）按前景像素明度自动合成到白底 #ffffff 或深底 #111827，
-    避免浅色前景字在白底消失或深色字在黑底消失。屏幕小字与深底浅字放大后识别明显更好；
-    放大后像素超过 OCR_UPSCALE_MAX_PIXELS 的大选区用 1×（否则超出识别超时预算）。
+    委托 `_ocr_preprocess.prepare_ocr_base` 与 `build_ocr_input_image`，与预览和预设处理共用同一基图管线。
     OCR 坐标还原：x_原图 = (x_ocr - border_px) / 倍数。
     """
+    base = prepare_ocr_base(image_bytes)
+    ocr_img, _otsu = build_ocr_input_image(base, None, border_px=border_px)
+    return base.orig_rgb, ocr_img, base.scale
+
+
+def default_data_runner() -> Callable[..., dict[str, list[Any]]]:
+    """构造默认 pytesseract.image_to_data 执行器（线程安全设置内置 Tesseract 与 TESSDATA_PREFIX）。"""
     try:
-        raw_img = Image.open(io.BytesIO(image_bytes))
-        raw_img.load()
-    except Exception as exc:
-        raise_ocr_error(exc)
+        import pytesseract
+    except ImportError as exc:
+        raise LogicError(ErrorCode.ocr_failed, f"OCR 依赖不可用: {exc}") from exc
 
-    has_alpha = raw_img.mode in ("RGBA", "LA") or (
-        raw_img.mode == "P" and "transparency" in raw_img.info
-    )
-    if has_alpha or raw_img.mode == "P":
-        rgba = raw_img.convert("RGBA")
-        arr = np.asarray(rgba, dtype=np.uint8)
-        alpha = arr[:, :, 3]
-        if np.any(alpha < 255):
-            fg_mask = alpha > 24
-            if np.any(fg_mask):
-                fg_luma = _perceptual_luma_rgb(arr[:, :, :3][fg_mask])
-                bg_fill = _DARK_CANVAS_RGB if fg_luma >= 140.0 else _LIGHT_CANVAS_RGB
-            else:
-                bg_fill = _LIGHT_CANVAS_RGB
-            canvas = Image.new("RGBA", rgba.size, (*bg_fill, 255))
-            orig_rgb = Image.alpha_composite(canvas, rgba).convert("RGB")
-            border_fill = bg_fill
-        else:
-            orig_rgb = rgba.convert("RGB")
-            border_fill = _edge_border_fill(orig_rgb)
-    else:
-        orig_rgb = raw_img.convert("RGB")
-        border_fill = _edge_border_fill(orig_rgb)
+    def _run(img: Image.Image, lang: str, timeout: int = OCR_TIMEOUT_S) -> dict[str, list[Any]]:
+        with pytesseract_runtime_context(pytesseract):
+            return pytesseract.image_to_data(
+                img,
+                lang=lang,
+                output_type=pytesseract.Output.DICT,
+                timeout=timeout,
+            )
 
-    width, height = orig_rgb.size
-    scale = OCR_UPSCALE if (width * OCR_UPSCALE) * (height * OCR_UPSCALE) <= OCR_UPSCALE_MAX_PIXELS else 1
-    gray = orig_rgb.convert("L")
-    if scale > 1:
-        gray = gray.resize((width * scale, height * scale), Image.Resampling.BICUBIC)
-    gray_fill = Image.new("RGB", (1, 1), border_fill).convert("L").getpixel((0, 0))
-    ocr_img = ImageOps.expand(gray, border=border_px, fill=gray_fill) if border_px > 0 else gray
-    return orig_rgb, ocr_img, scale
+    return _run
 
 
 def invoke_ocr_runner(
@@ -415,6 +372,7 @@ __all__ = [
     "OCR_UPSCALE",
     "OCR_UPSCALE_MAX_PIXELS",
     "clear_language_cache",
+    "default_data_runner",
     "default_ocr_languages",
     "ensure_ocr_languages",
     "get_cached_languages",

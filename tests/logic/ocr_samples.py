@@ -306,6 +306,15 @@ def all_samples() -> dict[str, OcrSample]:
     return {sample.name: sample for sample in built}
 
 
+@cache
+def dark_low_contrast_sample() -> OcrSample:
+    """深底低对比度灰字合成样本（原图默认识别为空，启用高对比预设可命中早停且保持原底色 #181e2c 采样）。"""
+    c = _Canvas((420, 72), (24, 30, 44))
+    c.new_block()
+    c.line(24, 24, "Dark Mode Status: Ready 2026", _font(SANS, 16), (42, 48, 62))
+    return c.sample("dark_low_contrast")
+
+
 ACCURACY_SAMPLES = (
     "light_paragraph", "dark_paragraph", "code", "terminal", "menu", "table", "hanging_list",
     "chinese_paragraph", "traditional_paragraph", "two_columns", "large_dark_small_text",

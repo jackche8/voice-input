@@ -21,7 +21,7 @@
     },
     ocr: {
       title: "图片 OCR 识别提取",
-      sub: "拖入图片、选择文件或按 Ctrl+V 粘贴截图 · 可选纯提取文字或提取并翻译"
+      sub: "拖入图片、选择文件或按 Ctrl+V 粘贴截图 · 可调参预览并保存全局预处理预设（同时生效于截屏翻译与纯 OCR）"
     },
     history: {
       title: "语音输入与翻译历史",
@@ -67,56 +67,6 @@
 
   function ollamaReady(ollama) {
     return !!(ollama && ollama.modelStatus === "ready" && ollama.running === true);
-  }
-
-  function formatUiError(errCodeOrText, message, details, fallback) {
-    if (typeof errCodeOrText === "string" && errCodeOrText) {
-      if (Object.prototype.hasOwnProperty.call(V3.labels.ERROR_CODE, errCodeOrText)) {
-        return V3.labels.formatError(errCodeOrText, message, details);
-      }
-      return (message && String(message) !== errCodeOrText)
-        ? errCodeOrText + "：" + String(message)
-        : errCodeOrText;
-    }
-    if (errCodeOrText && typeof errCodeOrText === "object") {
-      var innerErr = errCodeOrText.error;
-      var innerMsg = errCodeOrText.message != null && errCodeOrText.message !== "" ? errCodeOrText.message : message;
-      var innerDetails = errCodeOrText.details || details;
-      if (typeof innerErr === "string" && innerErr) {
-        if (Object.prototype.hasOwnProperty.call(V3.labels.ERROR_CODE, innerErr)) {
-          return V3.labels.formatError(innerErr, innerMsg, innerDetails);
-        }
-        return (innerMsg && String(innerMsg) !== innerErr)
-          ? innerErr + "：" + String(innerMsg)
-          : innerErr;
-      }
-      if (innerMsg) return V3.labels.formatError(null, innerMsg, innerDetails);
-    }
-    if (message) return String(message);
-    return fallback || "发生错误";
-  }
-
-  function extractImageFile(dataTransfer) {
-    if (!dataTransfer) return null;
-    var items = dataTransfer.items;
-    if (items && items.length) {
-      for (var i = 0; i < items.length; i++) {
-        var item = items[i];
-        if (item && item.kind === "file" && String(item.type || "").indexOf("image/") === 0 && typeof item.getAsFile === "function") {
-          var f = item.getAsFile();
-          if (f) return f;
-        }
-      }
-    }
-    var files = dataTransfer.files;
-    if (files && files.length) {
-      for (var j = 0; j < files.length; j++) {
-        if (files[j] && String(files[j].type || "").indexOf("image/") === 0) {
-          return files[j];
-        }
-      }
-    }
-    return null;
   }
 
   function sanitizeLanPatch(patch) {
@@ -189,16 +139,7 @@
       state.log_max_lines = state.logs.log_max_lines;
     }
 
-    var ownedPreviewUrl = null;
-    var currentOcrFile = null;
     var destroyed = false;
-
-    function releasePreviewUrl() {
-      if (ownedPreviewUrl && typeof URL !== "undefined" && typeof URL.revokeObjectURL === "function") {
-        try { URL.revokeObjectURL(ownedPreviewUrl); } catch (err) {}
-      }
-      ownedPreviewUrl = null;
-    }
 
     function applyThemeAttr(themeName) {
       var normalized = themeName === "dark" ? "dark" : "light";
@@ -439,7 +380,7 @@
     translateInputBox.addEventListener("drop", function (ev) {
       ev.preventDefault();
       translateInputBox.classList.remove("drag-over");
-      var img = extractImageFile(ev.dataTransfer);
+      var img = V3.ocrPresets.extractImageFile(ev.dataTransfer);
       if (img) submitTranslateImage(img);
     });
 
@@ -484,215 +425,22 @@
       V3.dom.el("div", { className: "studio-split" }, [translateInputBox, translateOutputBox])
     ]);
 
-    /* ---------- 2. OCR 面板（拖拽 / 选择文件 / Ctrl+V + 预览 URL 回收） ---------- */
-    var ocrModeSelect = V3.dom.el("select", {
-      "aria-label": "OCR 处理方式",
-      dataset: { role: "ocr-mode" },
-      onChange: function (ev) {
-        var val = ev.target.value;
-        if (val === "raw") {
-          state = V3.defaults.merge(state, { ocr: { mode: "raw" } });
-        } else {
-          state = V3.defaults.merge(state, { ocr: { mode: "translate", lang_pair: val } });
-        }
-        renderOcrPanel();
-      }
-    });
+    var confirmDialog = typeof V3.mountConfirm === "function" ? V3.mountConfirm(root) : null;
 
-    var ocrFileInput = V3.dom.el("input", {
-      type: "file",
-      accept: "image/*",
-      hidden: true,
-      "aria-label": "选择要识别的图片文件",
-      dataset: { role: "ocr-file-input" }
-    });
-
-    function getOcrMode() {
-      return (state.ocr && state.ocr.mode === "translate") ? "translate" : "raw";
-    }
-
-    function getOcrLangPair() {
-      return (state.ocr && state.ocr.lang_pair) || state.translate_lang_pair || "zh-en";
-    }
-
-    function handleOcrFile(file) {
-      if (!file) return;
-      currentOcrFile = file;
-      releasePreviewUrl();
-      var preview = "";
-      if (typeof URL !== "undefined" && typeof URL.createObjectURL === "function") {
-        try {
-          ownedPreviewUrl = URL.createObjectURL(file);
-          preview = ownedPreviewUrl;
-        } catch (err) {
-          ownedPreviewUrl = null;
-        }
-      }
-      var ocrMode = getOcrMode();
-      state = V3.defaults.merge(state, {
-        copyStatus: null,
-        copyKind: null,
-        ocr: {
-          fileName: file.name || "clipboard-image.png",
-          previewUrl: preview,
-          copyStatus: null,
-          error: null,
-          message: ""
-        }
-      });
-      renderOcrPanel();
-      var imgPayload = {
-        file: file,
-        mode: ocrMode,
-        panel: "ocr"
-      };
-      if (ocrMode === "translate") {
-        imgPayload.lang_pair = getOcrLangPair();
-      }
-      call(hooks, "onSubmitImage", imgPayload);
-    }
-
-    ocrFileInput.addEventListener("change", function () {
-      var file = ocrFileInput.files && ocrFileInput.files[0];
-      if (file) handleOcrFile(file);
-      ocrFileInput.value = "";
-    });
-
-    var ocrDropzone = V3.dom.el("div", {
-      className: "ocr-dropzone",
-      tabindex: "0",
-      role: "button",
-      "aria-label": "点击选择图片，或拖入图片、按 Ctrl+V 粘贴截图",
-      onClick: function () { ocrFileInput.click(); },
-      onKeyDown: function (ev) {
-        if (ev.key === "Enter" || ev.key === " ") {
-          ev.preventDefault();
-          ocrFileInput.click();
-        }
-      }
-    }, [
-      V3.dom.icon("image"),
-      V3.dom.el("div", { style: "font-weight:600;color:var(--c-text)", text: "点击选择图片 · 拖拽图片到此 · Ctrl+V 粘贴截图" }),
-      V3.dom.el("div", { className: "muted", style: "font-size:var(--fs-xs)", text: "支持 PNG / JPEG / WebP 等常见截图格式，本地离线识别" })
-    ]);
-
-    ocrDropzone.addEventListener("dragover", function (ev) {
-      ev.preventDefault();
-      ocrDropzone.classList.add("drag-over");
-    });
-    ocrDropzone.addEventListener("dragleave", function (ev) {
-      if (!ocrDropzone.contains(ev.relatedTarget)) {
-        ocrDropzone.classList.remove("drag-over");
-      }
-    });
-    ocrDropzone.addEventListener("drop", function (ev) {
-      ev.preventDefault();
-      ocrDropzone.classList.remove("drag-over");
-      var img = extractImageFile(ev.dataTransfer);
-      if (img) handleOcrFile(img);
-    });
-
-    var ocrPreviewWrap = V3.dom.el("div", { className: "ocr-preview-wrap", hidden: true });
-    var ocrPreviewImg = V3.dom.el("img", { className: "ocr-preview-img", alt: "待识别图片预览" });
-    var ocrFileLabel = V3.dom.el("span", { className: "mono muted" });
-    ocrPreviewWrap.appendChild(ocrPreviewImg);
-
-    var ocrLeftBox = V3.dom.el("div", { className: "studio-box" }, [
-      V3.dom.el("div", { className: "box-head" }, [
-        V3.dom.el("span", { text: "图片输入" }),
-        ocrModeSelect
-      ]),
-      ocrFileInput,
-      ocrPreviewWrap,
-      ocrDropzone,
-      V3.dom.el("div", { className: "box-foot" }, [
-        ocrFileLabel,
-        V3.dom.el("div", { className: "box-foot-right" }, [
-          V3.dom.el("button", {
-            type: "button",
-            className: "btn btn-sm",
-            onClick: function () { ocrFileInput.click(); }
-          }, [V3.dom.icon("upload"), document.createTextNode("选择图片")]),
-          V3.dom.el("button", {
-            type: "button",
-            className: "btn btn-sm",
-            dataset: { role: "ocr-clear" },
-            onClick: function () {
-              currentOcrFile = null;
-              releasePreviewUrl();
-              state = V3.defaults.merge(state, {
-                copyStatus: null,
-                copyKind: null,
-                ocr: {
-                  phase: "empty",
-                  fileName: "",
-                  previewUrl: "",
-                  source_lang: null,
-                  target_lang: null,
-                  direction_mode: null,
-                  ocr_text: "",
-                  text: "",
-                  error: null,
-                  message: "",
-                  copyStatus: null
-                }
-              });
-              renderOcrPanel();
-            }
-          }, [V3.dom.icon("trash"), document.createTextNode("清除")])
-        ])
-      ])
-    ]);
-
-    var ocrOutBody = V3.dom.el("div", { className: "box-body", dataset: { role: "ocr-output" } });
-    var ocrCopyFeedback = V3.dom.el("span", { className: "saved", hidden: true });
-    var copyOcrRawBtn = V3.dom.el("button", {
-      type: "button",
-      className: "btn primary btn-sm",
-      dataset: { role: "copy-ocr" },
-      onClick: function () {
-        var oc = state.ocr || {};
-        var rawText = oc.ocr_text || (getOcrMode() === "raw" ? oc.text : "") || "";
-        if (!rawText) return;
-        call(hooks, "onCopy", { text: rawText, kind: "ocr" });
-      }
-    }, [V3.dom.icon("copy"), document.createTextNode("复制 OCR 原文")]);
-
-    var copyOcrTransBtn = V3.dom.el("button", {
-      type: "button",
-      className: "btn btn-sm",
-      hidden: true,
-      dataset: { role: "copy-ocr-translation" },
-      onClick: function () {
-        var oc = state.ocr || {};
-        if (!oc.text) return;
-        call(hooks, "onCopy", { text: oc.text, kind: "ocr_translation" });
-      }
-    }, [V3.dom.icon("copy"), document.createTextNode("复制译文")]);
-
-    var ocrRightBox = V3.dom.el("div", { className: "studio-box" }, [
-      V3.dom.el("div", { className: "box-head" }, [
-        V3.dom.el("span", { text: "识别输出" }),
-        V3.dom.el("span", { className: "mono", text: "Tesseract + 本地模型" })
-      ]),
-      ocrOutBody,
-      V3.dom.el("div", { className: "box-foot" }, [
-        V3.dom.el("span", { text: "识别结果可直接复制" }),
-        V3.dom.el("div", { className: "box-foot-right" }, [
-          ocrCopyFeedback,
-          copyOcrTransBtn,
-          copyOcrRawBtn
-        ])
-      ])
-    ]);
-
+    /* ---------- 2. OCR 面板（模板 A 独立纯 UI 模块：预览对照 / 5 参数调校 / 全局预设列表） ---------- */
     var ocrPanelEl = V3.dom.el("section", {
       className: "studio-panel",
       hidden: true,
       dataset: { panelView: "ocr" }
-    }, [
-      V3.dom.el("div", { className: "studio-split" }, [ocrLeftBox, ocrRightBox])
-    ]);
+    });
+    var ocrPanel = V3.ocrPanel && typeof V3.ocrPanel.create === "function"
+      ? V3.ocrPanel.create(ocrPanelEl, {
+          getState: function () { return state; },
+          patchState: function (patch) { setState(patch); },
+          hooks: hooks,
+          confirm: confirmDialog
+        })
+      : null;
 
     /* ---------- 3. History 面板 ---------- */
     var histRowsBox = V3.dom.el("div", { className: "rows", dataset: { role: "history-list" } });
@@ -737,8 +485,6 @@
           hooks: hooks
         })
       : null;
-
-    var confirmDialog = typeof V3.mountConfirm === "function" ? V3.mountConfirm(root) : null;
 
     /* ---------- 6. Logs 运行日志面板 ---------- */
     var logsPanelEl = V3.dom.el("section", {
@@ -788,14 +534,16 @@
     /* ---------- 全局粘贴截图监听（按当前面板分发） ---------- */
     function onDocumentPaste(ev) {
       if (!ev || !ev.clipboardData) return;
-      var img = extractImageFile(ev.clipboardData);
+      var img = V3.ocrPresets.extractImageFile(ev.clipboardData);
       if (!img) return;
       if (state.activePanel === "translate") {
         ev.preventDefault();
         submitTranslateImage(img);
       } else if (state.activePanel === "ocr") {
         ev.preventDefault();
-        handleOcrFile(img);
+        if (ocrPanel && typeof ocrPanel.handleImageFile === "function") {
+          ocrPanel.handleImageFile(img);
+        }
       }
     }
     if (typeof document !== "undefined" && document.addEventListener) {
@@ -918,6 +666,15 @@
         } else {
           V3.dom.empty(headActionsEl);
         }
+      } else if (panel === "ocr") {
+        if (ocrPanel && ocrPanel.headActionsEl) {
+          if (headActionsEl.firstChild !== ocrPanel.headActionsEl || headActionsEl.childNodes.length !== 1) {
+            V3.dom.empty(headActionsEl);
+            headActionsEl.appendChild(ocrPanel.headActionsEl);
+          }
+        } else {
+          V3.dom.empty(headActionsEl);
+        }
       } else {
         V3.dom.empty(headActionsEl);
         if (panel === "translate") {
@@ -963,40 +720,6 @@
             text: loading ? "处理中…" : "立即翻译 (Ctrl+Enter)",
             onClick: submitTranslateText
           }));
-        } else if (panel === "ocr") {
-          var ocrLoading = state.ocr && state.ocr.phase === "loading";
-          headActionsEl.appendChild(V3.dom.el("button", {
-            type: "button",
-            className: "btn",
-            disabled: ocrLoading,
-            onClick: function () { ocrFileInput.click(); }
-          }, [V3.dom.icon("upload"), document.createTextNode("选择图片")]));
-          headActionsEl.appendChild(V3.dom.el("button", {
-            type: "button",
-            className: "btn primary",
-            disabled: ocrLoading || !currentOcrFile,
-            dataset: { role: "ocr-resubmit" },
-            text: ocrLoading ? "识别中…" : "开始识别",
-            onClick: function () {
-              if (!currentOcrFile) return;
-              var ocrMode = getOcrMode();
-              state = V3.defaults.merge(state, {
-                copyStatus: null,
-                copyKind: null,
-                ocr: { copyStatus: null, error: null, message: "" }
-              });
-              renderOcrPanel();
-              var resubmitPayload = {
-                file: currentOcrFile,
-                mode: ocrMode,
-                panel: "ocr"
-              };
-              if (ocrMode === "translate") {
-                resubmitPayload.lang_pair = getOcrLangPair();
-              }
-              call(hooks, "onSubmitImage", resubmitPayload);
-            }
-          }));
         } else if (panel === "history") {
           headActionsEl.appendChild(V3.dom.el("button", {
             type: "button",
@@ -1031,7 +754,7 @@
       if (state.connection === "error" || state.connectionError || state.error) {
         topBannerEl.hidden = false;
         topBannerEl.className = "banner danger";
-        topBannerEl.textContent = formatUiError(
+        topBannerEl.textContent = V3.labels.formatUiError(
           state.error || state.connectionError,
           state.message,
           null,
@@ -1055,19 +778,6 @@
 
     function populateLangPairOptions(selectEl, selectedVal) {
       var opts = getLangPairOptions();
-      V3.dom.empty(selectEl);
-      opts.forEach(function (item) {
-        var option = V3.dom.el("option", { value: item.value, text: item.label });
-        if (item.value === selectedVal) option.selected = true;
-        selectEl.appendChild(option);
-      });
-    }
-
-    function populateOcrModeOptions(selectEl, selectedVal) {
-      var pairOpts = getLangPairOptions().map(function (item) {
-        return { value: item.value, label: "提取并翻译：" + item.label };
-      });
-      var opts = [{ value: "raw", label: "纯提取文字（不翻译）" }].concat(pairOpts);
       V3.dom.empty(selectEl);
       opts.forEach(function (item) {
         var option = V3.dom.el("option", { value: item.value, text: item.label });
@@ -1154,7 +864,7 @@
         }, [
           V3.dom.icon("alert"),
           V3.dom.el("span", {
-            text: formatUiError(tr.error, tr.message, tr.details, "翻译或图片识别失败")
+            text: V3.labels.formatUiError(tr.error, tr.message, tr.details, "翻译或图片识别失败")
           })
         ]));
       } else if (phase === "result") {
@@ -1222,91 +932,7 @@
     }
 
     function renderOcrPanel() {
-      var oc = state.ocr || {};
-      var ocrMode = getOcrMode();
-      var selectedVal = ocrMode === "raw" ? "raw" : getOcrLangPair();
-      populateOcrModeOptions(ocrModeSelect, selectedVal);
-
-      if (oc.previewUrl) {
-        ocrPreviewWrap.hidden = false;
-        if (ocrPreviewImg.getAttribute("src") !== oc.previewUrl) {
-          ocrPreviewImg.setAttribute("src", oc.previewUrl);
-        }
-      } else {
-        ocrPreviewWrap.hidden = true;
-        ocrPreviewImg.removeAttribute("src");
-      }
-      ocrFileLabel.textContent = oc.fileName || "未选择图片";
-
-      V3.dom.empty(ocrOutBody);
-      var phase = oc.phase || "empty";
-      var rawOcr = "";
-      var transText = "";
-
-      if (phase === "loading") {
-        ocrOutBody.appendChild(V3.dom.el("div", {
-          className: "box-loading",
-          role: "status",
-          "aria-live": "polite"
-        }, [
-          document.createTextNode("正在识别图片文字…"),
-          V3.dom.el("div", { className: "progress indeterminate", "aria-hidden": "true" }, [V3.dom.el("i")])
-        ]));
-      } else if (phase === "error") {
-        ocrOutBody.appendChild(V3.dom.el("div", {
-          className: "box-error",
-          role: "alert"
-        }, [
-          V3.dom.icon("alert"),
-          V3.dom.el("span", {
-            text: formatUiError(oc.error, oc.message, oc.details, "图片 OCR 识别失败")
-          })
-        ]));
-      } else if (phase === "result") {
-        rawOcr = oc.ocr_text || (ocrMode === "raw" ? oc.text : "") || "";
-        transText = ocrMode === "translate" && oc.text ? oc.text : "";
-
-        ocrOutBody.appendChild(V3.dom.el("div", {}, [
-          V3.dom.el("div", { className: "muted", style: "font-size:var(--fs-xs);margin-bottom:4px", text: "OCR 识别原文" }),
-          V3.dom.el("div", {
-            className: "studio-result-text",
-            dataset: { role: "ocr-raw-text" },
-            text: rawOcr || "（未识别到文字）"
-          })
-        ]));
-
-        if (transText) {
-          var dirTitle = V3.labels.directionLabel(oc.source_lang, oc.target_lang);
-          ocrOutBody.appendChild(V3.dom.el("div", {
-            className: "studio-sub-block",
-            dataset: { role: "ocr-translated-block" }
-          }, [
-            V3.dom.el("div", { className: "studio-sub-head" }, [
-              V3.dom.el("span", { text: dirTitle ? ("译文（" + dirTitle + "）") : "译文" })
-            ]),
-            V3.dom.el("div", { className: "studio-sub-text", text: transText })
-          ]));
-        }
-      } else {
-        ocrOutBody.appendChild(V3.dom.el("div", {
-          className: "box-empty",
-          text: "拖入图片、点击选择文件或直接按 Ctrl+V 粘贴截图开始提取文字。"
-        }));
-      }
-
-      var ocrCopied = phase === "result"
-        ? (oc.copyStatus || ((state.copyKind === "ocr" || state.copyKind === "ocr_translation") ? state.copyStatus : ""))
-        : "";
-      if (ocrCopied) {
-        ocrCopyFeedback.hidden = false;
-        ocrCopyFeedback.textContent = ocrCopied;
-      } else {
-        ocrCopyFeedback.hidden = true;
-        ocrCopyFeedback.textContent = "";
-      }
-      copyOcrRawBtn.disabled = phase !== "result" || !rawOcr;
-      copyOcrTransBtn.hidden = !transText;
-      copyOcrTransBtn.disabled = phase !== "result" || !transText;
+      if (ocrPanel) ocrPanel.render(state);
     }
 
     function renderHistoryPanel() {
@@ -1454,13 +1080,6 @@
       if (patch.tab && !patch.setupTab) {
         patch = Object.assign({}, patch, { setupTab: patch.tab });
       }
-      if (
-        patch.ocr &&
-        Object.prototype.hasOwnProperty.call(patch.ocr, "previewUrl") &&
-        patch.ocr.previewUrl !== ownedPreviewUrl
-      ) {
-        releasePreviewUrl();
-      }
       var syncInput = !!(patch.translate && Object.prototype.hasOwnProperty.call(patch.translate, "sourceText"));
       state = V3.defaults.merge(state, patch);
       if (patch.theme) {
@@ -1495,6 +1114,9 @@
       if (typeof document !== "undefined" && document.removeEventListener) {
         document.removeEventListener("paste", onDocumentPaste);
       }
+      if (ocrPanel && typeof ocrPanel.destroy === "function") {
+        ocrPanel.destroy();
+      }
       if (setupPanel && typeof setupPanel.destroy === "function") {
         setupPanel.destroy();
       }
@@ -1507,8 +1129,6 @@
       if (confirmDialog && typeof confirmDialog.destroy === "function") {
         confirmDialog.destroy();
       }
-      currentOcrFile = null;
-      releasePreviewUrl();
       if (root && root.__v3HomeCleanup === destroy) {
         delete root.__v3HomeCleanup;
       }

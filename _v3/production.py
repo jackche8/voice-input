@@ -44,8 +44,9 @@ from _jobs_service import JobsService
 from _linux.conflicts import scan_hotkey_conflicts
 from _linux.evdev_keyboards import readable_keyboard_paths
 from _logs import LogService
-from _ocr import image_to_text, list_tesseract_languages
-from _ocr_layout import extract_ocr_layout
+from _ocr import list_tesseract_languages
+from _ocr_layout import extract_ocr_layout_with_meta, extract_ocr_text_with_meta
+from _ocr_preprocess import render_ocr_preprocess_preview
 from _ollama import OllamaClient
 from _paths import INTERNAL_SETUP_WORKER_FLAG, PROGRAM_ROOT, STATIC_V3, AppPaths, default_app_paths, internal_subcommand
 from _platform._common import list_audio_input_devices
@@ -475,8 +476,9 @@ def compose_production_runtime(
         polish=polish,
         translate=translate,
         translate_blocks=translate_blocks,
-        ocr=image_to_text,
-        ocr_layout=extract_ocr_layout,
+        ocr=extract_ocr_text_with_meta,
+        ocr_layout=extract_ocr_layout_with_meta,
+        ocr_preview=render_ocr_preprocess_preview,
         decode_audio=decode_audio_to_pcm16k,
         stream_provider=SidecarStreamProvider(asr),
         setup=setup,

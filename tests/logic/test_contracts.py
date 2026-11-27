@@ -39,6 +39,19 @@ from _contracts import (
     LogReadResponse,
     LogSourceInfo,
     LogSourceListResponse,
+    OCR_PREPROCESS_MAX_ENABLED,
+    OCR_PREPROCESS_STARTER_TEMPLATES,
+    OcrAttemptSummary,
+    OcrBinarizeMode,
+    OcrInplaceResponse,
+    OcrPreprocessParams,
+    OcrPreprocessPreset,
+    OcrPreprocessPreviewResponse,
+    OcrPreprocessStarterTemplate,
+    OcrRunMeta,
+    OcrRunMode,
+    OcrTranslateMode,
+    OcrTranslateResponse,
     PolishResponse,
     ProductBusyEvent,
     ProductComponentCommandEvent,
@@ -610,4 +623,165 @@ def test_logs_and_about_models_and_openapi_registration():
     for model in expected_models:
         assert model.__name__ in schemas
     for enum_name in ("LogLevel", "LogGroup", "RunMode", "AboutAsrVariant"):
+        assert enum_name in schemas
+
+
+def test_ocr_preprocess_contracts_validation_starters_and_openapi_registration():
+    assert OCR_PREPROCESS_MAX_ENABLED == 3
+
+    default_params = OcrPreprocessParams()
+    assert default_params.model_dump() == {
+        "invert": False,
+        "contrast": 1.0,
+        "brightness": 1.0,
+        "sharpen": 0.0,
+        "binarize_mode": "off",
+        "threshold": 128,
+    }
+    # 边界合法值
+    OcrPreprocessParams(invert=True, contrast=0.5, brightness=0.5, sharpen=0.0, binarize_mode=OcrBinarizeMode.otsu, threshold=0)
+    OcrPreprocessParams(invert=False, contrast=3.0, brightness=2.0, sharpen=3.0, binarize_mode=OcrBinarizeMode.manual, threshold=255)
+
+    # 越界、NaN/Inf 与未知字段一律拒绝
+    for bad_payload in (
+        {"contrast": 0.49},
+        {"contrast": 3.01},
+        {"contrast": float("nan")},
+        {"contrast": float("inf")},
+        {"brightness": 0.49},
+        {"brightness": 2.01},
+        {"brightness": float("-inf")},
+        {"sharpen": -0.1},
+        {"sharpen": 3.1},
+        {"sharpen": float("nan")},
+        {"binarize_mode": "adaptive"},
+        {"threshold": -1},
+        {"threshold": 256},
+        {"extra_key": 1},
+    ):
+        with pytest.raises(ValidationError):
+            OcrPreprocessParams.model_validate(bad_payload)
+
+    # 预设 strip 规范化与空/超长拒绝
+    preset = OcrPreprocessPreset(id="  p1  ", name="  深底终端  ", enabled=True, invert=True, contrast=1.65)
+    assert preset.id == "p1" and preset.name == "深底终端" and preset.enabled is True
+    for bad_preset in (
+        {"id": "   ", "name": "ok"},
+        {"id": "p1", "name": "   "},
+        {"id": "x" * 65, "name": "ok"},
+        {"id": "p1", "name": "名" * 49},
+    ):
+        with pytest.raises(ValidationError):
+            OcrPreprocessPreset.model_validate(bad_preset)
+
+    # 3 套内置起步参考模板单源校验
+    assert [tpl.key for tpl in OCR_PREPROCESS_STARTER_TEMPLATES] == [
+        "dark_invert",
+        "low_contrast",
+        "strong_binary",
+    ]
+    assert [tpl.label for tpl in OCR_PREPROCESS_STARTER_TEMPLATES] == [
+        "深底反色",
+        "低对比增强",
+        "强黑白二值化",
+    ]
+    assert OCR_PREPROCESS_STARTER_TEMPLATES[0].params.invert is True
+    assert OCR_PREPROCESS_STARTER_TEMPLATES[2].params.binarize_mode == OcrBinarizeMode.otsu
+
+    # 3 条启用 + 1 条停用合法；重复 id 与启用第 4 条均被拒绝
+    valid_four = [
+        OcrPreprocessPreset(id="p1", name="预设1", enabled=True),
+        OcrPreprocessPreset(id="p2", name="预设2", enabled=True),
+        OcrPreprocessPreset(id="p3", name="预设3", enabled=True),
+        OcrPreprocessPreset(id="p4", name="预设4", enabled=False),
+    ]
+    assert len(AppConfig(ocr_preprocess_presets=valid_four).ocr_preprocess_presets) == 4
+    assert len(AppConfigUpdate(ocr_preprocess_presets=valid_four).ocr_preprocess_presets or []) == 4
+
+    with pytest.raises(ValidationError, match="最多同时启用 3 个预处理预设"):
+        AppConfigUpdate(
+            ocr_preprocess_presets=[
+                OcrPreprocessPreset(id=f"p{i}", name=f"预设{i}", enabled=True) for i in range(1, 5)
+            ]
+        )
+    with pytest.raises(ValidationError, match="不能重复"):
+        AppConfig(
+            ocr_preprocess_presets=[
+                OcrPreprocessPreset(id="dup", name="A", enabled=True),
+                OcrPreprocessPreset(id="dup", name="B", enabled=False),
+            ]
+        )
+    with pytest.raises(ValidationError):
+        AppConfigUpdate.model_validate({"ocr_preprocess_starter_templates": []})
+
+    # AppConfigView 兼容旧构造并默认携带 3 套只读起步模板
+    view = AppConfigView(
+        polish_enabled=False,
+        custom_keywords=[],
+        translate_lang_pair="zh-en",
+        translate_auto_enabled=True,
+        hotkey_voice="ctrl+alt+z",
+        hotkey_screenshot="ctrl+alt+x",
+        hotkey_repeat="ctrl+alt+r",
+        hotkey_annotate="ctrl+alt+a",
+        autostart_enabled=True,
+        ollama_model="qwen3.5:4b",
+    )
+    assert view.ocr_preprocess_presets == []
+    assert [t.key for t in view.ocr_preprocess_starter_templates] == ["dark_invert", "low_contrast", "strong_binary"]
+
+    # OcrRunMeta / OcrPreprocessPreviewResponse / OCR 响应扩展校验
+    meta = OcrRunMeta(
+        run_mode=OcrRunMode.preset_chain,
+        matched_preset_id="p1",
+        matched_preset_name="深底终端",
+        matched_rank=1,
+        confidence=92,
+        elapsed_ms=210,
+        early_stopped=True,
+        fallback_to_original=False,
+        attempts=[
+            OcrAttemptSummary(
+                preset_id="p1",
+                label="#1 深底终端",
+                rank=1,
+                confidence=92,
+                score=88.5,
+                valid_chars=24,
+                accepted=True,
+            )
+        ],
+    )
+    tr_resp = OcrTranslateResponse(text="hi", ocr_text="hi", mode=OcrTranslateMode.raw, ocr_meta=meta)
+    in_resp = OcrInplaceResponse(
+        text="hi", ocr_text="hi", mode=OcrTranslateMode.raw, image_width=100, image_height=40, ocr_meta=meta
+    )
+    assert tr_resp.ocr_meta == meta and in_resp.ocr_meta == meta
+
+    preview = OcrPreprocessPreviewResponse(
+        image_base64="AAAA",
+        image_width=100,
+        image_height=50,
+        preview_width=200,
+        preview_height=100,
+        otsu_threshold=132,
+    )
+    assert preview.ok is True and preview.media_type == "image/png" and preview.otsu_threshold == 132
+    with pytest.raises(ValidationError):
+        OcrPreprocessPreviewResponse.model_validate({**preview.model_dump(), "otsu_threshold": 256})
+
+    registered = set(contract_models())
+    expected_models = {
+        OcrPreprocessParams,
+        OcrPreprocessPreset,
+        OcrPreprocessStarterTemplate,
+        OcrAttemptSummary,
+        OcrRunMeta,
+        OcrPreprocessPreviewResponse,
+    }
+    assert expected_models.issubset(registered)
+    schemas = build_openapi_skeleton()["components"]["schemas"]
+    for model in expected_models:
+        assert model.__name__ in schemas
+    for enum_name in ("OcrBinarizeMode", "OcrRunMode"):
         assert enum_name in schemas

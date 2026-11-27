@@ -2,7 +2,7 @@
  *
  * 配置字段与 AppConfig 对齐：
  *   ui_theme, audio_input_device, polish_enabled, custom_keywords, translate_lang_pair, translate_auto_enabled,
- *   log_max_lines, hotkey_voice, hotkey_screenshot, hotkey_ocr, hotkey_repeat, hotkey_annotate, autostart_enabled
+ *   log_max_lines, ocr_preprocess_presets, hotkey_voice, hotkey_screenshot, hotkey_ocr, hotkey_repeat, hotkey_annotate, autostart_enabled
  * 历史记录字段与 HistoryRecord / HistoryListResponse 对齐：
  *   timestamp, raw_text, final_text, language, mode, source, polish, job_id,
  *   records, total, skipped_malformed
@@ -61,6 +61,8 @@
       translate_lang_pair: null,
       translate_auto_enabled: null,
       log_max_lines: null,
+      ocr_preprocess_presets: [],
+      ocrStarterTemplates: null,
       langPairOptions: null,
       translateSettingsSaved: false,
       hotkey_voice: "",
@@ -104,8 +106,22 @@
         direction_mode: null,
         fileName: "",
         previewUrl: "",
+        processedPreviewUrl: "",
+        previewPhase: "idle",
+        previewErrorCode: null,
+        previewError: "",
+        imageWidth: null,
+        imageHeight: null,
+        previewWidth: null,
+        previewHeight: null,
+        otsuThreshold: null,
         ocr_text: "",
         text: "",
+        ocr_meta: null,
+        lastRunKind: null,
+        savingPresets: false,
+        presetsSaveError: "",
+        presetsSaved: false,
         error: null,
         message: "",
         details: null,

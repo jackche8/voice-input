@@ -70,6 +70,7 @@ const requiredOps = [
   "post_config_api_v1_config_post",
   "history_api_v1_history_get",
   "translate_api_v1_translate_post",
+  "ocr_preview_api_v1_ocr_preview_post",
   "ocr_translate_api_v1_ocr_translate_post",
   "from_audio_api_v1_utterances_from_audio_post",
   "resend_api_v1_utterances_resend_post",
@@ -250,7 +251,7 @@ function loadBusiness(extra) {
   });
   const order = [
     "catalog.js", "context.js", "job-id.js", "http.js", "sse.js", "clipboard.js",
-    "audio.js", "platform.js", "map-setup.js", "setup-actions.js", "logs-actions.js", "home-controller.js",
+    "audio.js", "platform.js", "map-setup.js", "setup-actions.js", "logs-actions.js", "ocr-actions.js", "home-controller.js",
     "voice-controller.js", "bootstrap.js"
   ];
   order.forEach(function (name) {
@@ -317,6 +318,10 @@ async function runUnit() {
   if (ocrOp.method !== "POST" || ocrOp.path !== "/api/v1/ocr-translate" || ocrOp.access !== "local") {
     fail("ocr-translate 派生错误 " + JSON.stringify(ocrOp));
   } else pass("ocr-translate POST /api/v1/ocr-translate 由 OpenAPI 派生且仅本机");
+  const ocrPreviewOp = catalog.operation("ocr_preview_api_v1_ocr_preview_post");
+  if (ocrPreviewOp.method !== "POST" || ocrPreviewOp.path !== "/api/v1/ocr/preview" || ocrPreviewOp.access !== "local") {
+    fail("ocr-preview 派生错误 " + JSON.stringify(ocrPreviewOp));
+  } else pass("ocr-preview POST /api/v1/ocr/preview 由 OpenAPI 派生且仅本机");
   const audioInputsOp = catalog.operation("list_audio_inputs_api_v1_audio_inputs_get");
   if (audioInputsOp.method !== "GET" || audioInputsOp.path !== "/api/v1/audio-inputs" || audioInputsOp.access !== "local") {
     fail("audio-inputs 派生错误 " + JSON.stringify(audioInputsOp));
@@ -3786,6 +3791,341 @@ async function runUnit() {
       href: openApiFailEnv.head.children[0] && openApiFailEnv.head.children[0].getAttribute("href")
     }));
   }
+
+  /* 3. OCR 预处理预设与预览业务接线单测（map-setup / 防抖合并 / previewReqId & 新图切图 ocrReqId 竞态 / 清图与 destroy 取消 / 非乐观保存锁与失败保草稿 / submitImage preprocess_params 与 ocr_meta） */
+  const ocrMapState = B.applyConfig({}, {
+    ocr_preprocess_presets: [
+      { id: "p1", name: "深底反色", enabled: true, invert: true, contrast: 1.65, brightness: 1.05, sharpen: 0.8, binarize_mode: "off", threshold: 128 }
+    ],
+    ocr_preprocess_starter_templates: [
+      { key: "dark_invert", label: "深底反色", suggested_name: "深底反色终端", params: { invert: true, contrast: 1.65, brightness: 1.05, sharpen: 0.8, binarize_mode: "off", threshold: 128 } }
+    ]
+  });
+  const legalOcrPatch = B.pickLegalConfig({
+    ocr_preprocess_presets: ocrMapState.ocr_preprocess_presets,
+    ocr_preprocess_starter_templates: [{ key: "dark_invert" }]
+  });
+  if (
+    Array.isArray(ocrMapState.ocr_preprocess_presets) && ocrMapState.ocr_preprocess_presets.length === 1
+    && ocrMapState.ocr_preprocess_presets[0].id === "p1"
+    && Array.isArray(ocrMapState.ocrStarterTemplates) && ocrMapState.ocrStarterTemplates.length === 1
+    && ocrMapState.ocrStarterTemplates[0].key === "dark_invert"
+    && Object.prototype.hasOwnProperty.call(legalOcrPatch, "ocr_preprocess_presets")
+    && !Object.prototype.hasOwnProperty.call(legalOcrPatch, "ocr_preprocess_starter_templates")
+  ) {
+    pass("map-setup 映射 ocr_preprocess_presets 与只读 ocrStarterTemplates，且 pickLegalConfig 仅放行可写预设字段");
+  } else {
+    fail("map-setup OCR 预设字段映射或只读隔离异常：" + JSON.stringify({ mapped: ocrMapState, legal: legalOcrPatch }));
+  }
+
+  const ocrWorld = createWorld();
+  const ocrTimers = [];
+  let ocrNextTimer = 1;
+  function ocrFakeSetTimeout(fn, ms) {
+    const id = ocrNextTimer++;
+    ocrTimers.push({ id: id, fn: fn, ms: ms, cleared: false });
+    return id;
+  }
+  function ocrFakeClearTimeout(id) {
+    ocrTimers.forEach(function (t) { if (t.id === id) t.cleared = true; });
+  }
+  function ocrFlushTimers() {
+    const active = ocrTimers.filter(function (t) { return !t.cleared; });
+    active.forEach(function (t) { t.cleared = true; t.fn(); });
+  }
+
+  const previewDeferreds = [];
+  const ocrSubmitDeferreds = [];
+  const configDeferreds = [];
+  ocrWorld.routes.push({
+    method: "POST",
+    path: "/api/v1/ocr/preview",
+    handler: function (rec) {
+      let resolveFn;
+      const p = new Promise(function (resolve) { resolveFn = resolve; });
+      previewDeferreds.push({ rec: rec, resolve: resolveFn });
+      return p;
+    }
+  });
+  ocrWorld.routes.push({
+    method: "POST",
+    path: "/api/v1/ocr-translate",
+    handler: function (rec) {
+      let resolveFn;
+      const p = new Promise(function (resolve) { resolveFn = resolve; });
+      ocrSubmitDeferreds.push({ rec: rec, resolve: resolveFn });
+      return p;
+    }
+  });
+  ocrWorld.routes.push({
+    method: "POST",
+    path: "/api/v1/config",
+    handler: function (rec) {
+      let resolveFn;
+      const p = new Promise(function (resolve) { resolveFn = resolve; });
+      configDeferreds.push({ rec: rec, resolve: resolveFn });
+      return p;
+    }
+  });
+
+  const ocrHttp = B.createHttp({ catalog: catalog, context: localCtx, fetch: ocrWorld.fetch, origin: localCtx.origin });
+  const ocrCtl = B.createHomeController({
+    client: ocrHttp,
+    context: localCtx,
+    catalog: catalog,
+    previewDebounceMs: 180,
+    setTimeout: ocrFakeSetTimeout,
+    clearTimeout: ocrFakeClearTimeout
+  });
+  const ocrView = fakeView(catalogCtx.window.V3.defaults.homeState());
+  ocrCtl.bind(ocrView);
+
+  /* 3a. 新图 0ms 立即发预览 + 180ms 滑块防抖合并 + 单调 previewReqId 丢弃迟到响应 */
+  const imgA = new Blob(["img-a"], { type: "image/png" });
+  const imgB = new Blob(["img-b"], { type: "image/png" });
+  const pNew1 = ocrCtl.hooks.onRequestPreprocessPreview({
+    file: imgA,
+    params: { invert: false, contrast: 1.0, brightness: 1.0, sharpen: 0.0, binarize_mode: "off", threshold: 128 },
+    immediate: true
+  });
+  if (previewDeferreds.length === 1 && ocrView.getState().ocr.previewPhase === "loading" && !ocrCtl._debug.previewDebouncePending()) {
+    pass("新图选入 0ms 立即发起 POST /api/v1/ocr/preview（不等待防抖）");
+  } else {
+    fail("新图选入未 0ms 立即发预览：" + JSON.stringify({ count: previewDeferreds.length, phase: ocrView.getState().ocr.previewPhase }));
+  }
+
+  /* 连续 3 次同图滑块拖动（immediate:false）应在 180ms 内合并为最后 1 次 */
+  const pSlide1 = ocrCtl.hooks.onRequestPreprocessPreview({ file: imgA, params: { invert: false, contrast: 1.2, brightness: 1.0, sharpen: 0.0, binarize_mode: "off", threshold: 128 }, immediate: false });
+  const pSlide2 = ocrCtl.hooks.onRequestPreprocessPreview({ file: imgA, params: { invert: false, contrast: 1.6, brightness: 1.0, sharpen: 0.0, binarize_mode: "off", threshold: 128 }, immediate: false });
+  const pSlide3 = ocrCtl.hooks.onRequestPreprocessPreview({ file: imgA, params: { invert: true, contrast: 2.1, brightness: 1.0, sharpen: 0.5, binarize_mode: "otsu", threshold: 128 }, immediate: false });
+  const lastPreviewTimer = ocrTimers[ocrTimers.length - 1];
+  const callsBeforeFlush = previewDeferreds.length;
+  ocrFlushTimers();
+  const callsAfterFlush = previewDeferreds.length;
+  const flushedParams = JSON.parse(previewDeferreds[1].rec.body.get("preprocess_params"));
+  if (
+    callsBeforeFlush === 1
+    && callsAfterFlush === 2
+    && lastPreviewTimer && lastPreviewTimer.ms === 180
+    && flushedParams.contrast === 2.1
+    && flushedParams.binarize_mode === "otsu"
+  ) {
+    pass("滑块连续拖动经 180ms 防抖合并为单次预览请求，且仅发送最终参数");
+  } else {
+    fail("滑块 180ms 防抖合并异常：" + JSON.stringify({ before: callsBeforeFlush, after: callsAfterFlush, ms: lastPreviewTimer && lastPreviewTimer.ms, params: flushedParams }));
+  }
+
+  /* 乱序回包：先回最后 1 次（新），再回第 1 次（旧），单调 previewReqId 必须丢弃旧回包 */
+  const latestSlideIdx = previewDeferreds.length - 1;
+  previewDeferreds[latestSlideIdx].resolve(jsonRes(200, {
+    ok: true, media_type: "image/png", image_base64: "TkVX",
+    image_width: 640, image_height: 360, preview_width: 640, preview_height: 360, otsu_threshold: 144
+  }));
+  for (let pi = 1; pi < latestSlideIdx; pi += 1) {
+    previewDeferreds[pi].resolve(jsonRes(200, {
+      ok: true, media_type: "image/png", image_base64: "TUlE",
+      image_width: 10, image_height: 10, preview_width: 10, preview_height: 10, otsu_threshold: null
+    }));
+  }
+  await pSlide3;
+  await pSlide1;
+  await pSlide2;
+  previewDeferreds[0].resolve(jsonRes(200, {
+    ok: true, media_type: "image/png", image_base64: "T0xE",
+    image_width: 100, image_height: 100, preview_width: 100, preview_height: 100, otsu_threshold: 50
+  }));
+  await pNew1;
+  if (
+    ocrView.getState().ocr.previewPhase === "ready"
+    && ocrView.getState().ocr.processedPreviewUrl === "data:image/png;base64,TkVX"
+    && ocrView.getState().ocr.imageWidth === 640
+    && ocrView.getState().ocr.otsuThreshold === 144
+  ) {
+    pass("单调 previewReqId 丢弃迟到预览响应，新预览图与 Otsu 阈值不被旧包覆盖");
+  } else {
+    fail("单调 previewReqId 未拦住迟到预览响应：" + JSON.stringify(ocrView.getState().ocr));
+  }
+
+  /* 3b. 切换新图同步递增 ocrReqId 丢弃旧图在途 OCR 响应 + submitImage preprocess_params & ocr_meta 映射 */
+  const draftParamsObj = { invert: true, contrast: 1.8, brightness: 1.0, sharpen: 0.4, binarize_mode: "off", threshold: 128 };
+  const pOldOcr = ocrCtl.hooks.onSubmitImage({ file: imgA, mode: "raw", panel: "ocr", preprocess_params: draftParamsObj });
+  const ocrReqIdBeforeSwitch = ocrCtl._debug.getOcrReqId();
+  const draftSentRaw = ocrSubmitDeferreds[0].rec.body.get("preprocess_params");
+  /* 在旧图 OCR 在途期间切入新图 imgB（触发 0ms 预览并递增 ocrReqId） */
+  const pNewFilePreview = ocrCtl.hooks.onRequestPreprocessPreview({ file: imgB, params: draftParamsObj, immediate: true });
+  const ocrReqIdAfterSwitch = ocrCtl._debug.getOcrReqId();
+  previewDeferreds[previewDeferreds.length - 1].resolve(jsonRes(200, {
+    ok: true, media_type: "image/png", image_base64: "SU1HQg==",
+    image_width: 320, image_height: 180, preview_width: 320, preview_height: 180, otsu_threshold: null
+  }));
+  await pNewFilePreview;
+  /* 迟到的旧图 OCR 响应到达：必须被丢弃，不得写入 ocr_text 或覆盖 phase */
+  ocrSubmitDeferreds[0].resolve(jsonRes(200, {
+    ok: true, mode: "raw", text: "OLD IMAGE TEXT", ocr_text: "OLD IMAGE TEXT",
+    ocr_meta: { run_mode: "draft_params", matched_preset_id: null, matched_preset_name: "当前调参草稿", matched_rank: null, confidence: 90, elapsed_ms: 12, early_stopped: false, fallback_to_original: false, attempts: [] }
+  }));
+  await pOldOcr;
+  if (
+    draftSentRaw && JSON.parse(draftSentRaw).contrast === 1.8
+    && ocrReqIdAfterSwitch > ocrReqIdBeforeSwitch
+    && ocrView.getState().ocr.ocr_text !== "OLD IMAGE TEXT"
+  ) {
+    pass("切换新图同步递增 ocrReqId，丢弃上一张图片的迟到在途 OCR 响应");
+  } else {
+    fail("切新图未递增 ocrReqId 或未丢弃旧图 OCR 响应：" + JSON.stringify({
+      before: ocrReqIdBeforeSwitch, after: ocrReqIdAfterSwitch, ocr: ocrView.getState().ocr
+    }));
+  }
+
+  /* 正常草稿试识别与预设链路识别映射 ocr_meta 与 lastRunKind */
+  const pDraftRun = ocrCtl.hooks.onSubmitImage({ file: imgB, mode: "raw", panel: "ocr", preprocess_params: draftParamsObj });
+  ocrSubmitDeferreds[1].resolve(jsonRes(200, {
+    ok: true, mode: "raw", text: "NEW DRAFT TEXT", ocr_text: "NEW DRAFT TEXT",
+    ocr_meta: { run_mode: "draft_params", matched_preset_id: null, matched_preset_name: "当前调参草稿", matched_rank: null, confidence: 95, elapsed_ms: 19, early_stopped: false, fallback_to_original: false, attempts: [{ preset_id: null, label: "当前调参草稿", rank: null, confidence: 95, score: 95, valid_chars: 12, accepted: true }] }
+  }));
+  await pDraftRun;
+  const draftResState = ocrView.getState().ocr;
+  const pChainRun = ocrCtl.hooks.onSubmitImage({ file: imgB, mode: "translate", lang_pair: "zh-en", panel: "ocr" });
+  const chainHasParams = ocrSubmitDeferreds[2].rec.body.has("preprocess_params");
+  ocrSubmitDeferreds[2].resolve(jsonRes(200, {
+    ok: true, mode: "translate", lang_pair: "zh-en", source_lang: "en", target_lang: "zh", direction_mode: "auto",
+    ocr_text: "CHAIN TEXT", text: "链路译文",
+    ocr_meta: { run_mode: "preset_chain", matched_preset_id: "p1", matched_preset_name: "深底反色", matched_rank: 1, confidence: 91, elapsed_ms: 25, early_stopped: true, fallback_to_original: false, attempts: [{ preset_id: "p1", label: "深底反色", rank: 1, confidence: 91, score: 91, valid_chars: 9, accepted: true }] }
+  }));
+  await pChainRun;
+  const chainResState = ocrView.getState().ocr;
+  if (
+    draftResState.lastRunKind === "draft"
+    && draftResState.ocr_meta && draftResState.ocr_meta.run_mode === "draft_params"
+    && chainHasParams === false
+    && chainResState.lastRunKind === "chain"
+    && chainResState.ocr_meta && chainResState.ocr_meta.run_mode === "preset_chain"
+    && chainResState.ocr_meta.matched_rank === 1
+    && chainResState.text === "链路译文"
+  ) {
+    pass("submitImage 正确区分草稿 preprocess_params 与预设链路调用，并原样映射 ocr_meta 与 lastRunKind");
+  } else {
+    fail("submitImage preprocess_params 或 ocr_meta 映射异常：" + JSON.stringify({ draftResState, chainResState, chainHasParams }));
+  }
+
+  /* 3c. onClearOcr 取消未触发防抖定时器并丢弃在途预览与 OCR 响应 */
+  const previewCallsBeforeClear = previewDeferreds.length;
+  const pDebCancel = ocrCtl.hooks.onRequestPreprocessPreview({ file: imgB, params: draftParamsObj, immediate: false });
+  const ocrPendingBeforeClear = ocrCtl._debug.previewDebouncePending();
+  const pInFlightOcrBeforeClear = ocrCtl.hooks.onSubmitImage({ file: imgB, mode: "raw", panel: "ocr" });
+  ocrCtl.hooks.onClearOcr();
+  const ocrPendingRightAfterClear = ocrCtl._debug.previewDebouncePending();
+  ocrFlushTimers();
+  for (let pi = previewCallsBeforeClear; pi < previewDeferreds.length; pi += 1) {
+    previewDeferreds[pi].resolve(jsonRes(200, { ok: true, media_type: "image/png", image_base64: "TEFURQ==", image_width: 4, image_height: 4, preview_width: 4, preview_height: 4, otsu_threshold: null }));
+  }
+  await pDebCancel;
+  ocrSubmitDeferreds[3].resolve(jsonRes(200, { ok: true, mode: "raw", text: "LATE AFTER CLEAR", ocr_text: "LATE AFTER CLEAR", ocr_meta: null }));
+  await pInFlightOcrBeforeClear;
+  if (
+    ocrPendingBeforeClear === true
+    && ocrPendingRightAfterClear === false
+    && ocrCtl._debug.previewDebouncePending() === false
+    && previewDeferreds.length === previewCallsBeforeClear
+    && ocrView.getState().ocr.phase === "empty"
+    && ocrView.getState().ocr.ocr_text === ""
+    && ocrView.getState().ocr.processedPreviewUrl === ""
+  ) {
+    pass("onClearOcr 立即取消待触发防抖定时器、推进请求 ID 并丢弃迟到 OCR 响应");
+  } else {
+    fail("onClearOcr 取消竞态异常：" + JSON.stringify({
+      ocrPendingBeforeClear, ocrPendingRightAfterClear, pendingAfter: ocrCtl._debug.previewDebouncePending(),
+      previewBefore: previewCallsBeforeClear, previewAfter: previewDeferreds.length, ocr: ocrView.getState().ocr
+    }));
+  }
+
+  /* 3d. 非乐观 saveOcrPresets：在途写锁、重入保护、400 失败保旧列表并回显后端中文错、成功仅按回读更新 */
+  ocrView.setState({
+    ocr_preprocess_presets: [
+      { id: "orig-1", name: "原预设1", enabled: true, invert: true, contrast: 1.5, brightness: 1.0, sharpen: 0.0, binarize_mode: "off", threshold: 128 }
+    ]
+  });
+  const pSaveFail = ocrCtl.hooks.onSaveOcrPresets({
+    presets: [
+      { id: "orig-1", name: "原预设1", enabled: true, invert: true, contrast: 1.5, brightness: 1.0, sharpen: 0.0, binarize_mode: "off", threshold: 128 },
+      { id: "p-2", name: "预设2", enabled: true, invert: false, contrast: 2.0, brightness: 1.0, sharpen: 0.0, binarize_mode: "off", threshold: 128 },
+      { id: "p-3", name: "预设3", enabled: true, invert: false, contrast: 2.0, brightness: 1.0, sharpen: 0.0, binarize_mode: "off", threshold: 128 },
+      { id: "p-4", name: "超限第4条", enabled: true, invert: false, contrast: 2.0, brightness: 1.0, sharpen: 0.0, binarize_mode: "off", threshold: 128 }
+    ],
+    action: "create",
+    targetId: "p-4"
+  });
+  /* 在途锁期间再次派发应被忽略且不乐观修改列表 */
+  const pSaveReentrant = ocrCtl.hooks.onSaveOcrPresets({ presets: [], action: "delete", targetId: "orig-1" });
+  const midSaveState = ocrView.getState();
+  const midConfigCalls = configDeferreds.length;
+  configDeferreds[0].resolve(jsonRes(400, { ok: false, error: "invalid_request", message: "最多只能同时启用 3 个 OCR 预处理预设" }));
+  for (let ci = 1; ci < configDeferreds.length; ci += 1) {
+    configDeferreds[ci].resolve(jsonRes(200, { ocr_preprocess_presets: [] }));
+  }
+  await pSaveFail;
+  await pSaveReentrant;
+  const afterFailState = ocrView.getState();
+  if (
+    midSaveState.ocr.savingPresets === true
+    && midSaveState.ocr_preprocess_presets.length === 1
+    && midConfigCalls === 1
+    && afterFailState.ocr.savingPresets === false
+    && afterFailState.ocr.presetsSaved === false
+    && afterFailState.ocr.presetsSaveError.indexOf("最多只能同时启用 3 个") >= 0
+    && afterFailState.ocr_preprocess_presets.length === 1
+    && afterFailState.ocr_preprocess_presets[0].id === "orig-1"
+  ) {
+    pass("saveOcrPresets 严格非乐观写锁：在途阻断重入、400 失败保留原列表并回显后端中文错误");
+  } else {
+    fail("saveOcrPresets 非乐观写锁或失败回滚异常：" + JSON.stringify({ mid: midSaveState.ocr, after: afterFailState.ocr, presets: afterFailState.ocr_preprocess_presets, calls: midConfigCalls }));
+  }
+
+  const pSaveOk = ocrCtl.hooks.onSaveOcrPresets({
+    presets: [
+      { id: "orig-1", name: "原预设1", enabled: true, invert: true, contrast: 1.5, brightness: 1.0, sharpen: 0.0, binarize_mode: "off", threshold: 128 },
+      { id: "p-2", name: "低对比灰字", enabled: true, invert: false, contrast: 2.3, brightness: 1.15, sharpen: 1.5, binarize_mode: "otsu", threshold: 128 }
+    ],
+    action: "create",
+    targetId: "p-2"
+  });
+  configDeferreds[configDeferreds.length - 1].resolve(jsonRes(200, {
+    ocr_preprocess_presets: [
+      { id: "orig-1", name: "原预设1", enabled: true, invert: true, contrast: 1.5, brightness: 1.0, sharpen: 0.0, binarize_mode: "off", threshold: 128 },
+      { id: "p-2", name: "低对比灰字（服务端权威）", enabled: true, invert: false, contrast: 2.3, brightness: 1.15, sharpen: 1.5, binarize_mode: "otsu", threshold: 128 }
+    ]
+  }));
+  await pSaveOk;
+  if (
+    ocrView.getState().ocr.savingPresets === false
+    && ocrView.getState().ocr.presetsSaved === true
+    && ocrView.getState().ocr.presetsSaveError === ""
+    && ocrView.getState().ocr_preprocess_presets.length === 2
+    && ocrView.getState().ocr_preprocess_presets[1].name === "低对比灰字（服务端权威）"
+  ) {
+    pass("saveOcrPresets 成功后仅以服务端权威配置刷新 ocr_preprocess_presets 并置 presetsSaved=true");
+  } else {
+    fail("saveOcrPresets 成功回读刷新异常：" + JSON.stringify({ ocr: ocrView.getState().ocr, presets: ocrView.getState().ocr_preprocess_presets }));
+  }
+
+  /* 3e. destroy() 清理挂起预览防抖定时器，防止销毁后误发请求 */
+  const pBeforeDestroy = ocrCtl.hooks.onRequestPreprocessPreview({ file: imgB, params: draftParamsObj, immediate: true });
+  previewDeferreds[previewDeferreds.length - 1].resolve(jsonRes(200, { ok: true, media_type: "image/png", image_base64: "T0s=", image_width: 4, image_height: 4, preview_width: 4, preview_height: 4, otsu_threshold: null }));
+  await pBeforeDestroy;
+  const callsBeforeDestroy = previewDeferreds.length;
+  const pDebDestroy = ocrCtl.hooks.onRequestPreprocessPreview({ file: imgB, params: draftParamsObj, immediate: false });
+  ocrCtl.destroy();
+  const pendingRightAfterDestroy = ocrCtl._debug.previewDebouncePending();
+  ocrFlushTimers();
+  for (let pi = callsBeforeDestroy; pi < previewDeferreds.length; pi += 1) {
+    previewDeferreds[pi].resolve(jsonRes(200, { ok: true, media_type: "image/png", image_base64: "TEFURQ==", image_width: 4, image_height: 4, preview_width: 4, preview_height: 4, otsu_threshold: null }));
+  }
+  await pDebDestroy;
+  if (pendingRightAfterDestroy === false && ocrCtl._debug.previewDebouncePending() === false && previewDeferreds.length === callsBeforeDestroy) {
+    pass("home-controller.destroy() 同步清理 ocrActions 防抖定时器，销毁后零误发请求");
+  } else {
+    fail("destroy() 未清理 ocrActions 预览防抖定时器：" + JSON.stringify({ pendingRightAfterDestroy, before: callsBeforeDestroy, after: previewDeferreds.length }));
+  }
 }
 
 function runAsgi() {
@@ -3907,7 +4247,7 @@ function runAsgi() {
         if (htmlByPage["/"] !== htmlByPage["/setup"]) {
           throw new Error("GET / 与 GET /setup 应返回完全一致的 index.html");
         }
-        for (const reqScript of ["js/confirm.js", "js/logs-panel.js", "js/about-panel.js", "js/business/logs-actions.js"]) {
+        for (const reqScript of ["js/confirm.js", "js/ocr-presets.js", "js/ocr-panel.js", "js/logs-panel.js", "js/about-panel.js", "js/business/logs-actions.js", "js/business/ocr-actions.js"]) {
           if (htmlByPage["/"].indexOf(reqScript) < 0) {
             throw new Error("GET / index.html 缺少脚本 " + reqScript);
           }
@@ -3916,6 +4256,8 @@ function runAsgi() {
         if (!jsRes.ok) throw new Error("/js 资源 HTTP " + jsRes.status);
         const logsActRes = await fetch(origin + "/js/business/logs-actions.js");
         if (!logsActRes.ok) throw new Error("/js/business/logs-actions.js HTTP " + logsActRes.status);
+        const ocrActRes = await fetch(origin + "/js/business/ocr-actions.js");
+        if (!ocrActRes.ok) throw new Error("/js/business/ocr-actions.js HTTP " + ocrActRes.status);
         const cssRes = await fetch(origin + "/css/theme.css");
         if (!cssRes.ok) throw new Error("/css 资源 HTTP " + cssRes.status);
         const cssCc = String(cssRes.headers.get("cache-control") || "").toLowerCase();
@@ -4054,8 +4396,125 @@ function runAsgi() {
         }
         await setupCtl.hooks.onSubmitImage({ file: asgiImg, mode: "raw", panel: "ocr" });
         const asgiImgRaw = setupView.getState().ocr;
-        if (asgiImgRaw.phase !== "result" || asgiImgRaw.mode !== "raw" || asgiImgRaw.ocr_text !== "Hello ASGI OCR" || asgiImgRaw.text !== "" || asgiImgRaw.source_lang !== null) {
+        if (asgiImgRaw.phase !== "result" || asgiImgRaw.mode !== "raw" || asgiImgRaw.ocr_text !== "Hello ASGI OCR" || asgiImgRaw.text !== "" || asgiImgRaw.source_lang !== null || !asgiImgRaw.ocr_meta || asgiImgRaw.ocr_meta.run_mode !== "original") {
           throw new Error("隔离 ASGI 纯 OCR 契约异常：" + JSON.stringify(asgiImgRaw));
+        }
+        /* 真 HTTP 往返验证 OCR 预处理预设与预览闭环：starterTemplates / POST /api/v1/ocr/preview / 保存 3 预设 / 第 4 条 400 拦截 / 草稿试识别与预设链路 */
+        const asgiStarters = setupView.getState().ocrStarterTemplates;
+        if (
+          !Array.isArray(setupView.getState().ocr_preprocess_presets)
+          || setupView.getState().ocr_preprocess_presets.length !== 0
+          || !Array.isArray(asgiStarters)
+          || asgiStarters.map(function (t) { return t.key; }).join(",") !== "dark_invert,low_contrast,strong_binary"
+        ) {
+          throw new Error("隔离 ASGI 初始 OCR 预设或起步模板未映射：" + JSON.stringify({
+            presets: setupView.getState().ocr_preprocess_presets,
+            starters: asgiStarters
+          }));
+        }
+        const demoCtx = { window: {} };
+        vm.createContext(demoCtx);
+        vm.runInContext(fs.readFileSync(path.join(__dirname, "fixtures/demo-state.js"), "utf8"), demoCtx, { filename: "demo-state.js" });
+        const pngB64 = demoCtx.window.V3Fixtures.SAMPLE_PNG_DATA_URL.split(",")[1];
+        const realPngBlob = new Blob([Buffer.from(pngB64, "base64")], { type: "image/png" });
+        await setupCtl.hooks.onRequestPreprocessPreview({
+          file: realPngBlob,
+          params: { invert: true, contrast: 1.8, brightness: 1.0, sharpen: 0.5, binarize_mode: "otsu", threshold: 128 },
+          immediate: true
+        });
+        const asgiPreview = setupView.getState().ocr;
+        if (
+          asgiPreview.previewPhase !== "ready"
+          || String(asgiPreview.processedPreviewUrl || "").indexOf("data:image/png;base64,") !== 0
+          || asgiPreview.imageWidth !== 4
+          || asgiPreview.imageHeight !== 4
+          || !(asgiPreview.previewWidth > 0 && asgiPreview.previewHeight > 0)
+          || typeof asgiPreview.otsuThreshold !== "number"
+        ) {
+          throw new Error("隔离 ASGI POST /api/v1/ocr/preview 响应映射异常：" + JSON.stringify({
+            phase: asgiPreview.previewPhase,
+            urlPrefix: String(asgiPreview.processedPreviewUrl || "").slice(0, 32),
+            w: asgiPreview.imageWidth,
+            h: asgiPreview.imageHeight,
+            pw: asgiPreview.previewWidth,
+            ph: asgiPreview.previewHeight,
+            otsu: asgiPreview.otsuThreshold,
+            err: asgiPreview.previewError
+          }));
+        }
+        const threePresets = [
+          { id: "asgi-p1", name: "深底反色终端", enabled: true, invert: true, contrast: 1.65, brightness: 1.05, sharpen: 0.8, binarize_mode: "off", threshold: 128 },
+          { id: "asgi-p2", name: "低对比灰字增强", enabled: true, invert: false, contrast: 2.3, brightness: 1.15, sharpen: 1.6, binarize_mode: "off", threshold: 128 },
+          { id: "asgi-p3", name: "强黑白字幕二值化", enabled: true, invert: false, contrast: 1.8, brightness: 1.0, sharpen: 1.0, binarize_mode: "otsu", threshold: 128 }
+        ];
+        await setupCtl.hooks.onSaveOcrPresets({ presets: threePresets, action: "create", targetId: "asgi-p3" });
+        const cfgAfter3Presets = await client.call("get_config_api_v1_config_get");
+        if (
+          setupView.getState().ocr.savingPresets !== false
+          || setupView.getState().ocr.presetsSaved !== true
+          || setupView.getState().ocr.presetsSaveError !== ""
+          || setupView.getState().ocr_preprocess_presets.length !== 3
+          || !Array.isArray(cfgAfter3Presets.ocr_preprocess_presets)
+          || cfgAfter3Presets.ocr_preprocess_presets.length !== 3
+        ) {
+          throw new Error("隔离 ASGI 保存 3 条启用预设未持久化回读：" + JSON.stringify({
+            ocr: setupView.getState().ocr,
+            statePresets: setupView.getState().ocr_preprocess_presets,
+            cfgPresets: cfgAfter3Presets.ocr_preprocess_presets
+          }));
+        }
+        /* 第 4 条启用预设必须被真实后端 400 拒绝，且前端非乐观保留原 3 条并呈现具体中文报错 */
+        await setupCtl.hooks.onSaveOcrPresets({
+          presets: threePresets.concat([
+            { id: "asgi-p4", name: "违规第四条", enabled: true, invert: false, contrast: 1.2, brightness: 1.0, sharpen: 0.0, binarize_mode: "off", threshold: 128 }
+          ]),
+          action: "create",
+          targetId: "asgi-p4"
+        });
+        if (
+          setupView.getState().ocr.savingPresets !== false
+          || setupView.getState().ocr.presetsSaved !== false
+          || String(setupView.getState().ocr.presetsSaveError || "").indexOf("3") < 0
+          || setupView.getState().ocr_preprocess_presets.length !== 3
+        ) {
+          throw new Error("隔离 ASGI 第 4 条启用预设 400 拦截或非乐观保留异常：" + JSON.stringify({
+            ocr: setupView.getState().ocr,
+            presetsLen: setupView.getState().ocr_preprocess_presets.length
+          }));
+        }
+        /* 草稿试识别（preprocess_params）与已启用预设链路识别（无 preprocess_params） */
+        await setupCtl.hooks.onSubmitImage({
+          file: asgiImg,
+          mode: "raw",
+          panel: "ocr",
+          preprocess_params: { invert: true, contrast: 1.9, brightness: 1.0, sharpen: 0.5, binarize_mode: "off", threshold: 128 }
+        });
+        const asgiDraftOcr = setupView.getState().ocr;
+        if (
+          asgiDraftOcr.phase !== "result"
+          || asgiDraftOcr.lastRunKind !== "draft"
+          || !asgiDraftOcr.ocr_meta
+          || asgiDraftOcr.ocr_meta.run_mode !== "draft_params"
+        ) {
+          throw new Error("隔离 ASGI 草稿试识别 ocr_meta 异常：" + JSON.stringify(asgiDraftOcr));
+        }
+        await setupCtl.hooks.onSubmitImage({ file: asgiImg, mode: "translate", lang_pair: "zh-en", panel: "ocr" });
+        const asgiChainOcr = setupView.getState().ocr;
+        if (
+          asgiChainOcr.phase !== "result"
+          || asgiChainOcr.lastRunKind !== "chain"
+          || asgiChainOcr.text !== "[en->zh]Hello ASGI OCR"
+          || !asgiChainOcr.ocr_meta
+          || asgiChainOcr.ocr_meta.run_mode !== "preset_chain"
+          || asgiChainOcr.ocr_meta.matched_rank !== 1
+          || !Array.isArray(asgiChainOcr.ocr_meta.attempts)
+          || asgiChainOcr.ocr_meta.attempts[0].label !== "深底反色终端"
+        ) {
+          throw new Error("隔离 ASGI 启用预设链路 ocr_meta 异常：" + JSON.stringify(asgiChainOcr));
+        }
+        await setupCtl.hooks.onSaveOcrPresets({ presets: [], action: "delete", targetId: "asgi-p1" });
+        if (setupView.getState().ocr_preprocess_presets.length !== 0) {
+          throw new Error("隔离 ASGI 清空预设未回读为空列表");
         }
         /* 真 HTTP 往返验证主题持久化与麦克风选择契约：/api/v1/audio-inputs + ui_theme / audio_input_device */
         const initAsgiState = setupView.getState();

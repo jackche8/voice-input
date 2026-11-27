@@ -49,6 +49,27 @@ def logic_http_exception(exc: LogicError) -> JSONResponse:
     return error_response(exc)
 
 
+def validation_error_message(errors: list[Any]) -> str:
+    """从 Pydantic/FastAPI 校验错误列表中提取首个可读原因写入 ErrorBody.message，保留原始 details.errors。"""
+    for item in errors:
+        if not isinstance(item, dict):
+            continue
+        ctx = item.get("ctx")
+        if isinstance(ctx, dict) and ctx.get("error") is not None:
+            text = str(ctx["error"]).strip()
+            if text:
+                return text
+        msg = str(item.get("msg") or "").strip()
+        if msg:
+            for prefix in ("Value error, ", "Assertion failed, "):
+                if msg.startswith(prefix):
+                    msg = msg[len(prefix) :].strip()
+                    break
+            if msg:
+                return msg
+    return "请求无法通过校验"
+
+
 def install_exception_handlers(app: FastAPI) -> None:
     @app.exception_handler(LogicError)
     async def _logic(_request: Request, exc: LogicError) -> JSONResponse:
@@ -67,13 +88,14 @@ def install_exception_handlers(app: FastAPI) -> None:
 
     @app.exception_handler(RequestValidationError)
     async def _validate(_request: Request, exc: RequestValidationError) -> JSONResponse:
+        errors = list(exc.errors())
         return JSONResponse(
             status_code=400,
             content=error_body(
                 ErrorCode.invalid_request,
-                "请求无法通过校验",
+                validation_error_message(errors),
                 # 模型校验器抛出的 ValueError 会出现在 ctx.error 里，按文本输出，否则 JSON 序列化失败成 500
-                details={"errors": jsonable_encoder(exc.errors(), custom_encoder={Exception: str})},
+                details={"errors": jsonable_encoder(errors, custom_encoder={Exception: str})},
             ),
         )
 

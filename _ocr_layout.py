@@ -1,28 +1,47 @@
-"""OCR 原位排版提取与局部环形背景色采样（逻辑层原子能力）。
+"""OCR 原位排版提取、顺序质量早停识别与局部环形背景色采样（逻辑层原子能力）。
 
 基于 Tesseract `image_to_data` 提取词级框，扣减预处理留白、除以放大倍数还原原图坐标，
 过滤低置信度噪点，同行水平大间距分列成可见行；行分块与软/硬换行交给 `_ocr_segment`，
-块的文字与全文由 `_ocr_text` 派生；并采样每块外围 2~5px 环形像素各通道中位数计算贴片底色与高对比度前景色。
+块的文字与全文由 `_ocr_text` 派生；支持单次草稿试识别与 1~3 条启用预设的顺序质量早停 +
+全未达标补跑原图择优；并仅对最终胜出结果采样原图 `orig_rgb` 外围 2~5px 环形底色。
 """
 from __future__ import annotations
 
-from collections.abc import Callable
+import time
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
-from PIL import Image
 
-from _contracts import ErrorCode, LogicError, OcrTextBlock, OcrTextLine
+from _contracts import (
+    OCR_PREPROCESS_MAX_ENABLED,
+    ErrorCode,
+    LogicError,
+    OcrAttemptSummary,
+    OcrPreprocessParams,
+    OcrPreprocessPreset,
+    OcrRunMeta,
+    OcrRunMode,
+    OcrTextBlock,
+    OcrTextLine,
+)
 from _ocr import (
     DEFAULT_OCR_LANG,
-    OCR_BORDER_PX,
     OCR_TIMEOUT_S,
+    default_data_runner,
     ensure_ocr_languages,
     invoke_ocr_runner,
-    prepare_ocr_image,
-    pytesseract_runtime_context,
     raise_ocr_error,
+)
+from _ocr_preprocess import (
+    OCR_BORDER_PX,
+    OcrQualityScore,
+    PreparedOcrBase,
+    QualityWord,
+    build_ocr_input_image,
+    evaluate_ocr_quality,
+    prepare_ocr_base,
 )
 from _ocr_segment import LineSpan, segment_lines
 from _ocr_text import block_display_text, clean_cjk_spaces, is_cjk_or_fullwidth, join_block_texts
@@ -38,6 +57,46 @@ LUMA_THRESHOLD = 140.0
 # 正常 16px、异常 24–25.5px，上下各超出 2–7px）；这类行的行框纵向范围只取不超过中日韩词高中位数这一倍数的词。
 # 纯拉丁文行不过滤：有无上伸/下伸字母的词高本来就差约 1.3 倍
 CJK_BOX_HEIGHT_MAX_RATIO = 1.25
+
+_ORIGINAL_LABEL = "默认原图"
+_DRAFT_LABEL = "当前调参草稿"
+
+
+@dataclass(frozen=True)
+class OcrLayoutResult:
+    """原位排版 OCR 完整结果（含坐标分块与执行链路元数据）。"""
+
+    image_width: int
+    image_height: int
+    ocr_text: str
+    blocks: list[OcrTextBlock]
+    meta: OcrRunMeta
+
+
+@dataclass(frozen=True)
+class OcrTextResult:
+    """纯文本 OCR 完整结果（复用顺序早停与质量评分引擎，跳过原位采色）。"""
+
+    text: str
+    meta: OcrRunMeta
+
+
+@dataclass(frozen=True)
+class _AttemptOutcome:
+    preset_id: str | None
+    label: str
+    rank: int | None
+    block_lines: list[list[OcrTextLine]]
+    ocr_text: str
+    quality: OcrQualityScore
+
+    @property
+    def has_text(self) -> bool:
+        return bool(self.block_lines) and bool(self.ocr_text)
+
+    @property
+    def selection_key(self) -> tuple[float, int, float]:
+        return (self.quality.score, self.quality.valid_chars, self.quality.weighted_conf)
 
 
 @dataclass(frozen=True)
@@ -223,41 +282,33 @@ def sample_ring_colors(
     return bg_color, fg_color
 
 
-def extract_ocr_layout(
-    image_bytes: bytes,
+def _confidence_int(quality: OcrQualityScore) -> int:
+    return max(0, min(100, int(round(quality.weighted_conf))))
+
+
+def _to_attempt_summary(outcome: _AttemptOutcome, *, accepted: bool) -> OcrAttemptSummary:
+    return OcrAttemptSummary(
+        preset_id=outcome.preset_id,
+        label=outcome.label,
+        rank=outcome.rank,
+        confidence=_confidence_int(outcome.quality),
+        score=outcome.quality.score,
+        valid_chars=outcome.quality.valid_chars,
+        accepted=accepted,
+    )
+
+
+def _run_attempt(
+    base: PreparedOcrBase,
     *,
-    lang: str = DEFAULT_OCR_LANG,
-    runner_data: Callable[..., dict[str, list[Any]]] | None = None,
-    languages_fn: Callable[[], list[str]] | None = None,
-) -> tuple[int, int, str, list[OcrTextBlock]]:
-    """提取原图宽高、全文 OCR 文本（块间空一行）及带行列表与局部背景/前景色的分块列表。"""
-    if not image_bytes:
-        raise LogicError(ErrorCode.invalid_request, "OCR 图像不能为空")
-
-    runner = runner_data
-    if runner is None:
-        try:
-            import pytesseract
-        except ImportError as exc:
-            raise LogicError(ErrorCode.ocr_failed, f"OCR 依赖不可用: {exc}") from exc
-
-        def _default_data_runner(
-            img: Image.Image, lang: str, timeout: int = OCR_TIMEOUT_S
-        ) -> dict[str, list[Any]]:
-            with pytesseract_runtime_context(pytesseract):
-                return pytesseract.image_to_data(
-                    img,
-                    lang=lang,
-                    output_type=pytesseract.Output.DICT,
-                    timeout=timeout,
-                )
-
-        runner = _default_data_runner
-
-    ensure_ocr_languages(lang, languages_fn)
-    orig_rgb, ocr_img, scale = prepare_ocr_image(image_bytes, border_px=OCR_BORDER_PX)
-    orig_w, orig_h = orig_rgb.size
-
+    params: OcrPreprocessParams | None,
+    preset_id: str | None,
+    label: str,
+    rank: int | None,
+    lang: str,
+    runner: Callable[..., dict[str, list[Any]]],
+) -> _AttemptOutcome:
+    ocr_img, _otsu = build_ocr_input_image(base, params, border_px=OCR_BORDER_PX)
     try:
         raw_data = invoke_ocr_runner(runner, ocr_img, lang=lang, timeout_s=OCR_TIMEOUT_S)
     except Exception as exc:
@@ -266,14 +317,225 @@ def extract_ocr_layout(
     if not isinstance(raw_data, dict):
         raise LogicError(ErrorCode.ocr_failed, "OCR image_to_data 返回结构非法")
 
-    words = _parse_words(raw_data, orig_w=orig_w, orig_h=orig_h, border_px=OCR_BORDER_PX, scale=scale)
+    orig_w, orig_h = base.orig_rgb.size
+    words = _parse_words(raw_data, orig_w=orig_w, orig_h=orig_h, border_px=OCR_BORDER_PX, scale=base.scale)
     block_lines = segment_lines(_split_line_columns(words))
     if not block_lines:
-        raise LogicError(ErrorCode.ocr_failed, "没有识别到文字")
+        return _AttemptOutcome(
+            preset_id=preset_id,
+            label=label,
+            rank=rank,
+            block_lines=[],
+            ocr_text="",
+            quality=evaluate_ocr_quality((), ""),
+        )
 
-    rgb_arr = np.asarray(orig_rgb, dtype=np.uint8)
-    blocks = [_block(lines, rgb_arr) for lines in block_lines]
-    return orig_w, orig_h, join_block_texts([block.ocr_text for block in blocks]), blocks
+    ocr_text = join_block_texts([block_display_text(lines) for lines in block_lines])
+    quality = evaluate_ocr_quality([QualityWord(w.text, w.conf) for w in words], ocr_text)
+    return _AttemptOutcome(
+        preset_id=preset_id,
+        label=label,
+        rank=rank,
+        block_lines=block_lines,
+        ocr_text=ocr_text,
+        quality=quality,
+    )
+
+
+def extract_ocr_layout_with_meta(
+    image_bytes: bytes,
+    *,
+    lang: str = DEFAULT_OCR_LANG,
+    runner_data: Callable[..., dict[str, list[Any]]] | None = None,
+    languages_fn: Callable[[], list[str]] | None = None,
+    presets: Sequence[OcrPreprocessPreset] = (),
+    preprocess_params: OcrPreprocessParams | None = None,
+    clock: Callable[[], float] = time.monotonic,
+    _sample_colors: bool = True,
+) -> OcrLayoutResult:
+    """唯一顺序质量早停与排版提取引擎。
+
+    - 传入 `preprocess_params`：仅按该草稿参数执行 1 次试识别。
+    - 0 条启用预设：严格只执行 1 次默认原图识别（零额外开销）。
+    - 1~3 条启用预设：按顺位 1→N 预处理识别并评分，达标即早停；全未达标时补跑 1 次默认原图，
+      按 `(score, valid_chars, weighted_conf)` 择优（同分保先序），全空抛 `ocr_failed`。
+    - 硬错误（超时、缺语言包、Tesseract 缺失、非法图、启用超限）立即显式失败，不吞错继续。
+    """
+    if not image_bytes:
+        raise LogicError(ErrorCode.invalid_request, "OCR 图像不能为空")
+
+    enabled_presets = [preset for preset in presets if preset.enabled]
+    if len(enabled_presets) > OCR_PREPROCESS_MAX_ENABLED:
+        raise LogicError(
+            ErrorCode.invalid_request,
+            f"最多同时启用 {OCR_PREPROCESS_MAX_ENABLED} 个预处理预设，收到 {len(enabled_presets)} 个",
+        )
+
+    runner = runner_data if runner_data is not None else default_data_runner()
+    ensure_ocr_languages(lang, languages_fn)
+
+    started_at = clock()
+    base = prepare_ocr_base(image_bytes)
+
+    if preprocess_params is not None:
+        outcome = _run_attempt(
+            base,
+            params=preprocess_params,
+            preset_id=None,
+            label=_DRAFT_LABEL,
+            rank=None,
+            lang=lang,
+            runner=runner,
+        )
+        if not outcome.has_text:
+            raise LogicError(ErrorCode.ocr_failed, "没有识别到文字")
+        winner = outcome
+        attempts = [_to_attempt_summary(outcome, accepted=True)]
+        run_mode = OcrRunMode.draft_params
+        early_stopped = False
+        fallback_to_original = False
+    elif not enabled_presets:
+        outcome = _run_attempt(
+            base,
+            params=None,
+            preset_id=None,
+            label=_ORIGINAL_LABEL,
+            rank=None,
+            lang=lang,
+            runner=runner,
+        )
+        if not outcome.has_text:
+            raise LogicError(ErrorCode.ocr_failed, "没有识别到文字")
+        winner = outcome
+        attempts = [_to_attempt_summary(outcome, accepted=True)]
+        run_mode = OcrRunMode.original
+        early_stopped = False
+        fallback_to_original = False
+    else:
+        outcomes: list[_AttemptOutcome] = []
+        winner_idx: int | None = None
+        early_stopped = False
+        fallback_to_original = False
+
+        for rank, preset in enumerate(enabled_presets, start=1):
+            outcome = _run_attempt(
+                base,
+                params=preset,
+                preset_id=preset.id,
+                label=preset.name,
+                rank=rank,
+                lang=lang,
+                runner=runner,
+            )
+            outcomes.append(outcome)
+            if outcome.has_text and outcome.quality.passed:
+                winner_idx = len(outcomes) - 1
+                early_stopped = True
+                break
+
+        if winner_idx is None:
+            fallback_to_original = True
+            outcomes.append(
+                _run_attempt(
+                    base,
+                    params=None,
+                    preset_id=None,
+                    label=_ORIGINAL_LABEL,
+                    rank=None,
+                    lang=lang,
+                    runner=runner,
+                )
+            )
+            best_key: tuple[float, int, float] | None = None
+            for idx, item in enumerate(outcomes):
+                if not item.has_text:
+                    continue
+                key = item.selection_key
+                if best_key is None or key > best_key:
+                    best_key = key
+                    winner_idx = idx
+            if winner_idx is None:
+                raise LogicError(ErrorCode.ocr_failed, "没有识别到文字")
+
+        winner = outcomes[winner_idx]
+        attempts = [
+            _to_attempt_summary(item, accepted=(idx == winner_idx))
+            for idx, item in enumerate(outcomes)
+        ]
+        run_mode = OcrRunMode.preset_chain
+
+    elapsed_ms = max(0, int(round((clock() - started_at) * 1000.0)))
+    meta = OcrRunMeta(
+        run_mode=run_mode,
+        matched_preset_id=winner.preset_id,
+        matched_preset_name=winner.label,
+        matched_rank=winner.rank,
+        confidence=_confidence_int(winner.quality),
+        elapsed_ms=elapsed_ms,
+        early_stopped=early_stopped,
+        fallback_to_original=fallback_to_original,
+        attempts=attempts,
+    )
+
+    orig_w, orig_h = base.orig_rgb.size
+    if _sample_colors:
+        rgb_arr = np.asarray(base.orig_rgb, dtype=np.uint8)
+        blocks = [_block(lines, rgb_arr) for lines in winner.block_lines]
+    else:
+        blocks = []
+
+    return OcrLayoutResult(
+        image_width=orig_w,
+        image_height=orig_h,
+        ocr_text=winner.ocr_text,
+        blocks=blocks,
+        meta=meta,
+    )
+
+
+def extract_ocr_text_with_meta(
+    image_bytes: bytes,
+    *,
+    lang: str = DEFAULT_OCR_LANG,
+    runner_data: Callable[..., dict[str, list[Any]]] | None = None,
+    languages_fn: Callable[[], list[str]] | None = None,
+    presets: Sequence[OcrPreprocessPreset] = (),
+    preprocess_params: OcrPreprocessParams | None = None,
+    clock: Callable[[], float] = time.monotonic,
+) -> OcrTextResult:
+    """复走同一顺序早停引擎提取全文与元数据（跳过原位贴片采色）。"""
+    result = extract_ocr_layout_with_meta(
+        image_bytes,
+        lang=lang,
+        runner_data=runner_data,
+        languages_fn=languages_fn,
+        presets=presets,
+        preprocess_params=preprocess_params,
+        clock=clock,
+        _sample_colors=False,
+    )
+    return OcrTextResult(text=result.ocr_text, meta=result.meta)
+
+
+def extract_ocr_layout(
+    image_bytes: bytes,
+    *,
+    lang: str = DEFAULT_OCR_LANG,
+    runner_data: Callable[..., dict[str, list[Any]]] | None = None,
+    languages_fn: Callable[[], list[str]] | None = None,
+    presets: Sequence[OcrPreprocessPreset] = (),
+    preprocess_params: OcrPreprocessParams | None = None,
+) -> tuple[int, int, str, list[OcrTextBlock]]:
+    """提取原图宽高、全文 OCR 文本（块间空一行）及带行列表与局部背景/前景色的分块列表。"""
+    result = extract_ocr_layout_with_meta(
+        image_bytes,
+        lang=lang,
+        runner_data=runner_data,
+        languages_fn=languages_fn,
+        presets=presets,
+        preprocess_params=preprocess_params,
+    )
+    return result.image_width, result.image_height, result.ocr_text, result.blocks
 
 
 def _block(lines: list[OcrTextLine], rgb_arr: np.ndarray) -> OcrTextBlock:
@@ -293,6 +555,10 @@ __all__ = [
     "MIN_WORD_CONF",
     "RING_INNER_PX",
     "RING_OUTER_PX",
+    "OcrLayoutResult",
+    "OcrTextResult",
     "extract_ocr_layout",
+    "extract_ocr_layout_with_meta",
+    "extract_ocr_text_with_meta",
     "sample_ring_colors",
 ]

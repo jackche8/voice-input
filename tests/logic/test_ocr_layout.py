@@ -11,9 +11,24 @@ import pytest
 from PIL import Image, ImageDraw
 
 import _ocr
-from _contracts import ErrorCode, LogicError
-from _ocr import OCR_BORDER_PX, OCR_TIMEOUT_S
-from _ocr_layout import extract_ocr_layout, sample_ring_colors
+import _ocr_layout
+from _contracts import (
+    ErrorCode,
+    LogicError,
+    OCR_PREPROCESS_STARTER_TEMPLATES,
+    OcrBinarizeMode,
+    OcrPreprocessParams,
+    OcrPreprocessPreset,
+    OcrRunMode,
+)
+from _ocr import OCR_BORDER_PX, OCR_TIMEOUT_S, clear_language_cache, list_tesseract_languages
+from _ocr_layout import (
+    extract_ocr_layout,
+    extract_ocr_layout_with_meta,
+    extract_ocr_text_with_meta,
+    sample_ring_colors,
+)
+from tests.logic.ocr_samples import bbox_close, dark_low_contrast_sample, fonts_missing, text_similar
 
 
 def _png_bytes(img: Image.Image) -> bytes:
@@ -216,3 +231,313 @@ def test_extract_ocr_layout_uses_bundled_tesseract_via_tessdata_prefix_and_resto
     }]
     assert fake_pt_inner.tesseract_cmd == "tesseract"
     assert "TESSDATA_PREFIX" not in os.environ
+
+
+def _word_data(word: str, conf: float, *, x: int = 12, y: int = 12, w: int = 60, h: int = 16) -> dict:
+    if not word:
+        return {"level": [5], "text": [""], "conf": [-1]}
+    pad, scale = OCR_BORDER_PX, 2
+    return {
+        "level": [5],
+        "page_num": [1],
+        "block_num": [1],
+        "par_num": [1],
+        "line_num": [1],
+        "left": [pad + scale * x],
+        "top": [pad + scale * y],
+        "width": [scale * w],
+        "height": [scale * h],
+        "conf": [conf],
+        "text": [word],
+    }
+
+
+def _make_preset(pid: str, name: str, *, enabled: bool = True, **params) -> OcrPreprocessPreset:
+    return OcrPreprocessPreset(id=pid, name=name, enabled=enabled, **params)
+
+
+def test_sequential_engine_all_five_run_meta_states_and_tie_breaker(monkeypatch):
+    img_bytes = _png_bytes(Image.new("RGB", (120, 60), (255, 255, 255)))
+    ticks = iter([10.0, 10.042] * 12)
+    clock = lambda: next(ticks)  # noqa: E731
+
+    # 态 1：0 启用预设（含停用预设）→ 仅跑 1 次默认原图
+    calls_1: list[int] = []
+
+    def runner_1(_img, lang, timeout=0):
+        calls_1.append(1)
+        return _word_data("Original", 88.0)
+
+    r1 = extract_ocr_layout_with_meta(
+        img_bytes,
+        lang="eng",
+        runner_data=runner_1,
+        languages_fn=lambda: ["eng"],
+        presets=[_make_preset("off1", "已停用", enabled=False, invert=True)],
+        clock=clock,
+    )
+    assert len(calls_1) == 1
+    assert r1.ocr_text == "Original"
+    assert r1.meta.run_mode == OcrRunMode.original
+    assert r1.meta.matched_preset_id is None
+    assert r1.meta.matched_preset_name == "默认原图"
+    assert r1.meta.matched_rank is None
+    assert r1.meta.early_stopped is False and r1.meta.fallback_to_original is False
+    assert r1.meta.elapsed_ms == 42 and r1.meta.confidence == 88
+    assert [(a.label, a.rank, a.accepted) for a in r1.meta.attempts] == [("默认原图", None, True)]
+
+    # 态 2：草稿试识别 → 仅跑 1 次草稿，且 extract_ocr_text_with_meta 不采环形底色
+    color_calls = {"n": 0}
+    orig_sample = _ocr_layout.sample_ring_colors
+
+    def spy_color(rgb_arr, bbox):
+        color_calls["n"] += 1
+        return orig_sample(rgb_arr, bbox)
+
+    monkeypatch.setattr(_ocr_layout, "sample_ring_colors", spy_color)
+    calls_2: list[int] = []
+
+    def runner_2(_img, lang, timeout=0):
+        calls_2.append(1)
+        return _word_data("DraftText", 91.0)
+
+    r2 = extract_ocr_text_with_meta(
+        img_bytes,
+        lang="eng",
+        runner_data=runner_2,
+        languages_fn=lambda: ["eng"],
+        presets=[_make_preset("p1", "预设一", enabled=True, invert=True)],
+        preprocess_params=OcrPreprocessParams(contrast=1.8),
+        clock=clock,
+    )
+    assert len(calls_2) == 1 and color_calls["n"] == 0
+    assert r2.text == "DraftText"
+    assert r2.meta.run_mode == OcrRunMode.draft_params
+    assert r2.meta.matched_preset_id is None
+    assert r2.meta.matched_preset_name == "当前调参草稿"
+    assert r2.meta.matched_rank is None
+    assert r2.meta.early_stopped is False and r2.meta.fallback_to_original is False
+    assert [(a.label, a.rank, a.accepted) for a in r2.meta.attempts] == [("当前调参草稿", None, True)]
+
+    # 态 3：3 条启用预设中顺位 2 达标 → 早停，仅跑 2 次（不跑顺位 3 与原图）
+    presets_3 = [
+        _make_preset("p1", "预设一", enabled=True, invert=True),
+        _make_preset("p2", "预设二", enabled=True, contrast=2.0),
+        _make_preset("p3", "预设三", enabled=True, binarize_mode=OcrBinarizeMode.otsu),
+    ]
+    seq_3 = iter([_word_data("a!", 40.0), _word_data("Success", 86.0), _word_data("ShouldNotRun", 99.0)])
+    calls_3: list[int] = []
+
+    def runner_3(_img, lang, timeout=0):
+        calls_3.append(1)
+        return next(seq_3)
+
+    r3 = extract_ocr_layout_with_meta(
+        img_bytes,
+        lang="eng",
+        runner_data=runner_3,
+        languages_fn=lambda: ["eng"],
+        presets=presets_3,
+        clock=clock,
+    )
+    assert len(calls_3) == 2
+    assert r3.ocr_text == "Success"
+    assert r3.meta.run_mode == OcrRunMode.preset_chain
+    assert r3.meta.matched_preset_id == "p2" and r3.meta.matched_preset_name == "预设二"
+    assert r3.meta.matched_rank == 2
+    assert r3.meta.early_stopped is True and r3.meta.fallback_to_original is False
+    assert [(a.preset_id, a.rank, a.accepted) for a in r3.meta.attempts] == [
+        ("p1", 1, False),
+        ("p2", 2, True),
+    ]
+
+    # 态 4：全部预设未达标 → 补跑原图 → 原图得分更高胜出
+    presets_2 = presets_3[:2]
+    seq_4 = iter([_word_data("weak", 55.0), _word_data("", -1), _word_data("BetterOrig", 72.0)])
+    r4 = extract_ocr_layout_with_meta(
+        img_bytes,
+        lang="eng",
+        runner_data=lambda _img, lang, timeout=0: next(seq_4),
+        languages_fn=lambda: ["eng"],
+        presets=presets_2,
+        clock=clock,
+    )
+    assert r4.ocr_text == "BetterOrig"
+    assert r4.meta.run_mode == OcrRunMode.preset_chain
+    assert r4.meta.matched_preset_id is None and r4.meta.matched_preset_name == "默认原图"
+    assert r4.meta.matched_rank is None
+    assert r4.meta.early_stopped is False and r4.meta.fallback_to_original is True
+    assert [(a.preset_id, a.rank, a.accepted) for a in r4.meta.attempts] == [
+        ("p1", 1, False),
+        ("p2", 2, False),
+        (None, None, True),
+    ]
+
+    # 态 5：全部预设未达标 → 补跑原图 → 顺位 1 预设得分胜出（含同分保先序校验）
+    seq_5 = iter([_word_data("FirstWin", 70.0), _word_data("SameTie!", 70.0), _word_data("FirstWin", 70.0)])
+    r5 = extract_ocr_layout_with_meta(
+        img_bytes,
+        lang="eng",
+        runner_data=lambda _img, lang, timeout=0: next(seq_5),
+        languages_fn=lambda: ["eng"],
+        presets=presets_2,
+        clock=clock,
+    )
+    assert r5.ocr_text == "FirstWin"
+    assert r5.meta.run_mode == OcrRunMode.preset_chain
+    assert r5.meta.matched_preset_id == "p1" and r5.meta.matched_preset_name == "预设一"
+    assert r5.meta.matched_rank == 1
+    assert r5.meta.early_stopped is False and r5.meta.fallback_to_original is True
+    assert [(a.preset_id, a.rank, a.accepted) for a in r5.meta.attempts] == [
+        ("p1", 1, True),
+        ("p2", 2, False),
+        (None, None, False),
+    ]
+
+    # 全部为空（含补跑原图）→ 显式抛 ocr_failed
+    with pytest.raises(LogicError) as all_empty:
+        extract_ocr_layout_with_meta(
+            img_bytes,
+            lang="eng",
+            runner_data=lambda _img, lang, timeout=0: _word_data("", -1),
+            languages_fn=lambda: ["eng"],
+            presets=presets_2,
+        )
+    assert all_empty.value.code == ErrorCode.ocr_failed
+
+
+def test_sequential_engine_rejects_over_limit_presets_and_propagates_hard_errors():
+    img_bytes = _png_bytes(Image.new("RGB", (80, 40), "white"))
+    four_enabled = [_make_preset(f"p{i}", f"预设{i}", enabled=True) for i in range(4)]
+
+    called = {"n": 0}
+
+    def never_called(_img, lang, timeout=0):
+        called["n"] += 1
+        return _word_data("OK", 95.0)
+
+    with pytest.raises(LogicError) as over:
+        extract_ocr_layout_with_meta(
+            img_bytes,
+            lang="eng",
+            runner_data=never_called,
+            languages_fn=lambda: ["eng"],
+            presets=four_enabled,
+        )
+    assert over.value.code == ErrorCode.invalid_request and called["n"] == 0
+
+    with pytest.raises(LogicError) as corrupt:
+        extract_ocr_layout_with_meta(
+            b"corrupt-bytes",
+            lang="eng",
+            runner_data=never_called,
+            languages_fn=lambda: ["eng"],
+        )
+    assert corrupt.value.code == ErrorCode.invalid_request and called["n"] == 0
+
+    presets_2 = four_enabled[:2]
+    for exc, expected_code in (
+        (RuntimeError("Tesseract process timeout"), ErrorCode.timeout),
+        (RuntimeError("Failed loading language 'jpn'"), ErrorCode.ocr_language_missing),
+        (FileNotFoundError("tesseract"), ErrorCode.ocr_failed),
+    ):
+        attempts = {"n": 0}
+
+        def failing_runner(_img, lang, timeout=0, _exc=exc):
+            attempts["n"] += 1
+            raise _exc
+
+        with pytest.raises(LogicError) as hard:
+            extract_ocr_layout_with_meta(
+                img_bytes,
+                lang="eng",
+                runner_data=failing_runner,
+                languages_fn=lambda: ["eng"],
+                presets=presets_2,
+            )
+        assert hard.value.code == expected_code
+        assert attempts["n"] == 1  # 硬错误立即终止，绝不吞错继续下一预设或原图
+
+
+def test_preset_invert_preserves_original_rgb_color_sampling_and_coordinates(monkeypatch):
+    # 原图深底 #181e2c；预设 #1（反色+二值化）未达标，预设 #2（反色）达标
+    img = Image.new("RGB", (140, 60), (24, 30, 44))
+    ImageDraw.Draw(img).rectangle([20, 18, 90, 36], fill=(210, 215, 224))
+    img_bytes = _png_bytes(img)
+
+    presets = [
+        _make_preset("p1", "反色二值", enabled=True, invert=True, binarize_mode=OcrBinarizeMode.otsu),
+        _make_preset("p2", "深底反色", enabled=True, invert=True, contrast=1.6),
+    ]
+    seen_inputs: list[tuple[tuple[int, int], int]] = []
+    responses = iter([_word_data("x", 40.0), _word_data("Recovered", 92.0)])
+
+    def spy_runner(ocr_img: Image.Image, lang: str, timeout: int = 0) -> dict:
+        seen_inputs.append((ocr_img.size, int(ocr_img.getpixel((0, 0)))))
+        return next(responses)
+
+    color_calls = {"n": 0}
+    orig_sample = _ocr_layout.sample_ring_colors
+
+    def spy_sample(rgb_arr, bbox):
+        color_calls["n"] += 1
+        return orig_sample(rgb_arr, bbox)
+
+    monkeypatch.setattr(_ocr_layout, "sample_ring_colors", spy_sample)
+
+    res = extract_ocr_layout_with_meta(
+        img_bytes,
+        lang="eng",
+        runner_data=spy_runner,
+        languages_fn=lambda: ["eng"],
+        presets=presets,
+    )
+    expected_size = (140 * 2 + 2 * OCR_BORDER_PX, 60 * 2 + 2 * OCR_BORDER_PX)
+    # 两次尝试尺寸恒定且反色后四周留白均已重算为 255
+    assert seen_inputs == [(expected_size, 255), (expected_size, 255)]
+    # 仅对最终胜出结果采一次原图环形底色，且底色仍是原图深蓝 #181e2c（未受反色污染）
+    assert color_calls["n"] == 1
+    assert len(res.blocks) == 1
+    assert res.blocks[0].bbox == (12, 12, 60, 16)
+    assert res.blocks[0].bg_color == "#181e2c"
+    assert res.blocks[0].fg_color == "#f8fafc"
+
+
+def test_live_tesseract_dark_low_contrast_sample_early_stops_and_preserves_orig_colors():
+    reason = fonts_missing()
+    if reason:
+        pytest.skip(reason)
+    clear_language_cache()
+    try:
+        installed = set(list_tesseract_languages())
+    except LogicError as exc:
+        pytest.skip(f"Tesseract 不可用: {exc.message}")
+    if not {"chi_sim", "chi_tra", "eng"}.issubset(installed):
+        pytest.skip("本机缺少默认 OCR 语言包")
+
+    sample = dark_low_contrast_sample()
+    # 0 启用预设：默认原图在深底弱对比度图上识别失败
+    with pytest.raises(LogicError) as raw_err:
+        extract_ocr_layout_with_meta(sample.png)
+    assert raw_err.value.code == ErrorCode.ocr_failed
+
+    # 启用 3 套内置起步预设：顺位 2（低对比灰字增强）命中早停、坐标对齐、原图深底采色准确
+    starter_presets = [
+        OcrPreprocessPreset(id=f"starter-{t.key}", name=t.suggested_name, enabled=True, **t.params.model_dump())
+        for t in OCR_PREPROCESS_STARTER_TEMPLATES
+    ]
+    layout_res = extract_ocr_layout_with_meta(sample.png, presets=starter_presets)
+    assert layout_res.meta.run_mode == OcrRunMode.preset_chain
+    assert layout_res.meta.early_stopped is True
+    assert layout_res.meta.fallback_to_original is False
+    assert layout_res.meta.matched_rank == 2
+    assert len(layout_res.meta.attempts) == 2
+    assert layout_res.blocks and text_similar(layout_res.blocks[0].lines[0].text, sample.lines[0].text)
+    assert bbox_close(layout_res.blocks[0].lines[0].bbox, sample.lines[0].bbox)
+    assert layout_res.blocks[0].bg_color == "#181e2c"
+    assert layout_res.blocks[0].fg_color == "#f8fafc"
+
+    text_res = extract_ocr_text_with_meta(sample.png, presets=starter_presets)
+    assert text_res.text == layout_res.ocr_text
+    assert text_res.meta.matched_preset_id == layout_res.meta.matched_preset_id
+    assert text_res.meta.early_stopped is True

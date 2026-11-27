@@ -164,6 +164,27 @@
     macos: "macOS"
   };
 
+  /* OCR 预处理预设契约枚举展示标签（起步模板参数仅从后端 state.ocrStarterTemplates 注入，此处严禁复制）。 */
+  const OCR_PREPROCESS_MAX_ENABLED = 3;
+
+  const OCR_BINARIZE_MODE = {
+    off: "关闭",
+    otsu: "自动 (Otsu)",
+    manual: "手动"
+  };
+
+  const OCR_BINARIZE_SHORT = {
+    off: "关闭",
+    otsu: "自动",
+    manual: "手动"
+  };
+
+  const OCR_RUN_MODE = {
+    original: "原图直识",
+    preset_chain: "启用预设链路",
+    draft_params: "当前调参试识别"
+  };
+
   function labelOf(map, value, fallback) {
     if (value == null || value === "") return fallback || "";
     if (Object.prototype.hasOwnProperty.call(map, value)) return map[value];
@@ -181,6 +202,34 @@
     const jobId = details && details.job_id;
     if (jobId) parts.push("任务 " + jobId);
     return parts.join("：") || "发生错误";
+  }
+
+  /* 统一界面报错格式化（支持错误码字符串、{error,message,details} 对象或后端原文，供 home.js 与 OCR 面板共用）。 */
+  function formatUiError(errCodeOrText, message, details, fallback) {
+    if (typeof errCodeOrText === "string" && errCodeOrText) {
+      if (Object.prototype.hasOwnProperty.call(ERROR_CODE, errCodeOrText)) {
+        return formatError(errCodeOrText, message, details);
+      }
+      return (message && String(message) !== errCodeOrText)
+        ? (errCodeOrText + "：" + String(message))
+        : errCodeOrText;
+    }
+    if (errCodeOrText && typeof errCodeOrText === "object") {
+      const innerErr = errCodeOrText.error;
+      const innerMsg = errCodeOrText.message != null && errCodeOrText.message !== "" ? errCodeOrText.message : message;
+      const innerDetails = errCodeOrText.details || details;
+      if (typeof innerErr === "string" && innerErr) {
+        if (Object.prototype.hasOwnProperty.call(ERROR_CODE, innerErr)) {
+          return formatError(innerErr, innerMsg, innerDetails);
+        }
+        return (innerMsg && String(innerMsg) !== innerErr)
+          ? (innerErr + "：" + String(innerMsg))
+          : innerErr;
+      }
+      if (innerMsg) return formatError(null, innerMsg, innerDetails);
+    }
+    if (message) return String(message);
+    return fallback || "发生错误";
   }
 
   function source(value) {
@@ -226,6 +275,18 @@
     return labelOf(HOTKEY_LABELS, name, name ? String(name) : "");
   }
 
+  function ocrBinarizeMode(value) {
+    return labelOf(OCR_BINARIZE_MODE, value, value ? String(value) : "");
+  }
+
+  function ocrBinarizeShort(value) {
+    return labelOf(OCR_BINARIZE_SHORT, value, value ? String(value) : "");
+  }
+
+  function ocrRunMode(value) {
+    return labelOf(OCR_RUN_MODE, value, value ? String(value) : "");
+  }
+
   function formatHotkey(value) {
     if (!value) return "";
     const parts = String(value).toLowerCase().split("+").map(function (s) { return s.trim(); }).filter(Boolean);
@@ -264,9 +325,14 @@
     LOG_GROUPS: LOG_GROUPS,
     RUN_MODE: RUN_MODE,
     OS_NAME: OS_NAME,
+    OCR_PREPROCESS_MAX_ENABLED: OCR_PREPROCESS_MAX_ENABLED,
+    OCR_BINARIZE_MODE: OCR_BINARIZE_MODE,
+    OCR_BINARIZE_SHORT: OCR_BINARIZE_SHORT,
+    OCR_RUN_MODE: OCR_RUN_MODE,
     labelOf: labelOf,
     errorCode: errorCode,
     formatError: formatError,
+    formatUiError: formatUiError,
     source: source,
     polish: polish,
     jobState: jobState,
@@ -275,6 +341,9 @@
     directionLabel: directionLabel,
     polishBadgeClass: polishBadgeClass,
     hotkeyLabel: hotkeyLabel,
+    ocrBinarizeMode: ocrBinarizeMode,
+    ocrBinarizeShort: ocrBinarizeShort,
+    ocrRunMode: ocrRunMode,
     formatHotkey: formatHotkey
   };
 })(window.V3 = window.V3 || {});

@@ -17,6 +17,9 @@
     const swapCalls = [];
     const clearCalls = [];
     const imageSubmits = [];
+    const ocrPreviewRequests = [];
+    const ocrPresetSaves = [];
+    let ocrClearCalls = 0;
     const themes = [];
     const panels = [];
     const polishToggles = [];
@@ -46,6 +49,9 @@
       onSwapDirection: function (payload) { swapCalls.push(payload); },
       onClearTranslate: function () { clearCalls.push("clear"); },
       onSubmitImage: function (payload) { imageSubmits.push(payload); },
+      onRequestPreprocessPreview: function (payload) { ocrPreviewRequests.push(payload); },
+      onSaveOcrPresets: function (payload) { ocrPresetSaves.push(payload); },
+      onClearOcr: function () { ocrClearCalls += 1; },
       onToggleTheme: function (payload) { themes.push(payload); },
       onSelectPanel: function (payload) { panels.push(payload); },
       onTogglePolish: function (enabled) { polishToggles.push(enabled); },
@@ -297,23 +303,54 @@
     const ocrOptionVals = Array.prototype.slice.call(ocrSelect.options).map(function (o) { return o.value; });
     assert(ocrOptionVals.join(",") === "raw,zh-en", "OCR 面板下拉收敛为 raw 与 zh-en 二选一：" + ocrOptionVals.join(","));
 
+    const ocrLeftBox = homeRoot.querySelector('#ocr-left-box');
     const ocrDrop = homeRoot.querySelector('[data-panel-view="ocr"] .ocr-dropzone');
+    const previewCountBeforeDrop = ocrPreviewRequests.length;
+    const submitsBeforeDrop = imageSubmits.length;
     const ocrRawDrop = new Event("drop", { bubbles: true, cancelable: true });
     Object.defineProperty(ocrRawDrop, "dataTransfer", { value: { files: [mockImg] } });
     ocrDrop.dispatchEvent(ocrRawDrop);
     assert(
-      imageSubmits.length === 2 && imageSubmits[1].mode === "raw" && imageSubmits[1].panel === "ocr" && !("lang_pair" in imageSubmits[1]),
-      "OCR 面板 raw 模式提交图片派发 mode:'raw', panel:'ocr'"
+      ocrPreviewRequests.length === previewCountBeforeDrop + 1
+        && ocrPreviewRequests[ocrPreviewRequests.length - 1].file === mockImg
+        && ocrPreviewRequests[ocrPreviewRequests.length - 1].immediate === true
+        && imageSubmits.length === submitsBeforeDrop,
+      "OCR 面板拖入图片后 0ms 立即派发 onRequestPreprocessPreview 且不自动触发 onSubmitImage"
+    );
+
+    homeRoot.querySelector('button[data-role="ocr-run-draft"]').click();
+    assert(
+      imageSubmits.length === submitsBeforeDrop + 1
+        && imageSubmits[imageSubmits.length - 1].mode === "raw"
+        && imageSubmits[imageSubmits.length - 1].panel === "ocr"
+        && !("lang_pair" in imageSubmits[imageSubmits.length - 1])
+        && !!imageSubmits[imageSubmits.length - 1].preprocess_params,
+      "OCR 面板 raw 模式点击「用当前参数试识别」派发 mode:'raw', panel:'ocr' 与 preprocess_params"
     );
 
     ocrSelect.value = "zh-en";
     ocrSelect.dispatchEvent(new Event("change", { bubbles: true }));
-    const ocrTrDrop = new Event("drop", { bubbles: true, cancelable: true });
-    Object.defineProperty(ocrTrDrop, "dataTransfer", { value: { files: [mockImg] } });
-    ocrDrop.dispatchEvent(ocrTrDrop);
+    homeRoot.querySelector('button[data-role="ocr-run-chain"]').click();
     assert(
-      imageSubmits.length === 3 && imageSubmits[2].mode === "translate" && imageSubmits[2].lang_pair === "zh-en" && imageSubmits[2].panel === "ocr",
-      "OCR 面板翻译模式提交图片派发 mode:'translate', lang_pair:'zh-en', panel:'ocr'"
+      imageSubmits.length === submitsBeforeDrop + 2
+        && imageSubmits[imageSubmits.length - 1].mode === "translate"
+        && imageSubmits[imageSubmits.length - 1].lang_pair === "zh-en"
+        && imageSubmits[imageSubmits.length - 1].panel === "ocr"
+        && !("preprocess_params" in imageSubmits[imageSubmits.length - 1]),
+      "OCR 面板翻译模式点击「按启用预设识别」派发 mode:'translate', lang_pair:'zh-en', panel:'ocr'（不带 preprocess_params）"
+    );
+
+    /* 有图状态下对左栏整盒 #ocr-left-box 再次拖放换图，立即刷新预览并清空旧状态 */
+    const mockImg2 = new File(["png2"], "shot-2.png", { type: "image/png" });
+    const ocrReplaceDrop = new Event("drop", { bubbles: true, cancelable: true });
+    Object.defineProperty(ocrReplaceDrop, "dataTransfer", { value: { files: [mockImg2] } });
+    ocrLeftBox.dispatchEvent(ocrReplaceDrop);
+    assert(
+      ocrPreviewRequests.length === previewCountBeforeDrop + 2
+        && ocrPreviewRequests[ocrPreviewRequests.length - 1].file === mockImg2
+        && ocrPreviewRequests[ocrPreviewRequests.length - 1].immediate === true
+        && homeRoot.querySelector('[data-role="ocr-file-label"]').textContent === "shot-2.png",
+      "OCR 面板有图态在左栏整盒 #ocr-left-box 拖放可换图并 0ms 触发预览请求"
     );
 
     home.setState(V3Fixtures.homeOcrResult);
@@ -1972,6 +2009,345 @@
     assert(!!homeRoot.querySelector('.v3-confirm[role="dialog"]'), "销毁前确认框处于打开态");
     logsHome.destroy();
     assert(!homeRoot.querySelector('.v3-confirm[role="dialog"]'), "home.destroy() 同步销毁 V3.mountConfirm 对话框");
+
+    /* ---------- 9. 模板 A 图片 OCR 预处理预设面板（五态 / <img> 预览对照 / 5 参数零抖动 / 满额 3 条锁 / 非乐观 CRUD / 确认删除 / 持久顶栏） ---------- */
+    const ocrHome = V3.home.mount(homeRoot, { activePanel: "ocr" }, hooks);
+    const ocrPane = homeRoot.querySelector('[data-panel-view="ocr"]');
+    const ocrHeadWrap0 = homeRoot.querySelector('[data-role="ocr-head-actions"]');
+
+    /* 9.1 空态（无预设无图） */
+    assert(
+      !!ocrHeadWrap0
+        && !ocrPane.querySelector("canvas")
+        && ocrPane.querySelector('[data-role="ocr-quota-badge"]').textContent === "已启用 0 / 3"
+        && ocrPane.querySelector('[data-role="ocr-quota-hint"]').textContent.indexOf("当前未启用预处理预设，截屏翻译、纯 OCR 与工作台图片 OCR 均按默认原图识别") !== -1
+        && !ocrPane.querySelector('[data-role="ocr-dropzone"]').hidden
+        && ocrPane.querySelector('[data-role="ocr-stage"]').hidden
+        && ocrPane.querySelector('button[data-role="ocr-run-draft"]') === null
+        && homeRoot.querySelector('button[data-role="ocr-run-draft"]').disabled === true
+        && homeRoot.querySelector('button[data-role="ocr-run-chain"]').disabled === true,
+      "OCR 面板默认空态展示「0 / 3 未启用默认原图识别」、拖拽区、零 <canvas> 且顶栏识别按钮禁用"
+    );
+    assert(
+      ocrPane.querySelectorAll('[data-role="ocr-starter-row"] button[data-starter]').length === 0,
+      "未注入 state.ocrStarterTemplates 时不私自伪造起步模板按钮"
+    );
+
+    /* 9.2 注入起步模板与贴图，测试 3 种预览模式、算法文案、5 参数与零抖动 */
+    ocrHome.setState({
+      connection: "connected",
+      ocrStarterTemplates: V3Fixtures.OCR_STARTER_TEMPLATES
+    });
+    const starterBtns = Array.prototype.slice.call(ocrPane.querySelectorAll('[data-role="ocr-starter-row"] button[data-starter]'));
+    assert(
+      starterBtns.map(function (b) { return b.dataset.starter; }).join(",") === "dark_invert,low_contrast,strong_binary",
+      "注入 state.ocrStarterTemplates 后动态渲染 3 枚起步模板按钮"
+    );
+
+    const ocrSampleFile = new File(["png-sample"], "dark-terminal.png", { type: "image/png" });
+    const preBeforeSample = ocrPreviewRequests.length;
+    const pasteBox = ocrPane.querySelector('#ocr-left-box');
+    const sampleDrop = new Event("drop", { bubbles: true, cancelable: true });
+    Object.defineProperty(sampleDrop, "dataTransfer", { value: { files: [ocrSampleFile] } });
+    pasteBox.dispatchEvent(sampleDrop);
+    assert(
+      ocrPreviewRequests.length === preBeforeSample + 1
+        && !ocrPane.querySelector('[data-role="ocr-preview-loading"]').hidden
+        && !!ocrPane.querySelector('[data-role="ocr-preview-loading"] .progress.indeterminate'),
+      "贴图后 0ms 进入预览加载遮罩且复用单源 .progress.indeterminate"
+    );
+
+    ocrHome.setState({
+      ocr: {
+        processedPreviewUrl: V3Fixtures.SAMPLE_PNG_DATA_URL,
+        previewPhase: "ready",
+        imageWidth: 560,
+        imageHeight: 210,
+        otsuThreshold: 136
+      }
+    });
+    assert(
+      ocrPane.querySelector('[data-role="ocr-stage"]').innerText.indexOf("预览与正式识别共用后端同一算法") !== -1
+        && ocrPane.querySelector('[data-role="ocr-stage"]').innerText.indexOf("Canvas") === -1
+        && ocrPane.querySelector('[data-role="ocr-preview-loading"]').hidden === true
+        && ocrPane.querySelector('img[data-role="ocr-proc-img"]').hidden === false
+        && ocrPane.querySelector('[data-role="ocr-pane-orig"]').hidden === true,
+      "预览就绪后仅以 <img> 展示处理后预览图且文案不含 Canvas 演示字样"
+    );
+
+    /* 3 预览模式切换（处理后 / 原图 / 左右对照）与分段胶囊零宽度抖动 */
+    const viewSeg = ocrPane.querySelector('[data-role="ocr-view-mode"]');
+    const viewSegWidths = new Set();
+    ["processed", "original", "split", "processed"].forEach(function (vm) {
+      viewSeg.querySelector('button[data-view="' + vm + '"]').click();
+      viewSegWidths.add(Math.round(viewSeg.getBoundingClientRect().width));
+    });
+    viewSeg.querySelector('button[data-view="split"]').click();
+    assert(
+      viewSegWidths.size === 1
+        && ocrPane.querySelector('[data-role="ocr-canvas-grid"]').classList.contains("split")
+        && !ocrPane.querySelector('[data-role="ocr-pane-orig"]').hidden
+        && !ocrPane.querySelector('[data-role="ocr-pane-proc"]').hidden,
+      "预览模式切换（处理后/原图/左右对照）生效且分段胶囊零横向抖动"
+    );
+
+    /* 二值化模式 off → otsu → manual → off 切换零纵向位移抖动 */
+    const binSeg = ocrPane.querySelector('[data-role="ocr-binarize-seg"]');
+    const presetsBox = ocrPane.querySelector('[data-role="ocr-presets-box"]');
+    const presetBoxYs = new Set();
+    for (let rep = 0; rep < 3; rep += 1) {
+      ["off", "otsu", "manual", "off"].forEach(function (bm) {
+        binSeg.querySelector('button[data-bin="' + bm + '"]').click();
+        presetBoxYs.add(Math.round(presetsBox.getBoundingClientRect().y));
+      });
+    }
+    assert(presetBoxYs.size === 1, "切换二值化模式（关闭/自动/手动）时预设列表零纵向位移抖动");
+
+    /* 套用「强黑白二值化」起步模板 + 手动滑块触发预览回调 */
+    const preBeforeStarter = ocrPreviewRequests.length;
+    ocrPane.querySelector('button[data-starter="strong_binary"]').click();
+    assert(
+      ocrPreviewRequests.length === preBeforeStarter + 1
+        && ocrPreviewRequests[ocrPreviewRequests.length - 1].params.binarize_mode === "otsu"
+        && ocrPreviewRequests[ocrPreviewRequests.length - 1].immediate === true
+        && ocrPane.querySelector('input[data-role="ocr-preset-name"]').value === "强黑白字幕二值化",
+      "套用起步模板写入参数与建议名称并立即触发 onRequestPreprocessPreview"
+    );
+    const contrastEl = ocrPane.querySelector('input[data-role="ocr-param-contrast"]');
+    contrastEl.value = "2.25";
+    contrastEl.dispatchEvent(new Event("input", { bubbles: true }));
+    assert(
+      ocrPane.querySelector('[data-role="ocr-val-contrast"]').textContent === "2.25"
+        && ocrPreviewRequests[ocrPreviewRequests.length - 1].params.contrast === 2.25
+        && ocrPreviewRequests[ocrPreviewRequests.length - 1].immediate === false,
+      "拖动滑块实时更新数值并以 immediate:false 派发 onRequestPreprocessPreview 供业务层防抖"
+    );
+
+    /* 9.3 新建预设（空名校验 + <3 自动启用 + savingPresets 写锁 + 失败保留草稿） */
+    const nameInput = ocrPane.querySelector('input[data-role="ocr-preset-name"]');
+    const saveBtn = ocrPane.querySelector('button[data-role="ocr-save-preset"]');
+    const savesBeforeEmpty = ocrPresetSaves.length;
+    nameInput.value = "   ";
+    nameInput.dispatchEvent(new Event("input", { bubbles: true }));
+    saveBtn.click();
+    assert(
+      ocrPresetSaves.length === savesBeforeEmpty && !ocrPane.querySelector('[data-role="ocr-save-error"]').hidden,
+      "空预设名在表单就近提示错误且不派发 onSaveOcrPresets"
+    );
+
+    nameInput.value = "深底终端自定义";
+    nameInput.dispatchEvent(new Event("input", { bubbles: true }));
+    saveBtn.click();
+    const createdReq = ocrPresetSaves[ocrPresetSaves.length - 1];
+    assert(
+      ocrPresetSaves.length === savesBeforeEmpty + 1
+        && createdReq.action === "create"
+        && createdReq.presets.length === 1
+        && createdReq.presets[0].enabled === true
+        && !!createdReq.presets[0].id
+        && ocrPane.querySelectorAll(".preset-row").length === 0,
+      "已启用 <3 时新建预设默认 enabled:true、生成非空 ID 且非乐观更新列表"
+    );
+
+    ocrHome.setState({ ocr: { savingPresets: true, presetsSaveError: "", presetsSaved: false } });
+    assert(
+      saveBtn.disabled === true
+        && nameInput.disabled === true
+        && contrastEl.disabled === true
+        && ocrPane.querySelector('button[data-role="ocr-new-preset"]').disabled === true,
+      "savingPresets=true 在途锁禁用全部写控件（保存/名称/滑块/新建）"
+    );
+
+    ocrHome.setState({ ocr: { savingPresets: false, presetsSaveError: "配置读写失败：磁盘不可写", presetsSaved: false } });
+    assert(
+      !ocrPane.querySelector('[data-role="ocr-save-error"]').hidden
+        && ocrPane.querySelector('[data-role="ocr-save-error"]').textContent.indexOf("磁盘不可写") !== -1
+        && nameInput.value === "深底终端自定义",
+      "保存失败回显后端中文错误并保留未保存 draft 内容"
+    );
+
+    /* 9.4 满额 3 条启用预设（4 条列表：3 启 1 停，第 4 条开关锁死 + 新建第 5 条存为停用 + 长名不溢出 + 真实线格式 #rank 链路渲染） */
+    ocrHome.setState(V3Fixtures.homeOcrPresetsFull);
+    const fullTraceSteps = Array.prototype.slice.call(ocrPane.querySelectorAll('[data-role="ocr-trace-line"] .trace-step')).map(function (el) { return el.textContent; });
+    assert(
+      fullTraceSteps.length === 3
+        && fullTraceSteps[0] === "#1 夜间暗色终端… 34%"
+        && fullTraceSteps[1] === "#2 低对比灰底文档 52%"
+        && fullTraceSteps[2] === "#3 强黑白视频字幕 91% ✓",
+      "执行链路 .trace-step 按真实后端线格式（label 不含 #rank）自动拼接 #1/#2/#3 前缀"
+    );
+    const fullRows = ocrPane.querySelectorAll(".preset-row");
+    const fourthRow = fullRows[3];
+    const fourthSwitch = fourthRow ? fourthRow.querySelector('button[data-preset-act="toggle"]') : null;
+    const savesBeforeLocked = ocrPresetSaves.length;
+    if (fourthSwitch) fourthSwitch.click();
+    assert(
+      fullRows.length === 4
+        && ocrPane.querySelector('[data-role="ocr-quota-badge"]').textContent === "已启用 3 / 3 · 已达上限"
+        && !!fourthSwitch && fourthSwitch.disabled === true && fourthSwitch.getAttribute("aria-disabled") === "true"
+        && ocrPresetSaves.length === savesBeforeLocked
+        && ocrPane.scrollWidth <= ocrPane.clientWidth + 1,
+      "满额 3/3 时第 4 条未启用开关置灰锁定且点击不发请求，超长预设名零横向溢出"
+    );
+
+    /* 切换新建预设与编辑预设时清理旧的保存成功/失败提示 */
+    ocrHome.setState({ ocr: { presetsSaved: true, presetsSaveError: "旧保存报错" } });
+    ocrPane.querySelector('button[data-role="ocr-new-preset"]').click();
+    assert(
+      ocrPane.querySelector('[data-role="ocr-save-feedback"]').hidden === true
+        && ocrPane.querySelector('[data-role="ocr-save-error"]').hidden === true,
+      "点击新建预设时同步清理残留 presetsSaved / presetsSaveError 提示"
+    );
+
+    /* 满额时新建第 5 条必须存为停用（enabled: false） */
+    nameInput.value = "第五条备用预设";
+    nameInput.dispatchEvent(new Event("input", { bubbles: true }));
+    saveBtn.click();
+    const fifthReq = ocrPresetSaves[ocrPresetSaves.length - 1];
+    assert(
+      fifthReq.action === "create"
+        && fifthReq.presets.length === 5
+        && fifthReq.presets[4].enabled === false,
+      "满额 3 条时新建第 5 条预设存为 enabled:false（严防超限）"
+    );
+
+    /* 上移调序、编辑保留草稿失败与 V3.mountConfirm 删除确认 */
+    const savesBeforeUp = ocrPresetSaves.length;
+    fullRows[1].querySelector('button[data-preset-act="up"]').click();
+    assert(
+      ocrPresetSaves.length === savesBeforeUp + 1
+        && ocrPresetSaves[ocrPresetSaves.length - 1].action === "reorder"
+        && ocrPresetSaves[ocrPresetSaves.length - 1].presets[0].id === "preset-gray-2",
+      "点击上移按钮派发 onSaveOcrPresets(action='reorder') 并交换顺序"
+    );
+
+    ocrHome.setState({ ocr: { presetsSaved: true, presetsSaveError: "旧编辑报错" } });
+    fullRows[2].querySelector('button[data-preset-act="edit"]').click();
+    assert(
+      ocrPane.querySelector('[data-role="ocr-editor-title"]').textContent.indexOf("强黑白视频字幕二值化") !== -1
+        && !ocrPane.querySelector('[data-role="ocr-editor-badge"]').hidden
+        && !ocrPane.querySelector('button[data-role="ocr-cancel-edit"]').hidden
+        && ocrPane.querySelector('[data-role="ocr-save-feedback"]').hidden === true
+        && ocrPane.querySelector('[data-role="ocr-save-error"]').hidden === true,
+      "点击预设编辑载入参数进入编辑态，并清理旧 presetsSaved / presetsSaveError 提示"
+    );
+
+    /* 删除走统一 V3.mountConfirm 确认框 */
+    const savesBeforeDel = ocrPresetSaves.length;
+    fullRows[3].querySelector('button[data-preset-act="delete"]').click();
+    const ocrConfirm1 = homeRoot.querySelector('.v3-confirm[role="dialog"]');
+    assert(!!ocrConfirm1 && ocrPresetSaves.length === savesBeforeDel, "点击删除预设弹出 V3.mountConfirm 确认框且未提前删除");
+    if (ocrConfirm1) ocrConfirm1.querySelector("button.btn:not(.primary)").click();
+    assert(!homeRoot.querySelector('.v3-confirm[role="dialog"]') && ocrPresetSaves.length === savesBeforeDel, "取消删除不触发 onSaveOcrPresets");
+    fullRows[3].querySelector('button[data-preset-act="delete"]').click();
+    const ocrConfirm2 = homeRoot.querySelector('.v3-confirm[role="dialog"]');
+    if (ocrConfirm2) ocrConfirm2.querySelector("button.btn.primary").click();
+    assert(
+      !!ocrConfirm2
+        && !homeRoot.querySelector('.v3-confirm[role="dialog"]')
+        && ocrPresetSaves.length === savesBeforeDel + 1
+        && ocrPresetSaves[ocrPresetSaves.length - 1].action === "delete"
+        && ocrPresetSaves[ocrPresetSaves.length - 1].presets.length === 3,
+      "确认删除关闭弹窗并触发 onSaveOcrPresets(action='delete')"
+    );
+
+    /* 9.5 持久 headActionsEl 在 1s 轮询下零拆挂，且保留输入框未保存草稿与焦点 */
+    const ocrHeadContainer = homeRoot.querySelector(".studio-actions");
+    const ocrHeadObs = new MutationObserver(function () {});
+    ocrHeadObs.observe(ocrHeadContainer, { childList: true });
+    nameInput.focus();
+    nameInput.value = "轮询中未保存标题";
+    nameInput.dispatchEvent(new Event("input", { bubbles: true }));
+    ocrHome.setState({ asr: { message: "ocr-poll-tick" } });
+    const ocrHeadMuts = ocrHeadObs.takeRecords();
+    ocrHeadObs.disconnect();
+    assert(
+      ocrHeadMuts.length === 0
+        && homeRoot.querySelector('[data-role="ocr-head-actions"]') === ocrHeadWrap0
+        && nameInput.value === "轮询中未保存标题"
+        && document.activeElement === nameInput,
+      "OCR 面板 1s 状态轮询下顶栏 headActionsEl 零拆挂，且保留预设名称输入与焦点"
+    );
+
+    /* 9.6 预览报错重试、OCR 报错按 lastRunKind 重试（draft vs chain）与动态尝试预设数文案 */
+    ocrHome.setState({
+      ocr: {
+        previewPhase: "error",
+        previewErrorCode: "invalid_request",
+        previewError: "图像损坏",
+        phase: "error",
+        error: "ocr_failed",
+        message: "未识别到文本",
+        ocr_text: "不应泄露的旧原文",
+        lastRunKind: "draft"
+      }
+    });
+    assert(
+      !ocrPane.querySelector('[data-role="ocr-preview-error"]').hidden
+        && ocrPane.querySelector('[data-role="ocr-preview-error"]').innerText.indexOf("图像损坏") !== -1
+        && ocrPane.querySelector('[data-role="ocr-output"]').innerText.indexOf("未识别到文本") !== -1
+        && ocrPane.querySelector('[data-role="ocr-output"]').innerText.indexOf("不应泄露的旧原文") === -1,
+      "预览与识别报错态均就近呈现后端原文且绝不把 ocr_text 当成功输出"
+    );
+    const subsBeforeDraftRetry = imageSubmits.length;
+    ocrPane.querySelector('button[data-role="ocr-retry"]').click();
+    assert(
+      imageSubmits.length === subsBeforeDraftRetry + 1 && !!imageSubmits[imageSubmits.length - 1].preprocess_params,
+      "lastRunKind='draft' 报错点击重试按草稿参数重跑（携带 preprocess_params）"
+    );
+
+    ocrHome.setState({ ocr: { phase: "error", error: "ocr_failed", message: "链路失败", lastRunKind: "chain" } });
+    ocrPane.querySelector('button[data-role="ocr-retry"]').click();
+    assert(
+      imageSubmits.length === subsBeforeDraftRetry + 2 && !("preprocess_params" in imageSubmits[imageSubmits.length - 1]),
+      "lastRunKind='chain' 报错点击重试按启用预设链路重跑（不带 preprocess_params）"
+    );
+
+    /* 2 条预设全未达标→补跑原图择优：校验动态尝试预设数文案 */
+    ocrHome.setState({
+      ocr: {
+        phase: "result",
+        mode: "raw",
+        ocr_text: "Fallback text",
+        text: "",
+        ocr_meta: {
+          run_mode: "preset_chain",
+          matched_preset_id: null,
+          matched_preset_name: "默认原图",
+          matched_rank: null,
+          confidence: 78,
+          elapsed_ms: 480,
+          early_stopped: false,
+          fallback_to_original: true,
+          attempts: [
+            { preset_id: "preset-dark-1", label: "深底", rank: 1, confidence: 41, score: 30, valid_chars: 6, accepted: false },
+            { preset_id: "preset-gray-2", label: "灰字", rank: 2, confidence: 60, score: 45, valid_chars: 9, accepted: false },
+            { preset_id: null, label: "默认原图", rank: null, confidence: 78, score: 78, valid_chars: 12, accepted: true }
+          ]
+        }
+      }
+    });
+    const fbTraceSteps = Array.prototype.slice.call(ocrPane.querySelectorAll('[data-role="ocr-trace-line"] .trace-step')).map(function (el) { return el.textContent; });
+    assert(
+      ocrPane.querySelector('[data-role="ocr-hit-strip"]').innerText.indexOf("已尝试 2 条预设") !== -1
+        && ocrPane.querySelector('[data-role="ocr-hit-strip"]').innerText.indexOf("3 条预设") === -1
+        && fbTraceSteps[0] === "#1 深底 41%"
+        && fbTraceSteps[1] === "#2 灰字 60%"
+        && fbTraceSteps[2] === "默认原图 78% ✓",
+      "全未达标补跑原图摘要动态展示实际尝试预设数（2 条），且链路步按真实线格式渲染 #1 深底 / #2 灰字 / 默认原图（无 #）"
+    );
+
+    /* 清除按钮触发 onClearOcr 并恢复拖拽区 */
+    const clearsBefore = ocrClearCalls;
+    ocrPane.querySelector('button[data-role="ocr-clear"]').click();
+    assert(
+      ocrClearCalls === clearsBefore + 1
+        && !ocrPane.querySelector('[data-role="ocr-dropzone"]').hidden
+        && ocrPane.querySelector('[data-role="ocr-stage"]').hidden,
+      "点击清除按钮清空预览与结果并派发 onClearOcr"
+    );
+
+    ocrHome.destroy();
 
     window.__V3_HARNESS__ = { passes: passes, failures: failures, copies: copies, confirms: confirms };
   } catch (err) {

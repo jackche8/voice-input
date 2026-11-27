@@ -942,6 +942,68 @@
         ]
       }
     },
+    "/api/v1/ocr/preview": {
+      "post": {
+        "tags": [
+          "capabilities"
+        ],
+        "summary": "Ocr Preview",
+        "description": "只接受单个图片文件；限制按整个请求体累计字节。",
+        "operationId": "ocr_preview_api_v1_ocr_preview_post",
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_ocr_preview_api_v1_ocr_preview_post"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OcrPreprocessPreviewResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "鉴权失败：非本机、对端不是允许的局域网、token 无效、Host/Origin 不可信。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "请求体超过该路径的累计字节上限（缺 Content-Length 时同样生效）。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": []
+      }
+    },
     "/api/v1/ocr-translate": {
       "post": {
         "tags": [
@@ -2196,6 +2258,20 @@
               }
             ],
             "title": "Log Max Lines"
+          },
+          "ocr_preprocess_presets": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/OcrPreprocessPreset"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ocr Preprocess Presets"
           }
         },
         "additionalProperties": false,
@@ -2272,6 +2348,21 @@
             ],
             "title": "Log Max Lines",
             "default": 2000
+          },
+          "ocr_preprocess_presets": {
+            "items": {
+              "$ref": "#/components/schemas/OcrPreprocessPreset"
+            },
+            "type": "array",
+            "title": "Ocr Preprocess Presets"
+          },
+          "ocr_preprocess_starter_templates": {
+            "items": {
+              "$ref": "#/components/schemas/OcrPreprocessStarterTemplate"
+            },
+            "type": "array",
+            "title": "Ocr Preprocess Starter Templates",
+            "description": "内置起步参考模板（只读，唯一定义源）"
           },
           "ollama_model": {
             "type": "string",
@@ -2535,6 +2626,35 @@
         "type": "object",
         "title": "Body_ocr_inplace_api_v1_ocr_inplace_post"
       },
+      "Body_ocr_preview_api_v1_ocr_preview_post": {
+        "properties": {
+          "preprocess_params": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Preprocess Params"
+          },
+          "image": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "binary"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Image"
+          }
+        },
+        "type": "object",
+        "title": "Body_ocr_preview_api_v1_ocr_preview_post"
+      },
       "Body_ocr_translate_api_v1_ocr_translate_post": {
         "properties": {
           "mode": {
@@ -2578,6 +2698,17 @@
               }
             ],
             "title": "Lang"
+          },
+          "preprocess_params": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Preprocess Params"
           },
           "image": {
             "anyOf": [
@@ -3673,6 +3804,81 @@
         ],
         "title": "LogSourceListResponse"
       },
+      "OcrAttemptSummary": {
+        "properties": {
+          "preset_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Preset Id"
+          },
+          "label": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Label"
+          },
+          "rank": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "maximum": 3.0,
+                "minimum": 1.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rank"
+          },
+          "confidence": {
+            "type": "integer",
+            "maximum": 100.0,
+            "minimum": 0.0,
+            "title": "Confidence"
+          },
+          "score": {
+            "type": "number",
+            "maximum": 100.0,
+            "minimum": 0.0,
+            "title": "Score"
+          },
+          "valid_chars": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Valid Chars"
+          },
+          "accepted": {
+            "type": "boolean",
+            "title": "Accepted",
+            "default": false
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "label",
+          "confidence",
+          "score",
+          "valid_chars"
+        ],
+        "title": "OcrAttemptSummary",
+        "description": "顺序早停链路中的单次识别尝试摘要。"
+      },
+      "OcrBinarizeMode": {
+        "type": "string",
+        "enum": [
+          "off",
+          "otsu",
+          "manual"
+        ],
+        "title": "OcrBinarizeMode",
+        "description": "OCR 高对比预处理二值化模式。"
+      },
       "OcrInplaceResponse": {
         "properties": {
           "ok": {
@@ -3751,6 +3957,16 @@
             },
             "type": "array",
             "title": "Blocks"
+          },
+          "ocr_meta": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/OcrRunMeta"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "additionalProperties": false,
@@ -3764,6 +3980,303 @@
         ],
         "title": "OcrInplaceResponse",
         "description": "POST /api/v1/ocr-inplace 响应：同时携带整段文本与分块原位排版坐标。"
+      },
+      "OcrPreprocessParams": {
+        "properties": {
+          "invert": {
+            "type": "boolean",
+            "title": "Invert",
+            "default": false
+          },
+          "contrast": {
+            "type": "number",
+            "maximum": 3.0,
+            "minimum": 0.5,
+            "title": "Contrast",
+            "default": 1.0
+          },
+          "brightness": {
+            "type": "number",
+            "maximum": 2.0,
+            "minimum": 0.5,
+            "title": "Brightness",
+            "default": 1.0
+          },
+          "sharpen": {
+            "type": "number",
+            "maximum": 3.0,
+            "minimum": 0.0,
+            "title": "Sharpen",
+            "default": 0.0
+          },
+          "binarize_mode": {
+            "$ref": "#/components/schemas/OcrBinarizeMode",
+            "default": "off"
+          },
+          "threshold": {
+            "type": "integer",
+            "maximum": 255.0,
+            "minimum": 0.0,
+            "title": "Threshold",
+            "default": 128
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "OcrPreprocessParams",
+        "description": "单套高对比预处理 5 项参数（预览接口、试识别草稿与持久化预设的唯一参数形状）。"
+      },
+      "OcrPreprocessPreset": {
+        "properties": {
+          "invert": {
+            "type": "boolean",
+            "title": "Invert",
+            "default": false
+          },
+          "contrast": {
+            "type": "number",
+            "maximum": 3.0,
+            "minimum": 0.5,
+            "title": "Contrast",
+            "default": 1.0
+          },
+          "brightness": {
+            "type": "number",
+            "maximum": 2.0,
+            "minimum": 0.5,
+            "title": "Brightness",
+            "default": 1.0
+          },
+          "sharpen": {
+            "type": "number",
+            "maximum": 3.0,
+            "minimum": 0.0,
+            "title": "Sharpen",
+            "default": 0.0
+          },
+          "binarize_mode": {
+            "$ref": "#/components/schemas/OcrBinarizeMode",
+            "default": "off"
+          },
+          "threshold": {
+            "type": "integer",
+            "maximum": 255.0,
+            "minimum": 0.0,
+            "title": "Threshold",
+            "default": 128
+          },
+          "id": {
+            "type": "string",
+            "maxLength": 64,
+            "minLength": 1,
+            "title": "Id"
+          },
+          "name": {
+            "type": "string",
+            "maxLength": 48,
+            "minLength": 1,
+            "title": "Name"
+          },
+          "enabled": {
+            "type": "boolean",
+            "title": "Enabled",
+            "default": false
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "id",
+          "name"
+        ],
+        "title": "OcrPreprocessPreset",
+        "description": "单条持久化全局 OCR 预处理预设（平铺结构，含唯一 id、名称、启用标记与 5 项参数）。"
+      },
+      "OcrPreprocessPreviewResponse": {
+        "properties": {
+          "ok": {
+            "type": "boolean",
+            "const": true,
+            "title": "Ok",
+            "default": true
+          },
+          "media_type": {
+            "type": "string",
+            "const": "image/png",
+            "title": "Media Type",
+            "default": "image/png"
+          },
+          "image_base64": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Image Base64"
+          },
+          "image_width": {
+            "type": "integer",
+            "minimum": 1.0,
+            "title": "Image Width"
+          },
+          "image_height": {
+            "type": "integer",
+            "minimum": 1.0,
+            "title": "Image Height"
+          },
+          "preview_width": {
+            "type": "integer",
+            "minimum": 1.0,
+            "title": "Preview Width"
+          },
+          "preview_height": {
+            "type": "integer",
+            "minimum": 1.0,
+            "title": "Preview Height"
+          },
+          "otsu_threshold": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "maximum": 255.0,
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Otsu Threshold"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "image_base64",
+          "image_width",
+          "image_height",
+          "preview_width",
+          "preview_height"
+        ],
+        "title": "OcrPreprocessPreviewResponse",
+        "description": "POST /api/v1/ocr/preview 响应：与正式 OCR 同源的预处理预览图（PNG Base64）及尺寸/阈值元数据。"
+      },
+      "OcrPreprocessStarterTemplate": {
+        "properties": {
+          "key": {
+            "type": "string",
+            "enum": [
+              "dark_invert",
+              "low_contrast",
+              "strong_binary"
+            ],
+            "title": "Key"
+          },
+          "label": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Label"
+          },
+          "suggested_name": {
+            "type": "string",
+            "maxLength": 48,
+            "minLength": 1,
+            "title": "Suggested Name"
+          },
+          "params": {
+            "$ref": "#/components/schemas/OcrPreprocessParams"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "key",
+          "label",
+          "suggested_name",
+          "params"
+        ],
+        "title": "OcrPreprocessStarterTemplate",
+        "description": "内置起步参考模板（只读，唯一定义源；前端不得复制第二份参数）。"
+      },
+      "OcrRunMeta": {
+        "properties": {
+          "run_mode": {
+            "$ref": "#/components/schemas/OcrRunMode"
+          },
+          "matched_preset_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Matched Preset Id"
+          },
+          "matched_preset_name": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Matched Preset Name"
+          },
+          "matched_rank": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "maximum": 3.0,
+                "minimum": 1.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Matched Rank"
+          },
+          "confidence": {
+            "type": "integer",
+            "maximum": 100.0,
+            "minimum": 0.0,
+            "title": "Confidence"
+          },
+          "elapsed_ms": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Elapsed Ms"
+          },
+          "early_stopped": {
+            "type": "boolean",
+            "title": "Early Stopped",
+            "default": false
+          },
+          "fallback_to_original": {
+            "type": "boolean",
+            "title": "Fallback To Original",
+            "default": false
+          },
+          "attempts": {
+            "items": {
+              "$ref": "#/components/schemas/OcrAttemptSummary"
+            },
+            "type": "array",
+            "title": "Attempts"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "run_mode",
+          "matched_preset_name",
+          "confidence",
+          "elapsed_ms"
+        ],
+        "title": "OcrRunMeta",
+        "description": "OCR 识别命中摘要与执行链路元数据。"
+      },
+      "OcrRunMode": {
+        "type": "string",
+        "enum": [
+          "original",
+          "preset_chain",
+          "draft_params"
+        ],
+        "title": "OcrRunMode",
+        "description": "单次 OCR 识别实际采用的运行模式。"
       },
       "OcrTextBlock": {
         "properties": {
@@ -3958,6 +4471,16 @@
               }
             ],
             "title": "Chunks"
+          },
+          "ocr_meta": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/OcrRunMeta"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "additionalProperties": false,
@@ -4867,6 +5390,13 @@
             ],
             "title": "Log Max Lines",
             "type": "integer"
+          },
+          "ocr_preprocess_presets": {
+            "items": {
+              "$ref": "#/components/schemas/OcrPreprocessPreset"
+            },
+            "title": "Ocr Preprocess Presets",
+            "type": "array"
           },
           "vision_model": {
             "anyOf": [

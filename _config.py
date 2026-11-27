@@ -15,7 +15,9 @@ from _contracts import (
     AppConfigView,
     ErrorCode,
     LogicError,
+    OcrPreprocessPreset,
     validate_lang_pair,
+    validate_ocr_preprocess_presets,
 )
 
 _LOCKS_GUARD = threading.Lock()
@@ -122,6 +124,7 @@ def config_view(config: AppConfig) -> AppConfigView:
         ui_theme=config.ui_theme,
         audio_input_device=config.audio_input_device,
         log_max_lines=config.log_max_lines,
+        ocr_preprocess_presets=[preset.model_copy(deep=True) for preset in config.ocr_preprocess_presets],
         ollama_model=config.ollama_model,
     )
 
@@ -159,6 +162,21 @@ def _normalized_update(update: AppConfigUpdate) -> dict[str, object]:
         fields["custom_keywords"] = [str(item).strip() for item in fields["custom_keywords"] if str(item).strip()]
     if "audio_input_device" in fields:
         fields["audio_input_device"] = str(fields["audio_input_device"]).strip()
+    if update.ocr_preprocess_presets is not None:
+        try:
+            validated_presets = validate_ocr_preprocess_presets(
+                [
+                    item if isinstance(item, OcrPreprocessPreset) else OcrPreprocessPreset.model_validate(item)
+                    for item in update.ocr_preprocess_presets
+                ]
+            )
+        except ValueError as exc:
+            raise LogicError(
+                ErrorCode.invalid_request,
+                str(exc),
+                {"field": "ocr_preprocess_presets"},
+            ) from exc
+        fields["ocr_preprocess_presets"] = [preset.model_dump(mode="json") for preset in validated_presets]
     return fields
 
 

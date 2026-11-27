@@ -32,7 +32,7 @@ for (const file of jsFiles) {
 const context = { window: {}, console: console };
 context.window.V3 = {};
 vm.createContext(context);
-for (const name of ["dom.js", "labels.js", "icons.js", "defaults.js", "hotkey-capture.js", "logs-panel.js", "about-panel.js"]) {
+for (const name of ["dom.js", "labels.js", "icons.js", "defaults.js", "hotkey-capture.js", "ocr-presets.js", "ocr-panel.js", "logs-panel.js", "about-panel.js"]) {
   vm.runInContext(fs.readFileSync(path.join(v3js, name), "utf8"), context, { filename: name });
 }
 const V3 = context.window.V3 || context.V3;
@@ -95,17 +95,14 @@ if (
 } else pass("directionLabel 正常格式化方向且对未知语种不吞码");
 
 const iconsSrc = fs.readFileSync(path.join(v3js, "icons.js"), "utf8");
-if (
-  !iconsSrc.includes('id="i-swap"') ||
-  !iconsSrc.includes('id="i-lock"') ||
-  !iconsSrc.includes('id="i-file-text"') ||
-  !iconsSrc.includes('id="i-info"') ||
-  !iconsSrc.includes('id="i-search"') ||
-  !iconsSrc.includes('id="i-external"') ||
-  (iconsSrc.match(/id="i-trash"/g) || []).length !== 1
-) {
-  fail("icons.js 缺少新增图标（i-file-text/i-info/i-search/i-external）或重复定义 i-trash");
-} else pass("icons.js 包含全部新增图标并复用唯一 i-trash");
+const requiredIcons = [
+  "i-swap", "i-lock", "i-file-text", "i-info", "i-search", "i-external",
+  "i-sliders", "i-plus", "i-chevron-up", "i-chevron-down", "i-edit", "i-play", "i-rotate-ccw"
+];
+const missingIcons = requiredIcons.filter((id) => !iconsSrc.includes('id="' + id + '"'));
+if (missingIcons.length || (iconsSrc.match(/id="i-trash"/g) || []).length !== 1) {
+  fail("icons.js 缺少图标（" + missingIcons.join(", ") + "）或重复定义 i-trash");
+} else pass("icons.js 包含全部新增图标（含 7 枚 OCR 预设矢量图标）并复用唯一 i-trash");
 
 if (V3.labels.source("desktop") !== "本机" || V3.labels.source("web") !== "手机" || V3.labels.source("resend") !== "重发") {
   fail("来源标签不正确");
@@ -120,6 +117,16 @@ else pass("错误码中文标签可用");
 if (V3.labels.formatError("translate_failed", "本地模型无响应") !== "翻译失败：本地模型无响应") {
   fail("错误格式化不正确：" + V3.labels.formatError("translate_failed", "本地模型无响应"));
 } else pass("错误展示包含错误码与后端原文");
+
+if (
+  typeof V3.labels.formatUiError !== "function" ||
+  V3.labels.formatUiError("ocr_failed", "未检测到文字") !== "文字识别失败：未检测到文字" ||
+  V3.labels.formatUiError({ error: "delivery_failed", message: "目标丢失", details: { job_id: "j-1" } }) !== "投递失败：目标丢失：任务 j-1" ||
+  V3.labels.formatUiError("自定义错误", "明细") !== "自定义错误：明细" ||
+  V3.labels.formatUiError(null, "", null, "回退文案") !== "回退文案"
+) {
+  fail("labels.formatUiError 单源报错格式化行为不正确");
+} else pass("labels.formatUiError 正确处理错误码、错误对象、自定义文本与回退文案");
 
 if (V3.labels.productEvent("delivery_unknown") !== "投递结果未知") fail("delivery_unknown 标签不正确");
 else pass("delivery_unknown 标签正确");
@@ -173,6 +180,85 @@ if (
   fail("aboutPanel.asrVariantBadge 五态映射或未知透传不正确");
 } else pass("aboutPanel.asrVariantBadge 五态徽章映射正确（cuda/mps/cpu=ok, null=warn未安装, corrupt=danger清单损坏）");
 
+if (
+  V3.labels.OCR_PREPROCESS_MAX_ENABLED !== 3 ||
+  V3.labels.ocrBinarizeMode("off") !== "关闭" ||
+  V3.labels.ocrBinarizeMode("otsu") !== "自动 (Otsu)" ||
+  V3.labels.ocrBinarizeMode("manual") !== "手动" ||
+  V3.labels.ocrBinarizeMode("adaptive_future") !== "adaptive_future" ||
+  V3.labels.ocrRunMode("preset_chain") !== "启用预设链路" ||
+  Object.prototype.hasOwnProperty.call(V3.labels, "OCR_STARTER_TEMPLATES") ||
+  Object.prototype.hasOwnProperty.call(V3.labels, "OCR_PREPROCESS_STARTER_TEMPLATES")
+) {
+  fail("labels.js OCR 枚举映射不正确或违规导出了起步模板副本");
+} else pass("labels.js OCR 枚举映射与未知透传正确且未复制起步模板参数");
+
+if (
+  !V3.ocrPresets ||
+  typeof V3.ocrPresets.cloneParams !== "function" ||
+  typeof V3.ocrPresets.generatePresetId !== "function" ||
+  typeof V3.ocrPresets.extractImageFile !== "function" ||
+  typeof V3.ocrPresets.paramChipLabels !== "function" ||
+  typeof V3.ocrPresets.formatAttemptLabel !== "function" ||
+  typeof V3.ocrPresets.summarizeOcrMeta !== "function"
+) {
+  fail("ocr-presets.js 未导出必需纯函数（cloneParams / generatePresetId / extractImageFile / paramChipLabels / formatAttemptLabel / summarizeOcrMeta）");
+} else {
+  const clamped = V3.ocrPresets.cloneParams({ invert: 1, contrast: 9.9, brightness: 0.1, sharpen: -2, binarize_mode: "bogus", threshold: 999 });
+  if (
+    clamped.invert !== true ||
+    clamped.contrast !== 3.0 ||
+    clamped.brightness !== 0.5 ||
+    clamped.sharpen !== 0.0 ||
+    clamped.binarize_mode !== "off" ||
+    clamped.threshold !== 255
+  ) {
+    fail("ocrPresets.cloneParams 越界裁剪或枚举归一化失败：" + JSON.stringify(clamped));
+  } else pass("ocrPresets.cloneParams 正常裁剪越界数值并归一化未知二值化模式");
+
+  const id1 = V3.ocrPresets.generatePresetId([]);
+  const id2 = V3.ocrPresets.generatePresetId([{ id: id1 }]);
+  if (!id1 || !id2 || id1 === id2) {
+    fail("ocrPresets.generatePresetId 未生成无碰撞 ID：" + id1 + " / " + id2);
+  } else pass("ocrPresets.generatePresetId 生成非空且与已有列表无碰撞 ID");
+
+  const fakeImg = { name: "shot.png", type: "image/png" };
+  const fakeTxt = { name: "note.txt", type: "text/plain" };
+  if (
+    V3.ocrPresets.extractImageFile({ items: [{ kind: "file", type: "image/png", getAsFile: () => fakeImg }] }) !== fakeImg ||
+    V3.ocrPresets.extractImageFile({ files: [fakeTxt, fakeImg] }) !== fakeImg ||
+    V3.ocrPresets.extractImageFile({ files: [fakeTxt] }) !== null
+  ) {
+    fail("ocrPresets.extractImageFile 提取图片文件行为不正确");
+  } else pass("ocrPresets.extractImageFile 正确从 items/files 提取图片并忽略非图片");
+
+  const attRank1 = V3.ocrPresets.formatAttemptLabel({ label: "深底反色", rank: 1, confidence: 34, accepted: false });
+  const attRank3 = V3.ocrPresets.formatAttemptLabel({ label: "强黑白字幕", rank: 3, confidence: 91, accepted: true });
+  const attOrig = V3.ocrPresets.formatAttemptLabel({ label: "默认原图", rank: null, confidence: 78, accepted: true });
+  if (
+    attRank1 !== "#1 深底反色 34%" ||
+    attRank3 !== "#3 强黑白字幕 91% ✓" ||
+    attOrig !== "默认原图 78% ✓"
+  ) {
+    fail("ocrPresets.formatAttemptLabel 未按真实线格式（rank 非空拼 #rank、rank=null 不加 #）格式化：" + JSON.stringify({ attRank1, attRank3, attOrig }));
+  } else pass("ocrPresets.formatAttemptLabel 按真实后端线格式拼接 #rank 前缀（rank=null 不加 #）");
+
+  const sOrig = V3.ocrPresets.summarizeOcrMeta({ run_mode: "original", confidence: 88, elapsed_ms: 140, early_stopped: false, fallback_to_original: false, attempts: [{ label: "默认原图", rank: null, confidence: 88, accepted: true }] });
+  const sDraft = V3.ocrPresets.summarizeOcrMeta({ run_mode: "draft_params", confidence: 94, elapsed_ms: 210, early_stopped: false, fallback_to_original: false, attempts: [] });
+  const sHit = V3.ocrPresets.summarizeOcrMeta({ run_mode: "preset_chain", matched_preset_name: "深底反色", matched_rank: 2, confidence: 91, elapsed_ms: 380, early_stopped: true, fallback_to_original: false, attempts: [{ label: "暗色终端", rank: 1, confidence: 40, accepted: false }, { label: "深底反色", rank: 2, confidence: 91, accepted: true }] });
+  const sFbOrig = V3.ocrPresets.summarizeOcrMeta({ run_mode: "preset_chain", matched_preset_name: "默认原图", matched_rank: null, confidence: 76, elapsed_ms: 520, early_stopped: false, fallback_to_original: true, attempts: [{ label: "暗色终端", rank: 1, confidence: 40, accepted: false }, { label: "低对比灰字", rank: 2, confidence: 62, accepted: false }, { label: "默认原图", rank: null, confidence: 76, accepted: true }] });
+  const sFbPreset = V3.ocrPresets.summarizeOcrMeta({ run_mode: "preset_chain", matched_preset_name: "低对比增强", matched_rank: 1, confidence: 73, elapsed_ms: 410, early_stopped: false, fallback_to_original: true, attempts: [{ label: "低对比增强", rank: 1, confidence: 73, accepted: true }, { label: "默认原图", rank: null, confidence: 55, accepted: false }] });
+  if (
+    sOrig.badgeTone !== "ok" || !sOrig.badgeText.includes("原图直识") ||
+    sDraft.badgeTone !== "ok" || !sDraft.badgeText.includes("当前参数试识别") ||
+    sHit.badgeTone !== "ok" || !sHit.badgeText.includes("命中 #2") || !sHit.summaryText.includes("早停") ||
+    sFbOrig.badgeTone !== "warn" || !sFbOrig.summaryText.includes("已尝试 2 条预设") ||
+    sFbPreset.badgeTone !== "warn" || !sFbPreset.badgeText.includes("择优 #1") || !sFbPreset.summaryText.includes("已尝试 1 条预设")
+  ) {
+    fail("ocrPresets.summarizeOcrMeta 五态真值表或动态尝试数文案不正确：" + JSON.stringify({ sOrig, sDraft, sHit, sFbOrig, sFbPreset }));
+  } else pass("ocrPresets.summarizeOcrMeta 覆盖 OcrRunMeta 五态真值表且动态展示实际尝试预设数");
+}
+
 const home = V3.defaults.homeState();
 if (
   home.connection !== "disconnected" ||
@@ -210,6 +296,9 @@ if (
   home.keywordsDraft !== null ||
   home.translate_lang_pair !== null ||
   home.translate_auto_enabled !== null ||
+  !Array.isArray(home.ocr_preprocess_presets) ||
+  home.ocr_preprocess_presets.length !== 0 ||
+  home.ocrStarterTemplates !== null ||
   home.langPairOptions !== null ||
   home.translateSettingsSaved !== false ||
   Object.prototype.hasOwnProperty.call(home, "translate_target_lang") ||
@@ -237,6 +326,15 @@ if (
   home.ocr.source_lang !== null ||
   home.ocr.target_lang !== null ||
   home.ocr.direction_mode !== null ||
+  home.ocr.processedPreviewUrl !== "" ||
+  home.ocr.previewPhase !== "idle" ||
+  home.ocr.previewErrorCode !== null ||
+  home.ocr.previewError !== "" ||
+  home.ocr.ocr_meta !== null ||
+  home.ocr.lastRunKind !== null ||
+  home.ocr.savingPresets !== false ||
+  home.ocr.presetsSaveError !== "" ||
+  home.ocr.presetsSaved !== false ||
   home.ocr.ocr_text !== "" ||
   home.lanEntries !== null ||
   home.tokenPresent !== false

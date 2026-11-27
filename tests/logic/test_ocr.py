@@ -369,6 +369,36 @@ def test_bundled_tessdata_uses_env_var_never_config_flag_and_restores_context(tm
     assert "TESSDATA_PREFIX" not in os.environ
 
 
+def test_ocr_reexports_preprocess_constants_rejects_corrupt_image_and_exposes_data_runner(monkeypatch):
+    import _ocr_preprocess
+
+    assert _ocr.OCR_BORDER_PX == _ocr_preprocess.OCR_BORDER_PX
+    assert _ocr.OCR_UPSCALE == _ocr_preprocess.OCR_UPSCALE
+    assert _ocr.OCR_UPSCALE_MAX_PIXELS == _ocr_preprocess.OCR_UPSCALE_MAX_PIXELS
+
+    with pytest.raises(LogicError) as bad_img:
+        prepare_ocr_image(b"not-a-png")
+    assert bad_img.value.code == ErrorCode.invalid_request
+
+    fake_inner = SimpleNamespace(tesseract_cmd="tesseract")
+    seen: list[dict] = []
+
+    def fake_to_data(img, *, lang, output_type, timeout=0):
+        seen.append({"lang": lang, "output_type": output_type, "timeout": timeout, "size": img.size})
+        return {"text": ["OK"]}
+
+    fake_pt = SimpleNamespace(
+        pytesseract=fake_inner,
+        Output=SimpleNamespace(DICT="dict"),
+        image_to_data=fake_to_data,
+    )
+    monkeypatch.setitem(sys.modules, "pytesseract", fake_pt)
+    runner = _ocr.default_data_runner()
+    res = runner(Image.new("L", (10, 10), 255), lang="eng", timeout=12)
+    assert res == {"text": ["OK"]}
+    assert seen == [{"lang": "eng", "output_type": "dict", "timeout": 12, "size": (10, 10)}]
+
+
 def test_tesseract_error_maps_language_missing():
     def boom(img, lang):
         raise RuntimeError("Failed loading language 'jpn'")

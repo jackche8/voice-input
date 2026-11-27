@@ -7,12 +7,16 @@ import wave
 from _contracts import (
     ErrorCode,
     LogicError,
+    OcrAttemptSummary,
+    OcrRunMeta,
+    OcrRunMode,
     OcrTextBlock,
     OcrTextLine,
     RecognizeSessionCreate,
     SessionFinalEvent,
     SttResponse,
 )
+from _ocr_layout import OcrLayoutResult, OcrTextResult
 from _ocr_text import join_block_texts
 
 
@@ -78,18 +82,115 @@ def fixture_transcribe(audio: bytes, *, language: str | None = None, context: st
     return SttResponse(text="fixture-transcript", language=language or "zh")
 
 
-def fixture_ocr(image_bytes: bytes, **_kwargs) -> str:
+def _fixture_ocr_meta(
+    text: str,
+    *,
+    presets=(),
+    preprocess_params=None,
+) -> OcrRunMeta:
+    valid_chars = sum(1 for ch in text if ch.isalnum())
+    if preprocess_params is not None:
+        return OcrRunMeta(
+            run_mode=OcrRunMode.draft_params,
+            matched_preset_id=None,
+            matched_preset_name="当前调参草稿",
+            matched_rank=None,
+            confidence=90,
+            elapsed_ms=5,
+            early_stopped=False,
+            fallback_to_original=False,
+            attempts=[
+                OcrAttemptSummary(
+                    preset_id=None,
+                    label="当前调参草稿",
+                    rank=None,
+                    confidence=90,
+                    score=90.0,
+                    valid_chars=valid_chars,
+                    accepted=True,
+                )
+            ],
+        )
+    enabled = [p for p in (presets or ()) if p.enabled]
+    if enabled:
+        first = enabled[0]
+        return OcrRunMeta(
+            run_mode=OcrRunMode.preset_chain,
+            matched_preset_id=first.id,
+            matched_preset_name=first.name,
+            matched_rank=1,
+            confidence=90,
+            elapsed_ms=5,
+            early_stopped=True,
+            fallback_to_original=False,
+            attempts=[
+                OcrAttemptSummary(
+                    preset_id=first.id,
+                    label=first.name,
+                    rank=1,
+                    confidence=90,
+                    score=90.0,
+                    valid_chars=valid_chars,
+                    accepted=True,
+                )
+            ],
+        )
+    return OcrRunMeta(
+        run_mode=OcrRunMode.original,
+        matched_preset_id=None,
+        matched_preset_name="默认原图",
+        matched_rank=None,
+        confidence=90,
+        elapsed_ms=5,
+        early_stopped=False,
+        fallback_to_original=False,
+        attempts=[
+            OcrAttemptSummary(
+                preset_id=None,
+                label="默认原图",
+                rank=None,
+                confidence=90,
+                score=90.0,
+                valid_chars=valid_chars,
+                accepted=True,
+            )
+        ],
+    )
+
+
+def fixture_ocr(
+    image_bytes: bytes,
+    *,
+    lang: str | None = None,
+    presets=(),
+    preprocess_params=None,
+    **_kwargs,
+) -> OcrTextResult:
+    del lang
     if image_bytes == b"empty-image":
-        return "  "
+        return OcrTextResult(
+            text="  ",
+            meta=_fixture_ocr_meta("", presets=presets, preprocess_params=preprocess_params),
+        )
     try:
-        return image_bytes.decode("utf-8")
+        text = image_bytes.decode("utf-8")
     except UnicodeDecodeError:
-        return "fixture-ocr-text"
+        text = "fixture-ocr-text"
+    return OcrTextResult(
+        text=text,
+        meta=_fixture_ocr_meta(text, presets=presets, preprocess_params=preprocess_params),
+    )
 
 
 def fixture_ocr_layout(
-    image_bytes: bytes, **_kwargs
-) -> tuple[int, int, str, list[OcrTextBlock]]:
+    image_bytes: bytes,
+    *,
+    lang: str | None = None,
+    presets=(),
+    preprocess_params=None,
+    **_kwargs,
+) -> OcrLayoutResult:
+    del lang
     if image_bytes == b"empty-image":
         raise LogicError(ErrorCode.ocr_failed, "没有识别到文字")  # 与 extract_ocr_layout 同一契约
     try:
@@ -108,4 +209,11 @@ def fixture_ocr_layout(
         )
         for idx, line in enumerate(lines)
     ]
-    return 320, 180, join_block_texts([block.ocr_text for block in blocks]), blocks
+    full_text = join_block_texts([block.ocr_text for block in blocks])
+    return OcrLayoutResult(
+        image_width=320,
+        image_height=180,
+        ocr_text=full_text,
+        blocks=blocks,
+        meta=_fixture_ocr_meta(full_text, presets=presets, preprocess_params=preprocess_params),
+    )

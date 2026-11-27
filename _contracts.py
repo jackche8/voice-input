@@ -534,6 +534,180 @@ class OcrTranslateMode(StrEnum):
     raw = "raw"
 
 
+OCR_PREPROCESS_MAX_ENABLED = 3
+
+
+class OcrBinarizeMode(StrEnum):
+    """OCR 高对比预处理二值化模式。"""
+
+    off = "off"
+    otsu = "otsu"
+    manual = "manual"
+
+
+class OcrRunMode(StrEnum):
+    """单次 OCR 识别实际采用的运行模式。"""
+
+    original = "original"
+    preset_chain = "preset_chain"
+    draft_params = "draft_params"
+
+
+class OcrPreprocessParams(BaseModel):
+    """单套高对比预处理 5 项参数（预览接口、试识别草稿与持久化预设的唯一参数形状）。"""
+
+    model_config = ConfigDict(extra="forbid")
+    invert: bool = False
+    contrast: float = Field(default=1.0, ge=0.5, le=3.0, allow_inf_nan=False)
+    brightness: float = Field(default=1.0, ge=0.5, le=2.0, allow_inf_nan=False)
+    sharpen: float = Field(default=0.0, ge=0.0, le=3.0, allow_inf_nan=False)
+    binarize_mode: OcrBinarizeMode = OcrBinarizeMode.off
+    threshold: int = Field(default=128, ge=0, le=255)
+
+
+class OcrPreprocessPreset(OcrPreprocessParams):
+    """单条持久化全局 OCR 预处理预设（平铺结构，含唯一 id、名称、启用标记与 5 项参数）。"""
+
+    model_config = ConfigDict(extra="forbid")
+    id: str = Field(min_length=1, max_length=64)
+    name: str = Field(min_length=1, max_length=48)
+    enabled: bool = False
+
+    @field_validator("id")
+    @classmethod
+    def _validate_id(cls, value: str) -> str:
+        norm = value.strip()
+        if not norm:
+            raise ValueError("预处理预设 id 不能为空")
+        if len(norm) > 64:
+            raise ValueError("预处理预设 id 不能超过 64 个字符")
+        return norm
+
+    @field_validator("name")
+    @classmethod
+    def _validate_name(cls, value: str) -> str:
+        norm = value.strip()
+        if not norm:
+            raise ValueError("预设名称不能为空")
+        if len(norm) > 48:
+            raise ValueError("预设名称不能超过 48 个字符")
+        return norm
+
+
+class OcrPreprocessStarterTemplate(BaseModel):
+    """内置起步参考模板（只读，唯一定义源；前端不得复制第二份参数）。"""
+
+    model_config = ConfigDict(extra="forbid")
+    key: Literal["dark_invert", "low_contrast", "strong_binary"]
+    label: str = Field(min_length=1)
+    suggested_name: str = Field(min_length=1, max_length=48)
+    params: OcrPreprocessParams
+
+
+OCR_PREPROCESS_STARTER_TEMPLATES: tuple[OcrPreprocessStarterTemplate, ...] = (
+    OcrPreprocessStarterTemplate(
+        key="dark_invert",
+        label="深底反色",
+        suggested_name="深底反色终端",
+        params=OcrPreprocessParams(
+            invert=True,
+            contrast=1.65,
+            brightness=1.05,
+            sharpen=0.8,
+            binarize_mode=OcrBinarizeMode.off,
+            threshold=128,
+        ),
+    ),
+    OcrPreprocessStarterTemplate(
+        key="low_contrast",
+        label="低对比增强",
+        suggested_name="低对比灰字增强",
+        params=OcrPreprocessParams(
+            invert=False,
+            contrast=2.3,
+            brightness=1.15,
+            sharpen=1.6,
+            binarize_mode=OcrBinarizeMode.off,
+            threshold=128,
+        ),
+    ),
+    OcrPreprocessStarterTemplate(
+        key="strong_binary",
+        label="强黑白二值化",
+        suggested_name="强黑白字幕二值化",
+        params=OcrPreprocessParams(
+            invert=False,
+            contrast=1.8,
+            brightness=1.0,
+            sharpen=1.0,
+            binarize_mode=OcrBinarizeMode.otsu,
+            threshold=142,
+        ),
+    ),
+)
+
+
+def validate_ocr_preprocess_presets(
+    presets: list[OcrPreprocessPreset],
+) -> list[OcrPreprocessPreset]:
+    """单源预设列表校验：拒绝重复 id，启用条数不得超过 OCR_PREPROCESS_MAX_ENABLED。"""
+    seen_ids: set[str] = set()
+    enabled_count = 0
+    for preset in presets:
+        if preset.id in seen_ids:
+            raise ValueError(f"预处理预设 id 不能重复: {preset.id!r}")
+        seen_ids.add(preset.id)
+        if preset.enabled:
+            enabled_count += 1
+    if enabled_count > OCR_PREPROCESS_MAX_ENABLED:
+        raise ValueError(
+            f"最多同时启用 {OCR_PREPROCESS_MAX_ENABLED} 个预处理预设，请先停用其他预设"
+        )
+    return presets
+
+
+class OcrAttemptSummary(BaseModel):
+    """顺序早停链路中的单次识别尝试摘要。"""
+
+    model_config = ConfigDict(extra="forbid")
+    preset_id: str | None = None
+    label: str = Field(min_length=1)
+    rank: int | None = Field(default=None, ge=1, le=OCR_PREPROCESS_MAX_ENABLED)
+    confidence: int = Field(ge=0, le=100)
+    score: float = Field(ge=0.0, le=100.0, allow_inf_nan=False)
+    valid_chars: int = Field(ge=0)
+    accepted: bool = False
+
+
+class OcrRunMeta(BaseModel):
+    """OCR 识别命中摘要与执行链路元数据。"""
+
+    model_config = ConfigDict(extra="forbid")
+    run_mode: OcrRunMode
+    matched_preset_id: str | None = None
+    matched_preset_name: str = Field(min_length=1)
+    matched_rank: int | None = Field(default=None, ge=1, le=OCR_PREPROCESS_MAX_ENABLED)
+    confidence: int = Field(ge=0, le=100)
+    elapsed_ms: int = Field(ge=0)
+    early_stopped: bool = False
+    fallback_to_original: bool = False
+    attempts: list[OcrAttemptSummary] = Field(default_factory=list)
+
+
+class OcrPreprocessPreviewResponse(BaseModel):
+    """POST /api/v1/ocr/preview 响应：与正式 OCR 同源的预处理预览图（PNG Base64）及尺寸/阈值元数据。"""
+
+    model_config = ConfigDict(extra="forbid")
+    ok: Literal[True] = True
+    media_type: Literal["image/png"] = "image/png"
+    image_base64: str = Field(min_length=1)
+    image_width: int = Field(ge=1)
+    image_height: int = Field(ge=1)
+    preview_width: int = Field(ge=1)
+    preview_height: int = Field(ge=1)
+    otsu_threshold: int | None = Field(default=None, ge=0, le=255)
+
+
 def validate_lang_pair(lang_pair: str) -> str:
     """单源语言对校验与规范化（供契约模型、配置更新、翻译逻辑与路由共用）。非法值抛 ValueError。"""
     if not isinstance(lang_pair, str):
@@ -616,6 +790,7 @@ class OcrTranslateResponse(BaseModel):
     target_lang: str | None = None
     direction_mode: TranslateDirectionMode | None = None
     chunks: int | None = Field(default=None, ge=1)
+    ocr_meta: OcrRunMeta | None = None
 
 
 class OcrTextLine(BaseModel):
@@ -659,6 +834,7 @@ class OcrInplaceResponse(BaseModel):
     image_width: int = Field(ge=1)
     image_height: int = Field(ge=1)
     blocks: list[OcrTextBlock] = Field(default_factory=list)
+    ocr_meta: OcrRunMeta | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -720,6 +896,7 @@ class AppConfig(BaseModel):
     ui_theme: Literal["light", "dark"] = "light"
     audio_input_device: str = ""
     log_max_lines: Literal[500, 2000, 5000] = DEFAULT_LOG_MAX_LINES
+    ocr_preprocess_presets: list[OcrPreprocessPreset] = Field(default_factory=list)
     vision_model: str | None = None
     voice_mode: str | None = None
     asr_sidecar_url: str | None = None
@@ -730,6 +907,11 @@ class AppConfig(BaseModel):
     @classmethod
     def _validate_translate_lang_pair(cls, value: str) -> str:
         return validate_lang_pair(value)
+
+    @field_validator("ocr_preprocess_presets")
+    @classmethod
+    def _validate_ocr_preprocess_presets(cls, value: list[OcrPreprocessPreset]) -> list[OcrPreprocessPreset]:
+        return validate_ocr_preprocess_presets(value)
 
 
 
@@ -769,6 +951,11 @@ class AppConfigView(BaseModel):
     ui_theme: Literal["light", "dark"] = "light"
     audio_input_device: str = ""
     log_max_lines: Literal[500, 2000, 5000] = DEFAULT_LOG_MAX_LINES
+    ocr_preprocess_presets: list[OcrPreprocessPreset] = Field(default_factory=list)
+    ocr_preprocess_starter_templates: list[OcrPreprocessStarterTemplate] = Field(
+        default_factory=lambda: [item.model_copy(deep=True) for item in OCR_PREPROCESS_STARTER_TEMPLATES],
+        description="内置起步参考模板（只读，唯一定义源）",
+    )
     ollama_model: str = Field(description="产品固定纠错/翻译模型，只读")
 
 
@@ -789,6 +976,16 @@ class AppConfigUpdate(BaseModel):
     ui_theme: Literal["light", "dark"] | None = None
     audio_input_device: str | None = None
     log_max_lines: Literal[500, 2000, 5000] | None = None
+    ocr_preprocess_presets: list[OcrPreprocessPreset] | None = None
+
+    @field_validator("ocr_preprocess_presets")
+    @classmethod
+    def _validate_ocr_preprocess_presets(
+        cls, value: list[OcrPreprocessPreset] | None
+    ) -> list[OcrPreprocessPreset] | None:
+        if value is None:
+            return None
+        return validate_ocr_preprocess_presets(value)
 
 
 class AudioInputDevice(BaseModel):
@@ -1218,6 +1415,12 @@ def contract_models() -> tuple[type[BaseModel], ...]:
         PolishResponse,
         TranslateRequest,
         TranslateResponse,
+        OcrPreprocessParams,
+        OcrPreprocessPreset,
+        OcrPreprocessStarterTemplate,
+        OcrAttemptSummary,
+        OcrRunMeta,
+        OcrPreprocessPreviewResponse,
         OcrTranslateResponse,
         OcrTextLine,
         OcrTextBlock,
@@ -1337,11 +1540,22 @@ __all__ = [
     "DEFAULT_OLLAMA_BASE_URL",
     "DEFAULT_TRANSLATE_LANG_PAIR",
     "OLLAMA_VERSION",
+    "OCR_PREPROCESS_MAX_ENABLED",
+    "OCR_PREPROCESS_STARTER_TEMPLATES",
+    "OcrAttemptSummary",
+    "OcrBinarizeMode",
+    "OcrPreprocessParams",
+    "OcrPreprocessPreset",
+    "OcrPreprocessPreviewResponse",
+    "OcrPreprocessStarterTemplate",
+    "OcrRunMeta",
+    "OcrRunMode",
     "OcrTranslateMode",
     "TRANSLATE_LANG_PAIRS",
     "TranslateDirectionMode",
     "validate_direction_override",
     "validate_lang_pair",
+    "validate_ocr_preprocess_presets",
     "ErrorBody",
     "ErrorCode",
     "HistoryListResponse",

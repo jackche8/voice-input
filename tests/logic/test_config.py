@@ -7,7 +7,14 @@ import pytest
 from pydantic import ValidationError
 
 from _config import ConfigStore, apply_config_update, config_view, read_log_max_lines
-from _contracts import AppConfigUpdate, DEFAULT_LOG_MAX_LINES, ErrorCode, LogicError
+from _contracts import (
+    DEFAULT_LOG_MAX_LINES,
+    AppConfigUpdate,
+    ErrorCode,
+    LogicError,
+    OcrBinarizeMode,
+    OcrPreprocessPreset,
+)
 
 
 def test_missing_file_returns_defaults_without_creating(tmp_path: Path):
@@ -223,3 +230,128 @@ def test_read_log_max_lines_fail_open(tmp_path: Path):
     non_dict = tmp_path / "list.json"
     non_dict.write_text("[]", encoding="utf-8")
     assert read_log_max_lines(non_dict) == DEFAULT_LOG_MAX_LINES
+
+
+def test_ocr_preprocess_presets_roundtrip_legacy_fallback_and_validation(tmp_path: Path):
+    import threading
+
+    path = tmp_path / "config.json"
+    # 1. 旧盘缺 ocr_preprocess_presets 平滑读为 []，且只读起步模板不写入磁盘
+    path.write_text(json.dumps({"ollama_model": "qwen3.5:4b", "legacy_keep": "yes"}), encoding="utf-8")
+    store = ConfigStore(path)
+    initial = config_view(store.load())
+    assert initial.ocr_preprocess_presets == []
+    assert [t.key for t in initial.ocr_preprocess_starter_templates] == [
+        "dark_invert",
+        "low_contrast",
+        "strong_binary",
+    ]
+
+    # 2. 保存 4 条（3 启用 + 1 停用）、调序、更新并核对直接落盘内容与未知键保留
+    presets = [
+        OcrPreprocessPreset(
+            id="p1", name="深底终端", enabled=True, invert=True, contrast=1.65, brightness=1.05, sharpen=0.8
+        ),
+        OcrPreprocessPreset(
+            id="p2", name="灰字增强", enabled=True, invert=False, contrast=2.3, brightness=1.15, sharpen=1.6
+        ),
+        OcrPreprocessPreset(
+            id="p3",
+            name="字幕二值化",
+            enabled=True,
+            invert=False,
+            contrast=1.8,
+            brightness=1.0,
+            sharpen=1.0,
+            binarize_mode=OcrBinarizeMode.otsu,
+            threshold=142,
+        ),
+        OcrPreprocessPreset(
+            id="p4",
+            name="手动阈值",
+            enabled=False,
+            binarize_mode=OcrBinarizeMode.manual,
+            threshold=160,
+        ),
+    ]
+    saved = apply_config_update(store, AppConfigUpdate(ocr_preprocess_presets=presets))
+    assert [p.id for p in saved.ocr_preprocess_presets] == ["p1", "p2", "p3", "p4"]
+    assert sum(1 for p in saved.ocr_preprocess_presets if p.enabled) == 3
+
+    disk = json.loads(path.read_text(encoding="utf-8"))
+    assert disk["legacy_keep"] == "yes"
+    assert "ocr_preprocess_starter_templates" not in disk
+    assert [item["id"] for item in disk["ocr_preprocess_presets"]] == ["p1", "p2", "p3", "p4"]
+    assert disk["ocr_preprocess_presets"][2]["binarize_mode"] == "otsu"
+
+    # 调序与停用/清空往返
+    reordered = [presets[2], presets[0].model_copy(update={"enabled": False})]
+    updated = apply_config_update(store, AppConfigUpdate(ocr_preprocess_presets=reordered))
+    assert [(p.id, p.enabled) for p in updated.ocr_preprocess_presets] == [("p3", True), ("p1", False)]
+
+    # 3. 绕过模型构造的非法写同样在 _normalized_update 显式拦截为 LogicError(invalid_request)
+    raw_four_enabled = AppConfigUpdate.model_construct(
+        ocr_preprocess_presets=[
+            OcrPreprocessPreset(id=f"e{i}", name=f"P{i}", enabled=True) for i in range(4)
+        ]
+    )
+    with pytest.raises(LogicError) as too_many:
+        apply_config_update(store, raw_four_enabled)
+    assert too_many.value.code == ErrorCode.invalid_request and "最多同时启用 3" in too_many.value.message
+
+    raw_dup_id = AppConfigUpdate.model_construct(
+        ocr_preprocess_presets=[
+            OcrPreprocessPreset(id="same", name="A", enabled=True),
+            OcrPreprocessPreset(id="same", name="B", enabled=False),
+        ]
+    )
+    with pytest.raises(LogicError) as dup_err:
+        apply_config_update(store, raw_dup_id)
+    assert dup_err.value.code == ErrorCode.invalid_request and "不能重复" in dup_err.value.message
+
+    # 4. 磁盘损坏（含 4 条启用或越界参数）读取显式抛 config_io
+    bad_disk = tmp_path / "bad_presets.json"
+    bad_disk.write_text(
+        json.dumps(
+            {
+                "ocr_preprocess_presets": [
+                    {"id": f"b{i}", "name": f"B{i}", "enabled": True} for i in range(4)
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(LogicError) as disk_err:
+        ConfigStore(bad_disk).load()
+    assert disk_err.value.code == ErrorCode.config_io
+
+    # 5. 并发更新预设与其他配置字段互不覆盖
+    left = ConfigStore(path)
+    right = ConfigStore(path)
+    barrier = threading.Barrier(2)
+    errors: list[BaseException] = []
+
+    def write_presets() -> None:
+        try:
+            barrier.wait()
+            apply_config_update(left, AppConfigUpdate(ocr_preprocess_presets=[presets[0]]))
+        except BaseException as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    def write_keywords() -> None:
+        try:
+            barrier.wait()
+            apply_config_update(right, AppConfigUpdate(custom_keywords=["ConcurrentKW"]))
+        except BaseException as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    t1 = threading.Thread(target=write_presets)
+    t2 = threading.Thread(target=write_keywords)
+    t1.start()
+    t2.start()
+    t1.join()
+    t2.join()
+    assert errors == []
+    final_disk = json.loads(path.read_text(encoding="utf-8"))
+    assert [p["id"] for p in final_disk["ocr_preprocess_presets"]] == ["p1"]
+    assert final_disk["custom_keywords"] == ["ConcurrentKW"]

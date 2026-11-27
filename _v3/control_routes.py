@@ -64,6 +64,7 @@ def build_control_router(runtime: Runtime) -> APIRouter:
                 "translate_blocks": runtime.translate_blocks is not None,
                 "ocr": runtime.ocr is not None,
                 "ocr_layout": runtime.ocr_layout is not None,
+                "ocr_preview": runtime.ocr_preview is not None,
                 "decode_audio": runtime.decode_audio is not None,
                 "stream_provider": runtime.stream_provider is not None,
             },

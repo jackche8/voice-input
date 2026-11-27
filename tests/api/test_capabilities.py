@@ -1,21 +1,43 @@
 from __future__ import annotations
 
+import asyncio
+import base64
+import inspect
+import io
 import json
 import math
 import struct
 from pathlib import Path
 
 import httpx
+import numpy as np
 import pytest
+from PIL import Image
 
-from _contracts import OcrTextBlock, OcrTextLine
-from _ocr_layout import extract_ocr_layout
+from _contracts import (
+    OcrAttemptSummary,
+    OcrPreprocessParams,
+    OcrRunMeta,
+    OcrRunMode,
+    OcrTextBlock,
+    OcrTextLine,
+)
+from _ocr import clear_language_cache, list_tesseract_languages
+from _ocr_layout import OcrLayoutResult, extract_ocr_layout_with_meta, extract_ocr_text_with_meta
+from _ocr_preprocess import OCR_BORDER_PX, build_ocr_input_image, prepare_ocr_base, render_ocr_preprocess_preview
 from _ollama import OllamaClient
 from _translate import translate_blocks as real_translate_blocks, translate_text as real_translate_text
 from _v3_app import build_sandbox_runtime, create_app
+from tests.api.asgi_client import call_asgi, multipart
 from tests.api.conftest import TEST_TOKEN, lan_client, lan_headers, local_client, local_headers
 from tests.api.providers import fixture_ocr_layout, fixture_transcribe, make_text_wav, make_wav_bytes
-from tests.logic.ocr_samples import all_samples, bbox_close, fonts_missing, text_similar
+from tests.logic.ocr_samples import (
+    all_samples,
+    bbox_close,
+    dark_low_contrast_sample,
+    fonts_missing,
+    text_similar,
+)
 
 
 def _sine_pcm16(sample_rate: int, *, duration_s: float = 0.05, channels: int = 1) -> bytes:
@@ -230,7 +252,7 @@ def test_ocr_inplace_translated_and_raw_modes(app, tmp_path: Path):
 
 
 def test_ocr_inplace_real_layout_returns_truth_lines_and_blank_line_full_text(tmp_path: Path):
-    """T14 真实链路：生成器样本 → 真实 extract_ocr_layout 的 sandbox app → POST /api/v1/ocr-inplace（raw）。"""
+    """T14 真实链路：生成器样本 → 真实 extract_ocr_layout_with_meta 的 sandbox app → POST /api/v1/ocr-inplace（raw）。"""
     pytesseract = pytest.importorskip("pytesseract")
     try:
         if "eng" not in pytesseract.get_languages(config=""):
@@ -240,7 +262,11 @@ def test_ocr_inplace_real_layout_returns_truth_lines_and_blank_line_full_text(tm
     if fonts_missing():
         pytest.skip(fonts_missing())
     sample = all_samples()["light_paragraph"]
-    rt = build_sandbox_runtime(root=tmp_path / "real-ocr", token=TEST_TOKEN, ocr_layout=extract_ocr_layout)
+    rt = build_sandbox_runtime(
+        root=tmp_path / "real-ocr",
+        token=TEST_TOKEN,
+        ocr_layout=extract_ocr_layout_with_meta,
+    )
     res = local_client(create_app(rt)).post(
         "/api/v1/ocr-inplace",
         data={"mode": "raw", "lang": "eng"},  # 显式 lang：链路不依赖默认语言包是否齐全
@@ -249,6 +275,10 @@ def test_ocr_inplace_real_layout_returns_truth_lines_and_blank_line_full_text(tm
     )
     assert res.status_code == 200, res.text
     body = res.json()
+    assert body["ocr_meta"]["run_mode"] == "original"
+    assert body["ocr_meta"]["early_stopped"] is False
+    assert body["ocr_meta"]["fallback_to_original"] is False
+    assert len(body["ocr_meta"]["attempts"]) == 1
     lines = [(index, line) for index, block in enumerate(body["blocks"]) for line in block["lines"]]
     assert len(lines) == len(sample.lines)
     for (index, line), truth in zip(lines, sample.lines):
@@ -417,7 +447,28 @@ def test_ocr_real_chain_single_direction_symbol_skip_and_prevalidation_400(tmp_p
             OcrTextBlock(bbox=(10, 60, 100, 16), lines=[OcrTextLine(bbox=(10, 60, 100, 16), text="2026-11-21")], ocr_text="2026-11-21"),
             OcrTextBlock(bbox=(10, 80, 90, 20), lines=[OcrTextLine(bbox=(10, 80, 90, 20), text="Settings")], ocr_text="Settings"),
         ]
-        return 400, 140, "\n\n".join(b.ocr_text for b in blocks), blocks
+        full = "\n\n".join(b.ocr_text for b in blocks)
+        return OcrLayoutResult(
+            image_width=400,
+            image_height=140,
+            ocr_text=full,
+            blocks=blocks,
+            meta=OcrRunMeta(
+                run_mode=OcrRunMode.original,
+                matched_preset_name="默认原图",
+                confidence=92,
+                elapsed_ms=4,
+                attempts=[
+                    OcrAttemptSummary(
+                        label="默认原图",
+                        confidence=92,
+                        score=92.0,
+                        valid_chars=30,
+                        accepted=True,
+                    )
+                ],
+            ),
+        )
 
     with OllamaClient(transport=httpx.MockTransport(handler)) as ol:
         rt = build_sandbox_runtime(
@@ -473,3 +524,260 @@ def test_ocr_real_chain_single_direction_symbol_skip_and_prevalidation_400(tmp_p
                 headers=local_headers(),
             )
             assert r_bad.status_code == 400 and r_bad.json()["error"] == "invalid_request", (path, bad_form, r_bad.status_code, r_bad.text)
+
+
+def _sample_png(width: int = 80, height: int = 40, color: tuple[int, int, int] = (24, 30, 44)) -> bytes:
+    buf = io.BytesIO()
+    Image.new("RGB", (width, height), color).save(buf, format="PNG")
+    return buf.getvalue()
+
+
+def test_ocr_preview_route_mount_validation_limits_lan_403_and_signature(app, tmp_path: Path):
+    # 1. 签名与挂载契约检查（route-mount 三件套）
+    preview_route = next(
+        r for r in app.routes if getattr(r, "path", None) == "/api/v1/ocr/preview" and "POST" in getattr(r, "methods", set())
+    )
+    assert preview_route.operation_id == "ocr_preview_api_v1_ocr_preview_post"
+    params = inspect.signature(preview_route.endpoint).parameters
+    assert {"request", "preprocess_params", "image"}.issubset(params)
+
+    client = local_client(app)
+    png = _sample_png()
+
+    # 2. 200：省略 preprocess_params、纯空白 preprocess_params、以及完整参数（含 otsu_threshold）
+    for data in ({}, {"preprocess_params": "   "}):
+        ok = client.post(
+            "/api/v1/ocr/preview",
+            data=data,
+            files={"image": ("s.png", png, "image/png")},
+            headers=local_headers(),
+        )
+        assert ok.status_code == 200, ok.text
+        body = ok.json()
+        assert body["ok"] is True and body["media_type"] == "image/png"
+        assert (body["image_width"], body["image_height"]) == (80, 40)
+        assert (body["preview_width"], body["preview_height"]) == (160, 80)
+        assert body["otsu_threshold"] is None
+
+    otsu = client.post(
+        "/api/v1/ocr/preview",
+        data={"preprocess_params": json.dumps({"invert": True, "binarize_mode": "otsu"})},
+        files={"image": ("s.png", png, "image/png")},
+        headers=local_headers(),
+    )
+    assert otsu.status_code == 200, otsu.text
+    assert isinstance(otsu.json()["otsu_threshold"], int)
+
+    # 3. 400：非法 JSON / NaN / Infinity / 非对象 / 越界 / 未知键 / 缺图 / 空图 / 损坏图 / 多文件
+    bad_payloads = (
+        "{not-json",
+        '{"contrast": NaN}',
+        '{"brightness": Infinity}',
+        '{"contrast": -Infinity}',
+        "[]",
+        '{"contrast": 9.0}',
+        '{"unknown_field": 1}',
+    )
+    for raw_params in bad_payloads:
+        bad = client.post(
+            "/api/v1/ocr/preview",
+            data={"preprocess_params": raw_params},
+            files={"image": ("s.png", png, "image/png")},
+            headers=local_headers(),
+        )
+        assert bad.status_code == 400 and bad.json()["error"] == "invalid_request", (raw_params, bad.status_code, bad.text)
+
+    assert client.post("/api/v1/ocr/preview", headers=local_headers()).status_code == 400
+    assert (
+        client.post(
+            "/api/v1/ocr/preview",
+            files={"image": ("empty.png", b"", "image/png")},
+            headers=local_headers(),
+        ).status_code
+        == 400
+    )
+    assert (
+        client.post(
+            "/api/v1/ocr/preview",
+            files={"image": ("bad.png", b"not-a-png", "image/png")},
+            headers=local_headers(),
+        ).status_code
+        == 400
+    )
+
+    # 4. 非法 preprocess_params 必须先于能力检查返回 400（不得误返 503）；合法参数但能力未注入返 503
+    rt_no_cap = build_sandbox_runtime(
+        root=tmp_path / "no-preview",
+        token=TEST_TOKEN,
+        ocr=None,
+        ocr_preview=None,
+    )
+    c_no_cap = local_client(create_app(rt_no_cap))
+    for path in ("/api/v1/ocr/preview", "/api/v1/ocr-translate"):
+        pre_400 = c_no_cap.post(
+            path,
+            data={"preprocess_params": '{"contrast": NaN}'},
+            files={"image": ("s.png", png, "image/png")},
+            headers=local_headers(),
+        )
+        assert pre_400.status_code == 400 and pre_400.json()["error"] == "invalid_request", (path, pre_400.text)
+
+    uninjected_503 = c_no_cap.post(
+        "/api/v1/ocr/preview",
+        files={"image": ("s.png", png, "image/png")},
+        headers=local_headers(),
+    )
+    assert uninjected_503.status_code == 503 and uninjected_503.json()["error"] == "ocr_failed"
+
+    # 5. LAN 带合法 token 必返 403
+    lan_res = lan_client(app).post(
+        "/api/v1/ocr/preview",
+        files={"image": ("s.png", png, "image/png")},
+        headers=lan_headers(),
+    )
+    assert lan_res.status_code == 403 and lan_res.json()["error"] == "forbidden"
+
+    # 6. 超出上传上限返回 413（ASGI receive 层限流）
+    rt_small = build_sandbox_runtime(
+        root=tmp_path / "small-preview",
+        token=TEST_TOKEN,
+        max_upload_bytes=256,
+    )
+    small_app = create_app(rt_small)
+    mp_body, mp_ctype = multipart([("image", b"x" * 320, "big.png")])
+    oversize = asyncio.run(
+        call_asgi(
+            small_app,
+            method="POST",
+            path="/api/v1/ocr/preview",
+            client=("127.0.0.1", 50000),
+            headers={
+                "host": "127.0.0.1:17945",
+                "origin": "https://127.0.0.1:17945",
+                "content-type": mp_ctype,
+            },
+            body=mp_body,
+            add_content_length=False,
+            chunked=True,
+        )
+    )
+    assert oversize["status"] == 413 and oversize["body"]["error"] == "invalid_request"
+
+
+def test_ocr_preprocess_real_chain_preview_parity_persisted_inplace_and_draft_translate(tmp_path: Path):
+    """端到端真实链路：真图(dark_low_contrast_sample) + 真 FastAPI + 真 Tesseract（无路由 mock）。"""
+    if fonts_missing():
+        pytest.skip(fonts_missing())
+    clear_language_cache()
+    try:
+        installed = set(list_tesseract_languages())
+    except Exception as exc:
+        pytest.skip(f"Tesseract 不可用: {exc}")
+    if not {"chi_sim", "chi_tra", "eng"}.issubset(installed):
+        pytest.skip("本机缺少默认 OCR 语言包")
+
+    sample = dark_low_contrast_sample()
+    rt = build_sandbox_runtime(
+        root=tmp_path / "real-ocr-presets",
+        token=TEST_TOKEN,
+        ocr=extract_ocr_text_with_meta,
+        ocr_layout=extract_ocr_layout_with_meta,
+        ocr_preview=render_ocr_preprocess_preview,
+    )
+    client = local_client(create_app(rt))
+
+    # 1. 同源预览与正式 OCR 输入图去留白区逐像素完全一致
+    cfg = client.get("/api/v1/config").json()
+    starters = cfg["ocr_preprocess_starter_templates"]
+    assert [s["key"] for s in starters] == ["dark_invert", "low_contrast", "strong_binary"]
+    base = prepare_ocr_base(sample.png)
+    for starter in starters:
+        resp = client.post(
+            "/api/v1/ocr/preview",
+            data={"preprocess_params": json.dumps(starter["params"])},
+            files={"image": ("s.png", sample.png, "image/png")},
+            headers=local_headers(),
+        )
+        assert resp.status_code == 200, resp.text
+        preview_body = resp.json()
+        decoded = np.asarray(Image.open(io.BytesIO(base64.b64decode(preview_body["image_base64"]))))
+        ocr_img, ocr_otsu = build_ocr_input_image(
+            base,
+            OcrPreprocessParams.model_validate(starter["params"]),
+            border_px=OCR_BORDER_PX,
+        )
+        inner = np.asarray(ocr_img)[OCR_BORDER_PX:-OCR_BORDER_PX, OCR_BORDER_PX:-OCR_BORDER_PX]
+        assert preview_body["otsu_threshold"] == ocr_otsu
+        assert np.array_equal(decoded, inner)
+
+    # 2. 启用预设前：默认原图在深底弱对比度图上识别失败（503 ocr_failed）
+    raw_before = client.post(
+        "/api/v1/ocr-inplace",
+        data={"mode": "raw"},
+        files={"image": ("s.png", sample.png, "image/png")},
+        headers=local_headers(),
+    )
+    assert raw_before.status_code == 503 and raw_before.json()["error"] == "ocr_failed"
+
+    # 3. 通过 POST /api/v1/config 持久化并启用 3 套内置起步预设
+    enabled_presets = [
+        {"id": f"starter-{s['key']}", "name": s["suggested_name"], "enabled": True, **s["params"]}
+        for s in starters
+    ]
+    saved = client.post(
+        "/api/v1/config",
+        json={"ocr_preprocess_presets": enabled_presets},
+        headers=local_headers(),
+    )
+    assert saved.status_code == 200, saved.text
+
+    # 4. POST /api/v1/ocr-inplace 自动读取持久化启用预设，顺位 2 早停命中、坐标准确、保留原图深底采色
+    inplace = client.post(
+        "/api/v1/ocr-inplace",
+        data={"mode": "raw"},
+        files={"image": ("s.png", sample.png, "image/png")},
+        headers=local_headers(),
+    )
+    assert inplace.status_code == 200, inplace.text
+    in_body = inplace.json()
+    assert in_body["ocr_meta"]["run_mode"] == "preset_chain"
+    assert in_body["ocr_meta"]["early_stopped"] is True
+    assert in_body["ocr_meta"]["fallback_to_original"] is False
+    assert in_body["ocr_meta"]["matched_rank"] == 2
+    assert in_body["ocr_meta"]["matched_preset_id"] == "starter-low_contrast"
+    assert len(in_body["ocr_meta"]["attempts"]) == 2
+    assert len(in_body["blocks"]) == 1
+    assert text_similar(in_body["blocks"][0]["lines"][0]["text"], sample.lines[0].text)
+    assert bbox_close(tuple(in_body["blocks"][0]["lines"][0]["bbox"]), sample.lines[0].bbox)
+    assert in_body["blocks"][0]["bg_color"] == "#181e2c"
+    assert in_body["blocks"][0]["fg_color"] == "#f8fafc"
+
+    # 5. POST /api/v1/ocr-translate：传草稿 preprocess_params 仅跑 1 次试识别且不改持久化配置
+    draft_res = client.post(
+        "/api/v1/ocr-translate",
+        data={"mode": "raw", "preprocess_params": json.dumps(starters[1]["params"])},
+        files={"image": ("s.png", sample.png, "image/png")},
+        headers=local_headers(),
+    )
+    assert draft_res.status_code == 200, draft_res.text
+    draft_body = draft_res.json()
+    assert text_similar(draft_body["ocr_text"], sample.lines[0].text)
+    assert draft_body["ocr_meta"]["run_mode"] == "draft_params"
+    assert draft_body["ocr_meta"]["matched_preset_name"] == "当前调参草稿"
+    assert len(draft_body["ocr_meta"]["attempts"]) == 1
+    assert len(client.get("/api/v1/config").json()["ocr_preprocess_presets"]) == 3
+
+    # 6. POST /api/v1/ocr-translate：省略或空白 preprocess_params 走持久化启用预设链路早停
+    for extra_form in ({}, {"preprocess_params": "   "}):
+        chain_res = client.post(
+            "/api/v1/ocr-translate",
+            data={"mode": "raw", **extra_form},
+            files={"image": ("s.png", sample.png, "image/png")},
+            headers=local_headers(),
+        )
+        assert chain_res.status_code == 200, chain_res.text
+        chain_body = chain_res.json()
+        assert text_similar(chain_body["ocr_text"], sample.lines[0].text)
+        assert chain_body["ocr_meta"]["run_mode"] == "preset_chain"
+        assert chain_body["ocr_meta"]["early_stopped"] is True
+        assert chain_body["ocr_meta"]["matched_rank"] == 2

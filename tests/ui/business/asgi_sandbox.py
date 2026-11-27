@@ -208,7 +208,15 @@ def main() -> int:
     sandbox_root = Path(sys.argv[2]) if len(sys.argv) > 2 else Path(tempfile.mkdtemp(prefix="v3-ui-asgi-"))
     sandbox_root.mkdir(parents=True, exist_ok=True)
 
-    from _contracts import SttResponse, TranslateRequest, TranslateResponse
+    from _contracts import (
+        OcrAttemptSummary,
+        OcrRunMeta,
+        OcrRunMode,
+        SttResponse,
+        TranslateRequest,
+        TranslateResponse,
+    )
+    from _ocr_layout import OcrTextResult
     from _translate import resolve_translation_direction
     from _v3.runtime import build_sandbox_runtime
     from _v3_app import create_app
@@ -237,16 +245,93 @@ def main() -> int:
             chunks=1,
         )
 
-    def ocr(image_bytes: bytes, *, lang: str | None = None) -> str:
+    def ocr(
+        image_bytes: bytes,
+        *,
+        lang: str | None = None,
+        presets=(),
+        preprocess_params=None,
+    ) -> OcrTextResult:
         del lang
+        text = "Sandbox OCR text"
         if image_bytes and not image_bytes.startswith(b"\x89PNG"):
             try:
                 decoded = image_bytes.decode("utf-8").strip()
                 if decoded:
-                    return decoded
+                    text = decoded
             except UnicodeDecodeError:
                 pass
-        return "Sandbox OCR text"
+        valid_chars = sum(1 for ch in text if ch.isalnum())
+        if preprocess_params is not None:
+            meta = OcrRunMeta(
+                run_mode=OcrRunMode.draft_params,
+                matched_preset_id=None,
+                matched_preset_name="当前调参草稿",
+                matched_rank=None,
+                confidence=92,
+                elapsed_ms=8,
+                early_stopped=False,
+                fallback_to_original=False,
+                attempts=[
+                    OcrAttemptSummary(
+                        preset_id=None,
+                        label="当前调参草稿",
+                        rank=None,
+                        confidence=92,
+                        score=92.0,
+                        valid_chars=valid_chars,
+                        accepted=True,
+                    )
+                ],
+            )
+        else:
+            enabled = [preset for preset in (presets or ()) if preset.enabled]
+            if enabled:
+                first = enabled[0]
+                meta = OcrRunMeta(
+                    run_mode=OcrRunMode.preset_chain,
+                    matched_preset_id=first.id,
+                    matched_preset_name=first.name,
+                    matched_rank=1,
+                    confidence=93,
+                    elapsed_ms=11,
+                    early_stopped=True,
+                    fallback_to_original=False,
+                    attempts=[
+                        OcrAttemptSummary(
+                            preset_id=first.id,
+                            label=first.name,
+                            rank=1,
+                            confidence=93,
+                            score=93.0,
+                            valid_chars=valid_chars,
+                            accepted=True,
+                        )
+                    ],
+                )
+            else:
+                meta = OcrRunMeta(
+                    run_mode=OcrRunMode.original,
+                    matched_preset_id=None,
+                    matched_preset_name="默认原图",
+                    matched_rank=None,
+                    confidence=90,
+                    elapsed_ms=6,
+                    early_stopped=False,
+                    fallback_to_original=False,
+                    attempts=[
+                        OcrAttemptSummary(
+                            preset_id=None,
+                            label="默认原图",
+                            rank=None,
+                            confidence=90,
+                            score=90.0,
+                            valid_chars=valid_chars,
+                            accepted=True,
+                        )
+                    ],
+                )
+        return OcrTextResult(text=text, meta=meta)
 
     def list_audio_inputs() -> AudioInputListResponse:
         err = os.environ.get("OVI_SANDBOX_AUDIO_INPUTS_ERROR")

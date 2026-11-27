@@ -1,0 +1,1533 @@
+<!doctype html>
+<!--
+  v3.5 OCR 预处理预设与顺序质量早停 · 模板 B「顶部预设链路条 + 原图/处理后并排对照工作台」
+  设计原则：顶部集中展示「1→2→3 顺序早停链路」与预设管理清单，全局规则与启用配额一眼可见；下方采用左宽右窄工作台，左侧默认「原图 vs 预处理」并排对照画布 + 试识别输出，右侧为固定宽度 5 参数检视器，拖动参数无需来回切换即可左右同步对比。
+  展示的数据：
+    - 配置态：ocr_preprocess_presets[]（id, name, enabled, invert, contrast, brightness, sharpen, binarize_mode, threshold），最多 3 条 enabled=true。
+    - 内置起步模板：starterTemplates[]（深底反色 / 低对比增强 / 强黑白二值化）。
+    - OCR 识别与预览态：fileName、previewUrl、processedPreviewUrl、previewPhase / previewError、previewViewMode（split | processed | original）、mode（raw | translate）、lang_pair、phase（empty | loading | result | error）、ocr_text、text、ocrMeta（matched_preset_name / matched_rank / run_mode / confidence / elapsed_ms / early_stopped / fallback_to_original / attempts[]）、error / message。
+    - 编辑器草稿态：editingPresetId、draft（name + 5 参数）、saving / saveError / savedNotice。
+  触发的动作：
+    - onRequestPreprocessPreview({ file, params })：参数调整时防抖请求 POST /api/v1/ocr/preview，保证预览与正式识别共用后端同一算法（本静态模板用 Canvas 仅作视觉演示）。
+    - onSubmitImage({ file, mode, lang_pair?, panel: "ocr", preprocess_params? })：支持按当前调参参数试识别或按顶部 1→2→3 启用链路识别。
+    - onSaveOcrPresets({ presets, action, targetId? })：新建/更新/删除/启停/调序统一写 POST /api/v1/config 并回读确认（非乐观更新）。
+    - onCopy({ text, kind }) / onClearOcr() / onToggleTheme({ theme })。
+  复用的现有界面、组件与文件：
+    - static/v3/css/theme.css & studio.css（Studio C 亮/暗双主题令牌、.studio-window、7 项 .rail、.studio-box、.rows、.switch、.cap-seg、.ocr-dropzone、.v3-confirm）
+    - static/v3/js/home.js / confirm.js / icons.js / defaults.js / labels.js / dom.js
+    - static/v3/js/business/home-controller.js / setup-actions.js / map-setup.js / clipboard.js
+-->
+<html lang="zh-CN" data-theme="light">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>v3.5 OCR 预处理预设 · 模板 B「顶部预设链路条 + 并排对照工作台」</title>
+<style>
+/* ==================== 1. 既有 theme.css Studio C 令牌 ==================== */
+:root {
+  color-scheme: light;
+  --font-sans: "Noto Sans CJK SC", "PingFang SC", "Microsoft YaHei", system-ui, -apple-system, sans-serif;
+  --font-mono: "JetBrains Mono", "Noto Sans Mono CJK SC", "SFMono-Regular", Consolas, ui-monospace, monospace;
+  --fs-xs: 12px;
+  --fs-sm: 13px;
+  --fs-md: 14px;
+  --fs-lg: 16px;
+  --fs-xl: 20px;
+  --sp-1: 4px;
+  --sp-2: 8px;
+  --sp-3: 12px;
+  --sp-4: 16px;
+  --sp-5: 24px;
+  --sp-6: 32px;
+  --radius-sm: 6px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+  --radius-xl: 14px;
+  --radius-pill: 999px;
+  --c-bg: #f4f6fa;
+  --c-rail: #eef1f6;
+  --c-surface: #ffffff;
+  --c-surface-2: #f1f4f9;
+  --c-text: #1b1f2a;
+  --c-muted: #5d6578;
+  --c-border: #d8dee9;
+  --c-accent: #2563eb;
+  --c-accent-hover: #1d4ed8;
+  --c-accent-solid: #2563eb;
+  --c-accent-solid-hover: #1d4ed8;
+  --c-on-accent: #ffffff;
+  --c-accent-soft: #dbeafe;
+  --c-ok: #16a34a;
+  --c-ok-soft: #dcfce7;
+  --c-warn: #b45309;
+  --c-warn-soft: #fef3c7;
+  --c-danger: #dc2626;
+  --c-danger-solid: #dc2626;
+  --c-danger-soft: #fee2e2;
+  --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.06);
+  --shadow-studio: 0 12px 32px rgba(15, 23, 42, 0.08);
+  --shadow-hud: 0 8px 24px rgba(0, 0, 0, 0.35);
+  --dur-fast: 120ms;
+  --focus-ring: 0 0 0 3px var(--c-accent-soft), 0 0 0 1px var(--c-accent);
+}
+[data-theme="light"] {
+  color-scheme: light;
+  --c-bg: #f4f6fa;
+  --c-rail: #eef1f6;
+  --c-surface: #ffffff;
+  --c-surface-2: #f1f4f9;
+  --c-text: #1b1f2a;
+  --c-muted: #5d6578;
+  --c-border: #d8dee9;
+  --c-accent: #2563eb;
+  --c-accent-hover: #1d4ed8;
+  --c-accent-solid: #2563eb;
+  --c-accent-solid-hover: #1d4ed8;
+  --c-on-accent: #ffffff;
+  --c-accent-soft: #dbeafe;
+  --c-ok: #16a34a;
+  --c-ok-soft: #dcfce7;
+  --c-warn: #b45309;
+  --c-warn-soft: #fef3c7;
+  --c-danger: #dc2626;
+  --c-danger-solid: #dc2626;
+  --c-danger-soft: #fee2e2;
+  --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.06);
+  --shadow-studio: 0 12px 32px rgba(15, 23, 42, 0.08);
+}
+[data-theme="dark"] {
+  color-scheme: dark;
+  --c-bg: #0d1117;
+  --c-rail: #131820;
+  --c-surface: #161b22;
+  --c-surface-2: #1f2630;
+  --c-text: #e6edf3;
+  --c-muted: #8b949e;
+  --c-border: #30363d;
+  --c-accent: #58a6ff;
+  --c-accent-hover: #79c0ff;
+  --c-accent-solid: #1f6feb;
+  --c-accent-solid-hover: #1d4ed8;
+  --c-on-accent: #ffffff;
+  --c-accent-soft: rgba(56, 139, 253, 0.16);
+  --c-ok: #3fb950;
+  --c-ok-soft: rgba(63, 185, 80, 0.16);
+  --c-warn: #d29922;
+  --c-warn-soft: rgba(210, 153, 34, 0.16);
+  --c-danger: #f85149;
+  --c-danger-solid: #c92a2a;
+  --c-danger-soft: rgba(248, 81, 73, 0.16);
+  --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.28);
+  --shadow-studio: 0 16px 40px rgba(0, 0, 0, 0.35);
+}
+
+*, *::before, *::after { box-sizing: border-box; }
+html, body { margin: 0; }
+body {
+  font-family: var(--font-sans);
+  color: var(--c-text);
+  background: var(--c-bg);
+  font-size: var(--fs-md);
+  line-height: 1.5;
+}
+[hidden] { display: none !important; }
+
+.ic {
+  width: 16px; height: 16px; flex: none; fill: none;
+  stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round;
+}
+.ic-sm { width: 14px; height: 14px; }
+.ic-xs { width: 12px; height: 12px; }
+
+.btn {
+  display: inline-flex; align-items: center; justify-content: center; gap: var(--sp-1);
+  font: inherit; font-size: var(--fs-sm); padding: 6px 14px;
+  border-radius: var(--radius-md); border: 1px solid var(--c-border);
+  background: var(--c-surface); color: var(--c-text); cursor: pointer; white-space: nowrap;
+  transition: border-color var(--dur-fast), background-color var(--dur-fast), color var(--dur-fast);
+}
+.btn:hover:not(:disabled) { border-color: var(--c-accent); }
+.btn.primary { background: var(--c-accent-solid); border-color: var(--c-accent-solid); color: var(--c-on-accent); }
+.btn.primary:hover:not(:disabled) { background: var(--c-accent-solid-hover); border-color: var(--c-accent-solid-hover); }
+.btn.danger-outline:hover:not(:disabled) { border-color: var(--c-danger); color: var(--c-danger); background: var(--c-danger-soft); }
+.btn:disabled, .btn[aria-disabled="true"] { opacity: 0.5; cursor: not-allowed; }
+.btn:focus-visible { outline: none; box-shadow: var(--focus-ring); }
+.btn-sm { padding: 4px 10px; font-size: var(--fs-xs); }
+.btn-icon { padding: 4px 6px; min-width: 28px; min-height: 28px; }
+
+.badge {
+  display: inline-flex; align-items: center; gap: var(--sp-1);
+  font-size: var(--fs-xs); padding: 2px 8px; border-radius: var(--radius-pill);
+  background: var(--c-bg); color: var(--c-muted); white-space: nowrap; flex-shrink: 0;
+  font-variant-numeric: tabular-nums;
+}
+.badge.ok { background: var(--c-ok-soft); color: var(--c-ok); }
+.badge.warn { background: var(--c-warn-soft); color: var(--c-warn); }
+.badge.danger { background: var(--c-danger-soft); color: var(--c-danger); }
+.badge.accent { background: var(--c-accent-soft); color: var(--c-accent); }
+
+.mono { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+.muted { color: var(--c-muted); }
+.saved { font-size: var(--fs-xs); color: var(--c-ok); white-space: nowrap; }
+.hint { font-size: var(--fs-xs); color: var(--c-muted); margin: 0; line-height: 1.55; }
+
+.dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; flex: none; background: var(--c-border); }
+.dot.ok { background: var(--c-ok); }
+.dot.warn { background: var(--c-warn); }
+.dot.err { background: var(--c-danger); }
+
+.progress { height: 4px; border-radius: var(--radius-pill); background: var(--c-border); overflow: hidden; }
+.progress > i { display: block; height: 100%; width: 45%; background: var(--c-accent); border-radius: var(--radius-pill); animation: v3-indeterminate 1.4s ease-in-out infinite; }
+@keyframes v3-indeterminate { 0% { transform: translateX(-100%); } 100% { transform: translateX(240%); } }
+
+.switch {
+  position: relative; width: 40px; height: 22px; border-radius: var(--radius-pill);
+  background: var(--c-border); border: 0; cursor: pointer; flex: none; padding: 0;
+  transition: background-color var(--dur-fast);
+}
+.switch::after {
+  content: ""; position: absolute; top: 3px; left: 3px; width: 16px; height: 16px;
+  border-radius: 50%; background: var(--c-surface); transition: left var(--dur-fast);
+}
+.switch[aria-checked="true"] { background: var(--c-accent); }
+.switch[aria-checked="true"]::after { left: 21px; }
+.switch:disabled, .switch[aria-disabled="true"] { opacity: 0.45; cursor: not-allowed; }
+.switch:focus-visible { outline: none; box-shadow: var(--focus-ring); }
+
+.field {
+  width: 100%; font: inherit; font-size: var(--fs-sm); padding: 6px 10px;
+  border: 1px solid var(--c-border); border-radius: var(--radius-md);
+  background: var(--c-surface); color: var(--c-text); min-width: 0;
+}
+.field:focus-visible { outline: none; box-shadow: var(--focus-ring); }
+select { color-scheme: inherit; background-color: var(--c-surface); color: var(--c-text); }
+select option { background-color: var(--c-surface); color: var(--c-text); }
+
+.actions { display: flex; justify-content: flex-end; gap: var(--sp-2); align-items: center; }
+
+.v3-confirm {
+  position: fixed; inset: 0; z-index: 80; display: flex; align-items: center; justify-content: center;
+  padding: var(--sp-5); background: rgba(17, 24, 39, 0.45);
+}
+.v3-confirm-card {
+  max-width: 420px; width: 100%; background: var(--c-surface); color: var(--c-text);
+  border-radius: var(--radius-lg); border: 1px solid var(--c-border); box-shadow: var(--shadow-hud); padding: var(--sp-5);
+}
+.v3-confirm-card h2 { margin: 0 0 var(--sp-2); font-size: var(--fs-lg); }
+.v3-confirm-warn {
+  padding: var(--sp-3); border-radius: var(--radius-md); background: var(--c-warn-soft);
+  color: var(--c-warn); margin-bottom: var(--sp-4); font-size: var(--fs-sm); line-height: 1.6;
+}
+
+/* ==================== 2. 模板预览切换栏 ==================== */
+.preview-bar {
+  position: sticky; top: 0; z-index: 60; background: var(--c-rail);
+  border-bottom: 1px solid var(--c-border); padding: var(--sp-2) var(--sp-4);
+  display: flex; flex-direction: column; gap: var(--sp-2);
+}
+.preview-head { display: flex; align-items: baseline; justify-content: space-between; gap: var(--sp-3); flex-wrap: wrap; }
+.preview-head strong { font-size: var(--fs-md); color: var(--c-accent); }
+.preview-head span { font-size: var(--fs-xs); color: var(--c-muted); }
+.preview-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.preview-controls button {
+  font: inherit; font-size: var(--fs-xs); font-weight: 500; padding: 4px 10px;
+  border-radius: var(--radius-pill); border: 1px solid var(--c-border);
+  background: var(--c-surface); color: var(--c-text); cursor: pointer;
+  transition: border-color var(--dur-fast), background-color var(--dur-fast), color var(--dur-fast);
+}
+.preview-controls button:hover { border-color: var(--c-accent); color: var(--c-accent); }
+.preview-controls button.on { background: var(--c-accent-solid); border-color: var(--c-accent-solid); color: var(--c-on-accent); }
+.preview-controls button:focus-visible { outline: none; box-shadow: var(--focus-ring); }
+.preview-sep { width: 1px; height: 16px; background: var(--c-border); margin: 0 2px; }
+
+.stage-wrap {
+  max-width: 1360px; margin: var(--sp-4) auto var(--sp-6); padding: 0 var(--sp-4);
+  display: flex; flex-direction: column; gap: var(--sp-4);
+}
+
+/* ==================== 3. Studio C 骨架 ==================== */
+.studio-window {
+  display: grid; grid-template-columns: 232px minmax(0, 1fr); min-height: 760px;
+  background: var(--c-bg); border: 1px solid var(--c-border); border-radius: var(--radius-xl);
+  overflow: hidden; box-shadow: var(--shadow-studio);
+}
+.rail {
+  background: var(--c-rail); border-right: 1px solid var(--c-border);
+  padding: var(--sp-4) 10px; display: flex; flex-direction: column; gap: var(--sp-1);
+}
+.rail-head { padding: 0 10px 14px; display: flex; justify-content: space-between; align-items: center; gap: var(--sp-2); }
+.rail-brand { display: inline-flex; align-items: center; gap: var(--sp-2); font-weight: 700; font-size: 15px; color: var(--c-text); }
+.rail-conn { display: inline-flex; align-items: center; gap: 5px; font-size: var(--fs-xs); color: var(--c-muted); }
+.rail .nav-item {
+  display: flex; align-items: center; justify-content: space-between; gap: var(--sp-2);
+  width: 100%; font: inherit; font-size: var(--fs-sm); padding: 8px 12px; border: 0;
+  border-radius: var(--radius-sm); background: transparent; color: var(--c-muted); cursor: pointer; text-align: left;
+  transition: background-color var(--dur-fast), color var(--dur-fast);
+}
+.rail .nav-item:hover:not(:disabled) { color: var(--c-text); background: var(--c-surface-2); }
+.rail .nav-item.on { background: var(--c-accent-soft); color: var(--c-accent); font-weight: 600; }
+.rail .nav-item:disabled { opacity: 0.62; cursor: default; }
+.rail .nav-item:focus-visible { outline: none; box-shadow: var(--focus-ring); }
+.nav-item-label { display: inline-flex; align-items: center; gap: var(--sp-2); min-width: 0; }
+.rail-sep { height: 1px; background: var(--c-border); margin: var(--sp-2) 8px; }
+.rail-foot {
+  margin-top: auto; padding: 12px 10px 4px; border-top: 1px solid var(--c-border);
+  font-size: var(--fs-xs); color: var(--c-muted); display: flex; flex-direction: column; gap: var(--sp-2);
+}
+.rail-status-list { display: flex; flex-direction: column; gap: 5px; }
+.rail-status-row { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.rail-status-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rail-keys { display: flex; flex-direction: column; gap: 5px; padding-top: var(--sp-2); border-top: 1px dashed var(--c-border); }
+.rail-key-row { display: flex; align-items: center; justify-content: space-between; gap: var(--sp-2); }
+.rail-key-kbd {
+  font-family: var(--font-mono); font-size: 11px; padding: 1px 6px; border-radius: 4px;
+  border: 1px solid var(--c-border); background: var(--c-surface-2); color: var(--c-text); white-space: nowrap;
+}
+
+.studio-main { padding: 20px 26px 28px; display: flex; flex-direction: column; gap: var(--sp-4); min-width: 0; }
+.studio-head { display: flex; justify-content: space-between; align-items: flex-start; gap: var(--sp-3); flex-wrap: wrap; }
+.studio-head h1 { margin: 0; font-size: var(--fs-xl); color: var(--c-text); line-height: 1.25; }
+.studio-sub { margin-top: 4px; font-size: var(--fs-xs); color: var(--c-muted); }
+.studio-actions { display: flex; align-items: center; gap: var(--sp-2); flex-wrap: wrap; }
+.studio-panel { flex: 1; display: flex; flex-direction: column; gap: var(--sp-4); min-width: 0; }
+
+.studio-box {
+  background: var(--c-surface); border: 1px solid var(--c-border); border-radius: var(--radius-lg);
+  display: flex; flex-direction: column; overflow: hidden; min-width: 0;
+}
+.box-head {
+  flex-shrink: 0; padding: 9px 14px; border-bottom: 1px solid var(--c-border); background: var(--c-surface-2);
+  display: flex; align-items: center; justify-content: space-between; gap: var(--sp-2);
+  flex-wrap: wrap; font-size: var(--fs-xs); color: var(--c-muted); min-height: 42px;
+}
+.box-head-controls { display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.box-head select { font: inherit; font-size: var(--fs-xs); border: 1px solid var(--c-border); border-radius: var(--radius-sm); padding: 4px 8px; }
+.box-head select:focus-visible { outline: none; box-shadow: var(--focus-ring); }
+.box-body { flex: 1; padding: var(--sp-4); display: flex; flex-direction: column; gap: var(--sp-3); min-width: 0; }
+.box-foot {
+  flex-shrink: 0; padding: 8px 14px; border-top: 1px solid var(--c-border);
+  display: flex; justify-content: space-between; align-items: center; gap: var(--sp-2);
+  flex-wrap: wrap; font-size: var(--fs-xs); color: var(--c-muted);
+}
+.box-foot-right { display: inline-flex; align-items: center; gap: var(--sp-2); margin-left: auto; flex-wrap: wrap; }
+
+.box-empty {
+  margin: auto 0; text-align: center; color: var(--c-muted); font-size: var(--fs-sm);
+  line-height: 1.7; padding: var(--sp-4); display: flex; flex-direction: column; align-items: center; gap: var(--sp-2);
+}
+.box-loading {
+  margin: auto 0; display: flex; flex-direction: column; align-items: center; gap: var(--sp-3);
+  color: var(--c-accent); font-size: var(--fs-sm); padding: var(--sp-4);
+}
+.box-loading .progress { width: 180px; }
+.box-error {
+  padding: var(--sp-3) var(--sp-4); border-radius: var(--radius-md); background: var(--c-danger-soft);
+  color: var(--c-danger); font-size: var(--fs-sm); line-height: 1.6;
+  display: flex; align-items: flex-start; justify-content: space-between; gap: var(--sp-3); overflow-wrap: anywhere;
+}
+.box-error-main { display: flex; align-items: flex-start; gap: var(--sp-2); min-width: 0; flex: 1; }
+
+.cap-seg {
+  display: inline-flex; align-items: center; padding: 2px; border-radius: var(--radius-pill);
+  background: var(--c-surface); border: 1px solid var(--c-border); gap: 2px;
+}
+.cap-seg button {
+  font: inherit; font-size: var(--fs-xs); font-weight: 500; padding: 3px 9px; border: 0;
+  border-radius: var(--radius-pill); background: transparent; color: var(--c-muted);
+  cursor: pointer; white-space: nowrap; transition: background-color var(--dur-fast), color var(--dur-fast);
+}
+.cap-seg button:hover:not(:disabled) { color: var(--c-text); background: var(--c-surface-2); }
+.cap-seg button.on { background: var(--c-accent-soft); color: var(--c-accent); }
+.cap-seg button:disabled { opacity: 0.5; cursor: not-allowed; }
+.cap-seg button:focus-visible { outline: none; box-shadow: var(--focus-ring); }
+
+/* ==================== 4. 模板 B 布局：顶部链路条 + 左右并排对照工作台 ==================== */
+/* 顶部：顺序早停链路可视化条 */
+.pipeline-head {
+  padding: var(--sp-3) var(--sp-4);
+  background: var(--c-surface-2);
+  border-bottom: 1px solid var(--c-border);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-3);
+  flex-wrap: wrap;
+}
+.pipeline-title-wrap { display: flex; align-items: center; gap: var(--sp-2); flex-wrap: wrap; }
+.pipeline-title-wrap h2 { margin: 0; font-size: var(--fs-md); color: var(--c-text); }
+.pipeline-flow {
+  padding: 10px var(--sp-4);
+  border-bottom: 1px solid var(--c-border);
+  background: var(--c-surface);
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+  font-size: var(--fs-xs);
+}
+.flow-node {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border-radius: var(--radius-pill);
+  background: var(--c-accent-soft);
+  color: var(--c-accent);
+  font-weight: 500;
+  max-width: 240px;
+}
+.flow-node span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.flow-node.fallback {
+  background: var(--c-surface-2);
+  color: var(--c-muted);
+  border: 1px dashed var(--c-border);
+}
+.flow-arrow { color: var(--c-muted); font-size: 11px; }
+.pipeline-empty {
+  padding: var(--sp-4);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-4);
+  flex-wrap: wrap;
+}
+.pipeline-empty-text { display: flex; flex-direction: column; gap: 3px; min-width: 0; flex: 1 1 320px; }
+.pipeline-empty-text strong { font-size: var(--fs-sm); color: var(--c-text); }
+.pipeline-empty-text span { font-size: var(--fs-xs); color: var(--c-muted); }
+
+/* 紧凑预设行 */
+.preset-row {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  padding: 10px var(--sp-4);
+  border-top: 1px solid var(--c-border);
+  min-width: 0;
+  transition: background-color var(--dur-fast);
+}
+.preset-row:first-child { border-top: 0; }
+.preset-row.editing { background: var(--c-accent-soft); }
+.preset-rank { width: 52px; flex: none; display: flex; justify-content: center; }
+.preset-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+.preset-name-row { display: flex; align-items: center; gap: var(--sp-2); flex-wrap: wrap; min-width: 0; }
+.preset-name { font-weight: 600; font-size: var(--fs-sm); color: var(--c-text); overflow-wrap: anywhere; }
+.preset-chips { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.param-chip {
+  font-family: var(--font-mono); font-size: 11px; padding: 1px 7px; border-radius: 4px;
+  background: var(--c-surface-2); border: 1px solid var(--c-border); color: var(--c-muted);
+  font-variant-numeric: tabular-nums; white-space: nowrap;
+}
+.preset-ops { display: inline-flex; align-items: center; gap: 6px; flex-shrink: 0; }
+.preset-switch-box {
+  display: inline-flex; align-items: center; gap: 6px; margin-left: var(--sp-1);
+  padding-left: var(--sp-2); border-left: 1px solid var(--c-border);
+}
+.preset-limit-lbl { font-size: 11px; color: var(--c-muted); width: 52px; text-align: right; white-space: nowrap; }
+
+/* 下方工作台：左侧主对照+输出，右侧 344px 参数检视器 */
+.bench-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 344px;
+  gap: var(--sp-4);
+  align-items: start;
+}
+.bench-left { display: flex; flex-direction: column; gap: var(--sp-4); min-width: 0; }
+
+.ocr-dropzone {
+  margin: var(--sp-3); padding: var(--sp-5) var(--sp-4); min-height: 200px;
+  border: 1.5px dashed var(--c-border); border-radius: var(--radius-lg); background: var(--c-surface-2);
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: var(--sp-2); text-align: center; cursor: pointer;
+  transition: border-color var(--dur-fast), background-color var(--dur-fast);
+}
+.ocr-dropzone:hover, .ocr-dropzone.drag-over { border-color: var(--c-accent); background: var(--c-accent-soft); }
+.ocr-dropzone .ic { width: 26px; height: 26px; color: var(--c-accent); }
+
+.compare-wrap { padding: var(--sp-3); display: flex; flex-direction: column; gap: var(--sp-2); }
+.compare-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: var(--sp-3); }
+.compare-grid.single { grid-template-columns: minmax(0, 1fr); }
+.compare-pane { display: flex; flex-direction: column; gap: var(--sp-1); min-width: 0; }
+.compare-label { display: flex; align-items: center; justify-content: space-between; font-size: 11px; color: var(--c-muted); }
+.compare-frame {
+  position: relative; height: 158px; border-radius: var(--radius-md); border: 1px solid var(--c-border);
+  background: var(--c-bg); display: flex; align-items: center; justify-content: center; overflow: hidden;
+}
+.compare-frame canvas { max-width: 100%; max-height: 100%; display: block; }
+.compare-overlay {
+  position: absolute; inset: 0; background: var(--c-surface); opacity: 0.92;
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: var(--sp-2);
+  color: var(--c-accent); font-size: var(--fs-xs); padding: var(--sp-3); text-align: center;
+}
+.compare-overlay .progress { width: 140px; }
+
+/* 结果区 */
+.hit-strip {
+  display: flex; align-items: center; justify-content: space-between; gap: var(--sp-2); flex-wrap: wrap;
+  padding: var(--sp-2) var(--sp-3); border-radius: var(--radius-md);
+  background: var(--c-surface-2); border: 1px solid var(--c-border); font-size: var(--fs-xs);
+}
+.hit-strip-main { display: flex; align-items: center; gap: var(--sp-2); flex-wrap: wrap; min-width: 0; }
+.trace-pills { display: flex; align-items: center; gap: 5px; flex-wrap: wrap; font-size: 11px; color: var(--c-muted); font-variant-numeric: tabular-nums; }
+.trace-pill { padding: 1px 6px; border-radius: 4px; background: var(--c-surface); border: 1px solid var(--c-border); }
+.trace-pill.hit { border-color: var(--c-ok); color: var(--c-ok); background: var(--c-ok-soft); }
+.trace-pill.fallback { border-color: var(--c-warn); color: var(--c-warn); background: var(--c-warn-soft); }
+.studio-result-text {
+  white-space: pre-wrap; word-break: break-word; font-size: 14px; line-height: 1.7;
+  color: var(--c-text); font-family: var(--font-mono);
+}
+.studio-sub-block {
+  padding: var(--sp-3); border-radius: var(--radius-md); border: 1px solid var(--c-border);
+  background: var(--c-surface-2); font-size: var(--fs-xs);
+}
+.studio-sub-head { display: flex; justify-content: space-between; align-items: center; color: var(--c-muted); margin-bottom: var(--sp-1); }
+.studio-sub-text { white-space: pre-wrap; word-break: break-word; color: var(--c-text); font-size: var(--fs-sm); line-height: 1.65; }
+
+/* 右侧参数检视器 */
+.inspector-body { padding: var(--sp-4); display: flex; flex-direction: column; gap: var(--sp-4); }
+.inspector-block { display: flex; flex-direction: column; gap: var(--sp-2); }
+.inspector-label { font-size: var(--fs-xs); font-weight: 600; color: var(--c-text); display: flex; align-items: center; justify-content: space-between; gap: var(--sp-2); }
+.starter-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; }
+.starter-btn {
+  font: inherit; font-size: var(--fs-xs); font-weight: 500; padding: 6px 6px;
+  border-radius: var(--radius-md); border: 1px solid var(--c-border);
+  background: var(--c-surface-2); color: var(--c-text); cursor: pointer; text-align: center;
+  transition: border-color var(--dur-fast), background-color var(--dur-fast), color var(--dur-fast);
+}
+.starter-btn:hover { border-color: var(--c-accent); color: var(--c-accent); }
+.starter-btn.on { background: var(--c-accent-soft); border-color: var(--c-accent); color: var(--c-accent); }
+.starter-btn:focus-visible { outline: none; box-shadow: var(--focus-ring); }
+
+.ctrl-item { display: flex; flex-direction: column; gap: 6px; }
+.ctrl-item.disabled { opacity: 0.5; }
+.ctrl-top { display: flex; align-items: center; justify-content: space-between; gap: var(--sp-2); font-size: var(--fs-xs); }
+.ctrl-top-left { display: inline-flex; align-items: baseline; gap: 6px; color: var(--c-text); }
+.ctrl-top-left small { font-size: 11px; color: var(--c-muted); }
+.ctrl-val { font-family: var(--font-mono); font-size: var(--fs-xs); color: var(--c-muted); font-variant-numeric: tabular-nums; min-width: 44px; text-align: right; }
+.ctrl-switch-row {
+  display: flex; align-items: center; justify-content: space-between; gap: var(--sp-2);
+  padding: var(--sp-2) var(--sp-3); border-radius: var(--radius-md);
+  background: var(--c-surface-2); border: 1px solid var(--c-border);
+}
+.param-range { width: 100%; margin: 0; accent-color: var(--c-accent); cursor: pointer; }
+.param-range:disabled { cursor: not-allowed; }
+.param-range:focus-visible { outline: none; box-shadow: var(--focus-ring); border-radius: var(--radius-sm); }
+
+.inspector-actions {
+  display: flex; flex-direction: column; gap: var(--sp-2);
+  padding-top: var(--sp-3); border-top: 1px solid var(--c-border);
+}
+.inspector-btn-row { display: flex; gap: var(--sp-2); flex-wrap: wrap; }
+.inspector-btn-row .btn { flex: 1; }
+.save-err { font-size: var(--fs-xs); color: var(--c-danger); }
+
+/* ==================== 5. 底部说明与回调日志 ==================== */
+.notes-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: var(--sp-3); }
+.note-card {
+  background: var(--c-surface); border: 1px solid var(--c-border); border-radius: var(--radius-lg);
+  padding: var(--sp-4); font-size: var(--fs-sm);
+}
+.note-card h3 { margin: 0 0 var(--sp-2); font-size: var(--fs-md); color: var(--c-text); }
+.note-card ul { margin: 0; padding-left: 18px; color: var(--c-muted); }
+.note-card li { margin: 4px 0; line-height: 1.55; }
+.note-card strong { color: var(--c-text); }
+.note-card code {
+  font-family: var(--font-mono); font-size: var(--fs-xs); color: var(--c-accent);
+  background: var(--c-surface-2); padding: 1px 5px; border-radius: 4px;
+}
+.event-log {
+  font-family: var(--font-mono); font-size: var(--fs-xs); color: var(--c-muted);
+  background: var(--c-surface-2); border: 1px solid var(--c-border); border-radius: var(--radius-md);
+  padding: var(--sp-2) var(--sp-3); max-height: 116px; overflow: auto; white-space: pre-wrap; line-height: 1.55;
+}
+
+@media (max-width: 1060px) {
+  .bench-grid { grid-template-columns: 1fr; }
+}
+@media (max-width: 860px) {
+  .studio-window { grid-template-columns: 1fr; }
+  .rail { border-right: 0; border-bottom: 1px solid var(--c-border); }
+  .studio-main { padding: var(--sp-4); }
+  .compare-grid { grid-template-columns: 1fr; }
+  .preset-row { flex-wrap: wrap; }
+  .preset-ops { margin-left: auto; }
+}
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; transition-duration: 0.01ms !important; }
+}
+</style>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false">
+  <symbol id="i-mic" viewBox="0 0 24 24"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/></symbol>
+  <symbol id="i-copy" viewBox="0 0 24 24"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h8"/></symbol>
+  <symbol id="i-alert" viewBox="0 0 24 24"><path d="M12 3 2 21h20L12 3zM12 10v5M12 18h.01"/></symbol>
+  <symbol id="i-upload" viewBox="0 0 24 24"><path d="M12 16V4M6 10l6-6 6 6M4 20h16"/></symbol>
+  <symbol id="i-globe" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18"/></symbol>
+  <symbol id="i-scan" viewBox="0 0 24 24"><path d="M4 8V5a1 1 0 0 1 1-1h3M16 4h3a1 1 0 0 1 1 1v3M20 16v3a1 1 0 0 1-1 1h-3M8 20H5a1 1 0 0 1-1-1v-3M7 12h10"/></symbol>
+  <symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></symbol>
+  <symbol id="i-phone" viewBox="0 0 24 24"><rect x="7" y="2" width="10" height="20" rx="2"/><path d="M12 18h.01"/></symbol>
+  <symbol id="i-settings" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3h.1a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8v.1a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></symbol>
+  <symbol id="i-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></symbol>
+  <symbol id="i-moon" viewBox="0 0 24 24"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></symbol>
+  <symbol id="i-image" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="8.5" cy="9.5" r="1.5"/><path d="m21 15-5-5L5 20"/></symbol>
+  <symbol id="i-trash" viewBox="0 0 24 24"><path d="M3 6h18M8 6V4h8v2M6 6l1 14h10l1-14"/></symbol>
+  <symbol id="i-file-text" viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6M8 13h8M8 17h6M8 9h2"/></symbol>
+  <symbol id="i-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 16v-4M12 8h.01"/></symbol>
+  <symbol id="i-sliders" viewBox="0 0 24 24"><path d="M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3M2 14h4M10 8h4M18 16h4"/></symbol>
+  <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+  <symbol id="i-chevron-up" viewBox="0 0 24 24"><path d="m18 15-6-6-6 6"/></symbol>
+  <symbol id="i-chevron-down" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></symbol>
+  <symbol id="i-edit" viewBox="0 0 24 24"><path d="M12 20h9M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/></symbol>
+  <symbol id="i-play" viewBox="0 0 24 24"><path d="M7 4l13 8-13 8V4z"/></symbol>
+  <symbol id="i-rotate-ccw" viewBox="0 0 24 24"><path d="M3 12a9 9 0 1 0 3-6.7L3 8M3 3v5h5"/></symbol>
+</svg>
+
+<header class="preview-bar">
+  <div class="preview-head">
+    <strong>模板 B「顶部预设链路条 + 原图/处理后并排对照工作台」</strong>
+    <span>顶部呈现 1→2→3 顺序早停链路与预设清单，下方左侧默认原图/处理后并排画布与识别结果，右侧独立 5 参数检视器</span>
+  </div>
+  <div class="preview-controls" id="preview-controls">
+    <button type="button" data-state="empty">空态（无预设无图）</button>
+    <button type="button" data-state="tuning" class="on">有图调参中</button>
+    <button type="button" data-state="full">已存 3 条启用预设（满额）</button>
+    <button type="button" data-state="loading">加载中</button>
+    <button type="button" data-state="error">报错态</button>
+    <span class="preview-sep" aria-hidden="true"></span>
+    <button type="button" data-sample="dark" class="on">示例图：深底终端</button>
+    <button type="button" data-sample="gray">示例图：灰底弱对比</button>
+    <button type="button" data-sample="color">示例图：彩色字幕</button>
+    <span class="preview-sep" aria-hidden="true"></span>
+    <button type="button" id="btn-theme">主题：浅色（切深色）</button>
+  </div>
+</header>
+
+<main class="stage-wrap">
+  <div class="studio-window">
+    <aside class="rail">
+      <div class="rail-head">
+        <span class="rail-brand"><svg class="ic"><use href="#i-mic"/></svg>Voice Studio</span>
+        <span class="rail-conn"><span class="dot ok" aria-hidden="true"></span><span>已就绪</span></span>
+      </div>
+      <div role="navigation" aria-label="工作台导航">
+        <button type="button" class="nav-item" disabled><span class="nav-item-label"><svg class="ic"><use href="#i-globe"/></svg>翻译框 · 主页</span></button>
+        <button type="button" class="nav-item on" aria-current="page"><span class="nav-item-label"><svg class="ic"><use href="#i-scan"/></svg>图片 OCR 识别</span></button>
+        <button type="button" class="nav-item" disabled><span class="nav-item-label"><svg class="ic"><use href="#i-clock"/></svg>语音与翻译历史</span></button>
+        <button type="button" class="nav-item" disabled><span class="nav-item-label"><svg class="ic"><use href="#i-phone"/></svg>手机扫码语音</span></button>
+        <button type="button" class="nav-item" disabled>
+          <span class="nav-item-label"><svg class="ic"><use href="#i-settings"/></svg>模型与热键设置</span>
+          <span class="dot ok" aria-hidden="true"></span>
+        </button>
+        <button type="button" class="nav-item" disabled><span class="nav-item-label"><svg class="ic"><use href="#i-file-text"/></svg>运行日志</span></button>
+        <button type="button" class="nav-item" disabled><span class="nav-item-label"><svg class="ic"><use href="#i-info"/></svg>关于</span></button>
+      </div>
+      <div class="rail-sep" aria-hidden="true"></div>
+      <button type="button" class="nav-item" id="rail-theme-btn">
+        <span class="nav-item-label" id="rail-theme-label"><svg class="ic"><use href="#i-sun"/></svg>外观主题</span>
+        <span class="badge" id="rail-theme-badge">浅色</span>
+      </button>
+      <div class="rail-foot">
+        <div class="rail-status-list">
+          <div class="rail-status-row"><span class="dot ok" aria-hidden="true"></span><span class="rail-status-text">Qwen3-ASR-1.7B 就绪</span></div>
+          <div class="rail-status-row"><span class="dot ok" aria-hidden="true"></span><span class="rail-status-text">qwen3.5:4b 就绪</span></div>
+        </div>
+        <div class="rail-keys" aria-label="全局快捷键">
+          <div class="rail-key-row"><span>语音输入</span><kbd class="rail-key-kbd">Ctrl+Alt+Z</kbd></div>
+          <div class="rail-key-row"><span>截图翻译</span><kbd class="rail-key-kbd">Ctrl+Alt+X</kbd></div>
+          <div class="rail-key-row"><span>纯 OCR 识别</span><kbd class="rail-key-kbd">Ctrl+Alt+O</kbd></div>
+          <div class="rail-key-row"><span>重复上次输入</span><kbd class="rail-key-kbd">Ctrl+Alt+R</kbd></div>
+          <div class="rail-key-row"><span>截屏标注</span><kbd class="rail-key-kbd">Ctrl+Alt+A</kbd></div>
+        </div>
+      </div>
+    </aside>
+
+    <div class="studio-main">
+      <header class="studio-head">
+        <div>
+          <h1>图片 OCR 识别提取</h1>
+          <div class="studio-sub">拖入图片、选择文件或按 Ctrl+V 粘贴截图 · 预处理预设持久化生效于桌面截屏翻译、纯 OCR 与工作台图片 OCR</div>
+        </div>
+        <div class="studio-actions">
+          <button type="button" class="btn" id="btn-head-pick"><svg class="ic ic-sm"><use href="#i-upload"/></svg>选择图片</button>
+          <button type="button" class="btn" id="btn-run-chain"><svg class="ic ic-sm"><use href="#i-scan"/></svg>按启用预设链路识别</button>
+        </div>
+      </header>
+
+      <section class="studio-panel" aria-label="预设链路与并排对照工作台">
+        <!-- 顶部：全局预处理链路与预设列表 -->
+        <div class="studio-box">
+          <div class="pipeline-head">
+            <div class="pipeline-title-wrap">
+              <h2>全局 OCR 预处理预设链路</h2>
+              <span class="badge" id="quota-badge">已启用 0 / 3</span>
+              <span class="hint" id="quota-summary">按 1→2→3 依次识别，质量达标即停，全未达标自动补跑原图择优</span>
+            </div>
+            <div class="box-head-controls">
+              <button type="button" class="btn btn-sm" id="btn-toggle-list" aria-expanded="true">收起清单</button>
+              <button type="button" class="btn btn-sm" id="btn-new-preset"><svg class="ic ic-xs"><use href="#i-plus"/></svg>新建预设</button>
+            </div>
+          </div>
+
+          <div class="pipeline-flow" id="pipeline-flow" hidden></div>
+          <div id="presets-body"></div>
+        </div>
+
+        <!-- 下方：左宽（并排对照 + 试识别输出）右窄（5 参数检视器） -->
+        <div class="bench-grid">
+          <div class="bench-left">
+            <!-- 并排对照画布卡 -->
+            <div class="studio-box" id="drop-target-box">
+              <div class="box-head">
+                <span>图像预处理对照</span>
+                <div class="box-head-controls">
+                  <div class="cap-seg" id="view-mode-seg" role="group" aria-label="画布视图">
+                    <button type="button" data-view="split" class="on">并排对照</button>
+                    <button type="button" data-view="processed">仅看处理后</button>
+                    <button type="button" data-view="original">仅看原图</button>
+                  </div>
+                </div>
+              </div>
+
+              <input type="file" id="ocr-file-input" accept="image/*" hidden />
+
+              <div class="ocr-dropzone" id="ocr-dropzone" tabindex="0" role="button" aria-label="点击选择图片，或拖入图片、按 Ctrl+V 粘贴截图">
+                <svg class="ic"><use href="#i-image"/></svg>
+                <div style="font-weight:600;color:var(--c-text)">点击选择图片 · 拖拽图片到此 · Ctrl+V 粘贴截图</div>
+                <div class="muted" style="font-size:var(--fs-xs)">支持 PNG / JPEG / WebP，贴图后右侧调参即刻同步左右对照</div>
+              </div>
+
+              <div class="compare-wrap" id="compare-wrap" hidden>
+                <div class="compare-grid" id="compare-grid">
+                  <div class="compare-pane" id="pane-orig">
+                    <div class="compare-label"><span>原图（未处理）</span><span class="mono" id="dim-orig">560 × 210</span></div>
+                    <div class="compare-frame"><canvas id="canvas-orig"></canvas></div>
+                  </div>
+                  <div class="compare-pane" id="pane-proc">
+                    <div class="compare-label"><span>预处理效果预览</span><span class="mono" id="proc-meta">灰度增强</span></div>
+                    <div class="compare-frame">
+                      <canvas id="canvas-proc"></canvas>
+                      <div class="compare-overlay" id="preview-loading-overlay" hidden>
+                        <span>后端正在计算预览图…</span>
+                        <div class="progress" aria-hidden="true"><i></i></div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+                <div class="box-error" id="preview-error-box" hidden role="alert">
+                  <div class="box-error-main"><svg class="ic ic-sm"><use href="#i-alert"/></svg><span id="preview-error-text"></span></div>
+                  <button type="button" class="btn btn-sm" id="btn-retry-preview">重试</button>
+                </div>
+              </div>
+
+              <div class="box-foot">
+                <span id="algo-foot-note">预览与正式识别共用后端同一算法（模板内 Canvas 仅作视觉演示）</span>
+                <div class="box-foot-right">
+                  <span class="mono muted" id="ocr-file-label">未选择图片</span>
+                  <button type="button" class="btn btn-sm" id="btn-foot-pick"><svg class="ic ic-xs"><use href="#i-upload"/></svg>换图</button>
+                  <button type="button" class="btn btn-sm" id="btn-ocr-clear"><svg class="ic ic-xs"><use href="#i-trash"/></svg>清除</button>
+                </div>
+              </div>
+            </div>
+
+            <!-- 识别输出卡 -->
+            <div class="studio-box">
+              <div class="box-head">
+                <div class="box-head-controls">
+                  <span>识别结果与质量摘要</span>
+                  <span class="badge" id="result-hit-badge">等待识别</span>
+                </div>
+                <select id="ocr-mode-select" aria-label="OCR 处理方式">
+                  <option value="raw">纯提取文字（不翻译）</option>
+                  <option value="zh-en">提取并翻译：中 ⇄ 英</option>
+                </select>
+              </div>
+              <div class="box-body" id="ocr-out-body"></div>
+              <div class="box-foot">
+                <span id="ocr-out-meta">识别结果可直接复制</span>
+                <div class="box-foot-right">
+                  <span class="saved" id="ocr-copy-feedback" hidden>已复制</span>
+                  <button type="button" class="btn btn-sm" id="btn-copy-trans" hidden><svg class="ic ic-xs"><use href="#i-copy"/></svg>复制译文</button>
+                  <button type="button" class="btn btn-sm" id="btn-copy-raw"><svg class="ic ic-xs"><use href="#i-copy"/></svg>复制 OCR 原文</button>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- 右侧固定宽度：5 参数调校检视器 -->
+          <div class="studio-box">
+            <div class="box-head">
+              <div class="box-head-controls">
+                <svg class="ic ic-sm"><use href="#i-sliders"/></svg>
+                <span style="font-weight:600;color:var(--c-text)" id="editor-title">新建预处理预设</span>
+                <span class="badge accent" id="editor-badge" hidden>编辑中</span>
+              </div>
+              <button type="button" class="btn btn-sm" id="btn-reset-params"><svg class="ic ic-xs"><use href="#i-rotate-ccw"/></svg>重置</button>
+            </div>
+
+            <div class="inspector-body">
+              <div class="inspector-block">
+                <div class="inspector-label"><span>内置起步参考模板</span><span class="hint">一键套用后微调</span></div>
+                <div class="starter-grid">
+                  <button type="button" class="starter-btn" data-starter="dark_invert">深底反色</button>
+                  <button type="button" class="starter-btn" data-starter="low_contrast">低对比增强</button>
+                  <button type="button" class="starter-btn" data-starter="strong_binary">强黑白二值化</button>
+                </div>
+              </div>
+
+              <div class="inspector-block">
+                <div class="ctrl-switch-row">
+                  <div>
+                    <div style="font-size:var(--fs-xs);font-weight:600;color:var(--c-text)">反色</div>
+                    <div class="hint" id="invert-hint">深底浅字转白底黑字</div>
+                  </div>
+                  <button type="button" class="switch" id="param-invert" role="switch" aria-checked="false" aria-label="反色开关"></button>
+                </div>
+
+                <div class="ctrl-item">
+                  <div class="ctrl-top">
+                    <span class="ctrl-top-left"><label for="param-contrast">对比度</label><small>0.5 ~ 3.0</small></span>
+                    <span class="ctrl-val" id="val-contrast">1.00</span>
+                  </div>
+                  <input type="range" class="param-range" id="param-contrast" min="0.5" max="3.0" step="0.05" value="1.0" />
+                </div>
+
+                <div class="ctrl-item">
+                  <div class="ctrl-top">
+                    <span class="ctrl-top-left"><label for="param-brightness">亮度</label><small>0.5 ~ 2.0</small></span>
+                    <span class="ctrl-val" id="val-brightness">1.00</span>
+                  </div>
+                  <input type="range" class="param-range" id="param-brightness" min="0.5" max="2.0" step="0.05" value="1.0" />
+                </div>
+
+                <div class="ctrl-item">
+                  <div class="ctrl-top">
+                    <span class="ctrl-top-left"><label for="param-sharpen">锐化</label><small>0.0 ~ 3.0</small></span>
+                    <span class="ctrl-val" id="val-sharpen">0.0</span>
+                  </div>
+                  <input type="range" class="param-range" id="param-sharpen" min="0.0" max="3.0" step="0.1" value="0.0" />
+                </div>
+
+                <div class="ctrl-item">
+                  <div class="ctrl-top">
+                    <span class="ctrl-top-left"><span>黑白二值化阈值</span><small>消噪转纯黑白</small></span>
+                    <span class="ctrl-val" id="val-binarize">关闭</span>
+                  </div>
+                  <div class="cap-seg" id="binarize-seg" role="group" aria-label="二值化模式" style="width:100%;justify-content:space-between">
+                    <button type="button" data-bin="off" class="on" style="flex:1">关闭</button>
+                    <button type="button" data-bin="otsu" style="flex:1">自动 (Otsu)</button>
+                    <button type="button" data-bin="manual" style="flex:1">手动</button>
+                  </div>
+                </div>
+
+                <div class="ctrl-item disabled" id="row-threshold">
+                  <div class="ctrl-top">
+                    <span class="ctrl-top-left"><label for="param-threshold">手动阈值</label><small>0 ~ 255</small></span>
+                    <span class="ctrl-val" id="val-threshold">--</span>
+                  </div>
+                  <input type="range" class="param-range" id="param-threshold" min="0" max="255" step="1" value="128" disabled />
+                </div>
+              </div>
+
+              <div class="inspector-actions">
+                <label class="inspector-label" for="preset-name-input"><span>预设名称</span><span class="saved" id="save-feedback" hidden>已保存到配置</span></label>
+                <input type="text" class="field" id="preset-name-input" maxlength="48" placeholder="例如：深底终端白字" />
+                <div class="save-err" id="save-error" hidden></div>
+                <div class="inspector-btn-row">
+                  <button type="button" class="btn btn-sm" id="btn-run-draft"><svg class="ic ic-xs"><use href="#i-play"/></svg>当前参数试识别</button>
+                  <button type="button" class="btn primary btn-sm" id="btn-save-preset">保存为新预设</button>
+                </div>
+                <button type="button" class="btn btn-sm" id="btn-cancel-edit" hidden>取消编辑并恢复新建</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+    </div>
+  </div>
+
+  <div class="note-card">
+    <h3>前端触发动作日志（真实实现中预览与识别均由后端执行，配置写回后刷新态）</h3>
+    <div class="event-log" id="event-log"></div>
+  </div>
+
+  <div class="notes-grid">
+    <div class="note-card">
+      <h3>1. 展示的数据字段</h3>
+      <ul>
+        <li><strong>顶部链路与预设列表</strong>：<code>ocr_preprocess_presets[]</code>（<code>id / name / enabled / invert / contrast / brightness / sharpen / binarize_mode / threshold</code>）、启用计数（上限 <code>3</code>）与 1→2→3→原图兜底链路节点。</li>
+        <li><strong>对照画布与识别结果</strong>：<code>previewUrl</code>、<code>processedPreviewUrl</code>、<code>previewPhase</code>、<code>mode</code>、<code>lang_pair</code>、<code>ocr_text</code>、<code>text</code>、<code>ocrMeta</code>（含 <code>attempts[]</code> 与 <code>fallback_to_original</code> 兜底标记）。</li>
+        <li><strong>右侧参数检视器</strong>：<code>starterTemplates[]</code>（3 套起步模板）、<code>editingPresetId</code>、<code>draft</code>、校验错误与保存反馈。</li>
+      </ul>
+    </div>
+    <div class="note-card">
+      <h3>2. 触发的动作回调</h3>
+      <ul>
+        <li><code>onRequestPreprocessPreview({ file, params })</code>：右侧检视器参数变动时防抖调用 <code>POST /api/v1/ocr/preview</code> 刷新左侧处理图。</li>
+        <li><code>onSubmitImage({ file, mode, lang_pair?, panel: "ocr", preprocess_params? })</code>：区分顶部「按启用预设链路识别」与右侧「当前参数试识别」。</li>
+        <li><code>onSaveOcrPresets({ presets, action, targetId? })</code>：新建/更新/删除（经确认弹窗）/启停/上下移调序持久化至 <code>POST /api/v1/config</code>（非乐观更新）。</li>
+      </ul>
+    </div>
+    <div class="note-card">
+      <h3>3. 复用的现有界面、组件与文件</h3>
+      <ul>
+        <li><code>static/v3/css/theme.css</code> &amp; <code>studio.css</code>：沿用 <code>.studio-window</code>、7 项 <code>.rail</code>、<code>.studio-box</code>、<code>.cap-seg</code>、<code>.switch</code>、<code>.ocr-dropzone</code>、<code>.v3-confirm</code> 与双主题令牌。</li>
+        <li><code>static/v3/js/home.js</code> / <code>confirm.js</code> / <code>icons.js</code> / <code>defaults.js</code> / <code>labels.js</code>：在 <code>activePanel === "ocr"</code> 内拆出独立纯 UI 模块挂载，保留既有粘贴与选图流。</li>
+        <li><code>static/v3/js/business/home-controller.js</code> / <code>setup-actions.js</code> / <code>clipboard.js</code>。</li>
+      </ul>
+    </div>
+  </div>
+</main>
+
+<div class="v3-confirm" id="confirm-modal" role="dialog" aria-modal="true" aria-labelledby="confirm-title" hidden>
+  <div class="v3-confirm-card">
+    <h2 id="confirm-title">删除预处理预设？</h2>
+    <div class="v3-confirm-warn">删除后将从本地配置移除，桌面截屏翻译、纯 OCR 与工作台图片 OCR 将不再使用该预设。</div>
+    <div class="actions">
+      <button type="button" class="btn" id="confirm-cancel">取消</button>
+      <button type="button" class="btn primary" id="confirm-ok">确认删除</button>
+    </div>
+  </div>
+</div>
+
+<script>
+(function () {
+  "use strict";
+
+  var MAX_ENABLED = 3;
+  var DEFAULT_PARAMS = { invert: false, contrast: 1.0, brightness: 1.0, sharpen: 0.0, binarize_mode: "off", threshold: 128 };
+  var STARTERS = {
+    dark_invert: { label: "深底反色", suggestedName: "深底反色终端", params: { invert: true, contrast: 1.65, brightness: 1.05, sharpen: 0.8, binarize_mode: "off", threshold: 128 } },
+    low_contrast: { label: "低对比增强", suggestedName: "低对比灰字增强", params: { invert: false, contrast: 2.3, brightness: 1.15, sharpen: 1.6, binarize_mode: "off", threshold: 128 } },
+    strong_binary: { label: "强黑白二值化", suggestedName: "强黑白字幕二值化", params: { invert: false, contrast: 1.8, brightness: 1.0, sharpen: 1.0, binarize_mode: "otsu", threshold: 142 } }
+  };
+  var SAMPLES = {
+    dark: {
+      fileName: "dark-terminal-error.png",
+      rawText: "Traceback (most recent call last):\n  File \"ocr_pipeline.py\", line 84, in run_chain\nRuntimeError: low contrast dark background detected",
+      transText: "回溯追踪（最近一次调用）：\n  文件 \"ocr_pipeline.py\"，第 84 行，位于 run_chain\n运行时错误：检测到低对比度深色背景"
+    },
+    gray: {
+      fileName: "low-contrast-release-note.png",
+      rawText: "Release v3.5 · Local OCR Preprocessing\nGray-on-gray notice text with low ink contrast\nStatus: Ready for sequential early-stop check",
+      transText: "版本 v3.5 · 本地 OCR 预处理\n灰底浅灰弱对比度提示文本\n状态：已就绪，可进入顺序早停识别检查"
+    },
+    color: {
+      fileName: "video-subtitle-banner.png",
+      rawText: "LOCAL OFFLINE OCR · ZERO CLOUD UPLOAD\nPress Ctrl+Alt+X to capture and translate",
+      transText: "本地离线 OCR · 零云端上传\n按 Ctrl+Alt+X 进行截屏并翻译"
+    }
+  };
+
+  var state = {
+    theme: "light",
+    sampleKey: "dark",
+    hasImage: true,
+    fileName: SAMPLES.dark.fileName,
+    sourceCanvas: null,
+    viewMode: "split",
+    ocrMode: "zh-en",
+    phase: "result",
+    previewPhase: "ready",
+    previewError: "",
+    errorText: "",
+    listExpanded: true,
+    ocrText: SAMPLES.dark.rawText,
+    transText: SAMPLES.dark.transText,
+    ocrMeta: {},
+    editingPresetId: null,
+    activeStarter: "dark_invert",
+    draft: Object.assign({ name: "深底终端报错截图" }, STARTERS.dark_invert.params),
+    presets: [],
+    pendingDeleteId: null,
+    lastOtsu: 132
+  };
+
+  var $ = function (id) { return document.getElementById(id); };
+  function escapeHtml(s) {
+    return String(s == null ? "" : s).replace(/[&<>"']/g, function (c) {
+      return ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c];
+    });
+  }
+  function logEvent(name, detail) {
+    var el = $("event-log");
+    var ts = new Date().toTimeString().slice(0, 8);
+    el.textContent = (el.textContent ? el.textContent + "\n" : "") + "[" + ts + "] " + name + (detail ? " " + JSON.stringify(detail) : "");
+    el.scrollTop = el.scrollHeight;
+  }
+  function enabledPresets() { return state.presets.filter(function (p) { return p.enabled; }); }
+
+  function buildSampleCanvas(kind) {
+    var c = document.createElement("canvas");
+    c.width = 560; c.height = 210;
+    var ctx = c.getContext("2d");
+    if (kind === "dark") {
+      ctx.fillStyle = "#161b26"; ctx.fillRect(0, 0, c.width, c.height);
+      ctx.fillStyle = "#1f2737"; ctx.fillRect(0, 0, c.width, 32);
+      ctx.fillStyle = "#7c8ea8"; ctx.font = "13px monospace"; ctx.fillText("bash — ollama-voice-input · dark terminal", 16, 21);
+      ctx.fillStyle = "#8aa4c8"; ctx.font = "16px monospace"; ctx.fillText("Traceback (most recent call last):", 20, 74);
+      ctx.fillStyle = "#7793b5"; ctx.fillText("  File \"ocr_pipeline.py\", line 84, in run_chain", 20, 110);
+      ctx.fillStyle = "#b77a82"; ctx.fillText("RuntimeError: low contrast dark background", 20, 148);
+      ctx.fillStyle = "#5f7490"; ctx.font = "13px monospace"; ctx.fillText("hint: invert + contrast improves Tesseract score", 20, 184);
+    } else if (kind === "gray") {
+      ctx.fillStyle = "#dcdfe6"; ctx.fillRect(0, 0, c.width, c.height);
+      ctx.fillStyle = "#e6e9ef"; ctx.fillRect(16, 16, c.width - 32, c.height - 32);
+      ctx.strokeStyle = "#cbd0da"; ctx.strokeRect(16, 16, c.width - 32, c.height - 32);
+      ctx.fillStyle = "#8e96a4"; ctx.font = "600 18px sans-serif"; ctx.fillText("Release v3.5 · Local OCR Preprocessing", 34, 66);
+      ctx.fillStyle = "#9aa2b0"; ctx.font = "15px sans-serif";
+      ctx.fillText("Gray-on-gray notice text with low ink contrast", 34, 108);
+      ctx.fillText("Status: Ready for sequential early-stop check", 34, 144);
+      ctx.fillStyle = "#a3aab7"; ctx.font = "13px monospace"; ctx.fillText("contrast=2.30  brightness=1.15  sharpen=1.6", 34, 178);
+    } else {
+      var grad = ctx.createLinearGradient(0, 0, c.width, c.height);
+      grad.addColorStop(0, "#24496e"); grad.addColorStop(0.5, "#3f7d6e"); grad.addColorStop(1, "#6c527a");
+      ctx.fillStyle = grad; ctx.fillRect(0, 0, c.width, c.height);
+      for (var y = 0; y < c.height; y += 14) { ctx.fillStyle = "rgba(255,255,255,0.08)"; ctx.fillRect(0, y, c.width, 5); }
+      ctx.fillStyle = "rgba(18, 22, 30, 0.38)"; ctx.fillRect(24, 56, c.width - 48, 104);
+      ctx.fillStyle = "#fef08a"; ctx.font = "700 20px sans-serif"; ctx.fillText("LOCAL OFFLINE OCR · ZERO CLOUD UPLOAD", 44, 100);
+      ctx.fillStyle = "#f1f5f9"; ctx.font = "600 16px sans-serif"; ctx.fillText("Press Ctrl+Alt+X to capture and translate", 44, 138);
+    }
+    return c;
+  }
+
+  function clampByte(v) { return v < 0 ? 0 : (v > 255 ? 255 : v); }
+  function computeOtsu(gray) {
+    var hist = new Uint32Array(256), total = gray.length;
+    for (var i = 0; i < total; i++) hist[gray[i]]++;
+    var sum = 0; for (var t = 0; t < 256; t++) sum += t * hist[t];
+    var sumB = 0, wB = 0, wF = 0, maxVar = -1, thr = 128;
+    for (var k = 0; k < 256; k++) {
+      wB += hist[k]; if (!wB) continue;
+      wF = total - wB; if (!wF) break;
+      sumB += k * hist[k];
+      var mB = sumB / wB, mF = (sum - sumB) / wF;
+      var between = wB * wF * (mB - mF) * (mB - mF);
+      if (between > maxVar) { maxVar = between; thr = k; }
+    }
+    return thr;
+  }
+
+  function renderProcessed(srcCanvas, dstCanvas, params) {
+    if (!srcCanvas || !dstCanvas) return;
+    var w = srcCanvas.width, h = srcCanvas.height;
+    dstCanvas.width = w; dstCanvas.height = h;
+    var img = srcCanvas.getContext("2d").getImageData(0, 0, w, h);
+    var d = img.data, len = w * h, gray = new Uint8ClampedArray(len);
+    var c = Number(params.contrast) || 1.0, b = Number(params.brightness) || 1.0, sh = Number(params.sharpen) || 0.0;
+    for (var i = 0; i < len; i++) {
+      var idx = i * 4;
+      var lum = 0.299 * d[idx] + 0.587 * d[idx + 1] + 0.114 * d[idx + 2];
+      if (params.invert) lum = 255 - lum;
+      lum = ((lum - 128) * c + 128) * b;
+      gray[i] = clampByte(Math.round(lum));
+    }
+    var out = gray;
+    if (sh > 0.01) {
+      out = new Uint8ClampedArray(len);
+      var k = sh * 0.45;
+      for (var y = 0; y < h; y++) {
+        for (var x = 0; x < w; x++) {
+          var p = y * w + x;
+          if (x === 0 || y === 0 || x === w - 1 || y === h - 1) out[p] = gray[p];
+          else {
+            var avg = (gray[p - 1] + gray[p + 1] + gray[p - w] + gray[p + w]) * 0.25;
+            out[p] = clampByte(Math.round(gray[p] + (gray[p] - avg) * (k * 4)));
+          }
+        }
+      }
+    }
+    var thr = params.binarize_mode === "otsu" ? (state.lastOtsu = computeOtsu(out)) : (params.binarize_mode === "manual" ? Number(params.threshold) : null);
+    for (var j = 0; j < len; j++) {
+      var v = thr !== null ? (out[j] >= thr ? 255 : 0) : out[j];
+      var o = j * 4; d[o] = v; d[o + 1] = v; d[o + 2] = v; d[o + 3] = 255;
+    }
+    dstCanvas.getContext("2d").putImageData(img, 0, 0);
+  }
+
+  function paramChips(p) {
+    var arr = [];
+    if (p.invert) arr.push("反色");
+    arr.push("对比 " + Number(p.contrast).toFixed(2));
+    arr.push("亮度 " + Number(p.brightness).toFixed(2));
+    if (Number(p.sharpen) > 0) arr.push("锐化 " + Number(p.sharpen).toFixed(1));
+    arr.push(p.binarize_mode === "otsu" ? "二值化 自动" : (p.binarize_mode === "manual" ? ("二值化 " + p.threshold) : "二值化 关"));
+    return arr.map(function (t) { return '<span class="param-chip">' + t + '</span>'; }).join("");
+  }
+
+  function renderTheme() {
+    document.documentElement.dataset.theme = state.theme;
+    var dark = state.theme === "dark";
+    $("btn-theme").textContent = dark ? "主题：深色（切浅色）" : "主题：浅色（切深色）";
+    $("rail-theme-badge").textContent = dark ? "深色" : "浅色";
+    $("rail-theme-label").innerHTML = '<svg class="ic"><use href="#i-' + (dark ? "moon" : "sun") + '"/></svg>外观主题';
+  }
+
+  function renderPipeline() {
+    var en = enabledPresets(), count = en.length, atLimit = count >= MAX_ENABLED;
+    var qb = $("quota-badge");
+    qb.className = "badge " + (count === 0 ? "" : (atLimit ? "warn" : "accent"));
+    qb.textContent = "已启用 " + count + " / " + MAX_ENABLED + (atLimit ? " · 已达上限" : "");
+    $("quota-summary").textContent = count === 0
+      ? "未启用预设时直接按默认原图识别"
+      : (atLimit ? "按 1→2→3 依次识别，质量达标即停，全未达标自动补跑原图择优（启用其他前请先停用一条）" : "按 1→" + count + " 依次识别，质量达标即停，全未达标自动补跑原图择优");
+
+    var toggleBtn = $("btn-toggle-list");
+    toggleBtn.hidden = !state.presets.length;
+    toggleBtn.textContent = state.listExpanded ? ("收起清单（" + state.presets.length + "）") : ("展开清单（" + state.presets.length + "）");
+    toggleBtn.setAttribute("aria-expanded", String(state.listExpanded));
+
+    var flowEl = $("pipeline-flow");
+    if (count > 0) {
+      flowEl.hidden = false;
+      flowEl.innerHTML = '<span class="muted">执行顺序：</span>' +
+        en.map(function (p, i) {
+          return (i > 0 ? '<span class="flow-arrow" aria-hidden="true">→</span>' : '') +
+            '<span class="flow-node" title="' + escapeHtml(p.name) + '"><b>' + (i + 1) + '</b><span>' + escapeHtml(p.name) + '</span></span>';
+        }).join("") +
+        '<span class="flow-arrow" aria-hidden="true">→</span>' +
+        '<span class="flow-node fallback"><span>全未达标：补跑原图择优</span></span>';
+    } else {
+      flowEl.hidden = true;
+    }
+
+    var body = $("presets-body");
+    if (!state.presets.length) {
+      body.hidden = false;
+      body.innerHTML = '<div class="pipeline-empty">' +
+        '<div class="pipeline-empty-text">' +
+          '<strong>当前未启用预处理预设，截屏翻译、纯 OCR 与工作台图片 OCR 均按默认原图识别</strong>' +
+          '<span>在下方粘贴截图并用右侧 5 个参数调校满意后保存，或一键套用内置参考模板起步。</span>' +
+        '</div>' +
+        '<div class="box-head-controls">' +
+          '<button type="button" class="btn btn-sm" data-empty-starter="dark_invert">深底反色</button>' +
+          '<button type="button" class="btn btn-sm" data-empty-starter="low_contrast">低对比增强</button>' +
+          '<button type="button" class="btn btn-sm" data-empty-starter="strong_binary">强黑白二值化</button>' +
+        '</div>' +
+      '</div>';
+      body.querySelectorAll("[data-empty-starter]").forEach(function (b) {
+        b.addEventListener("click", function () { applyStarter(b.dataset.emptyStarter); $("preset-name-input").focus(); });
+      });
+      return;
+    }
+
+    body.hidden = !state.listExpanded;
+    var rankNo = 0;
+    body.innerHTML = state.presets.map(function (p, idx) {
+      var rank = p.enabled ? (++rankNo) : null;
+      var locked = !p.enabled && atLimit;
+      var isEd = state.editingPresetId === p.id;
+      return '<div class="preset-row' + (isEd ? ' editing' : '') + '">' +
+        '<div class="preset-rank">' + (rank ? '<span class="badge accent">顺位 ' + rank + '</span>' : '<span class="badge">未启用</span>') + '</div>' +
+        '<div class="preset-main">' +
+          '<div class="preset-name-row"><span class="preset-name">' + escapeHtml(p.name) + '</span>' + (isEd ? '<span class="badge accent">正在右侧编辑</span>' : '') + '</div>' +
+          '<div class="preset-chips">' + paramChips(p) + '</div>' +
+        '</div>' +
+        '<div class="preset-ops">' +
+          '<button type="button" class="btn btn-sm btn-icon" data-act="up" data-id="' + p.id + '" ' + (idx === 0 ? 'disabled' : '') + ' title="上移" aria-label="上移"><svg class="ic ic-xs"><use href="#i-chevron-up"/></svg></button>' +
+          '<button type="button" class="btn btn-sm btn-icon" data-act="down" data-id="' + p.id + '" ' + (idx === state.presets.length - 1 ? 'disabled' : '') + ' title="下移" aria-label="下移"><svg class="ic ic-xs"><use href="#i-chevron-down"/></svg></button>' +
+          '<button type="button" class="btn btn-sm" data-act="edit" data-id="' + p.id + '"><svg class="ic ic-xs"><use href="#i-edit"/></svg>编辑</button>' +
+          '<button type="button" class="btn btn-sm danger-outline" data-act="delete" data-id="' + p.id + '"><svg class="ic ic-xs"><use href="#i-trash"/></svg>删除</button>' +
+          '<div class="preset-switch-box">' +
+            '<span class="preset-limit-lbl">' + (p.enabled ? '已启用' : (locked ? '已达上限' : '已停用')) + '</span>' +
+            '<button type="button" class="switch" role="switch" data-act="toggle" data-id="' + p.id + '" aria-checked="' + (p.enabled ? 'true' : 'false') + '" ' + (locked ? 'disabled aria-disabled="true" title="最多同时启用 3 个预设，请先停用其他预设"' : 'title="切换启用状态"') + ' aria-label="切换启用状态"></button>' +
+          '</div>' +
+        '</div>' +
+      '</div>';
+    }).join("");
+  }
+
+  function renderCompare() {
+    var hasImg = state.hasImage && !!state.sourceCanvas;
+    $("ocr-dropzone").hidden = hasImg;
+    $("compare-wrap").hidden = !hasImg;
+    $("ocr-file-label").textContent = hasImg ? state.fileName : "未选择图片";
+    $("btn-run-chain").disabled = !hasImg || state.phase === "loading";
+    $("btn-run-draft").disabled = !hasImg || state.phase === "loading";
+
+    $("view-mode-seg").querySelectorAll("button").forEach(function (b) {
+      b.classList.toggle("on", b.dataset.view === state.viewMode);
+      b.disabled = !hasImg;
+    });
+    if (!hasImg) return;
+
+    var cOrig = $("canvas-orig");
+    cOrig.width = state.sourceCanvas.width; cOrig.height = state.sourceCanvas.height;
+    cOrig.getContext("2d").drawImage(state.sourceCanvas, 0, 0);
+    $("dim-orig").textContent = state.sourceCanvas.width + " × " + state.sourceCanvas.height;
+
+    renderProcessed(state.sourceCanvas, $("canvas-proc"), state.draft);
+
+    $("compare-grid").classList.toggle("single", state.viewMode !== "split");
+    $("pane-orig").hidden = state.viewMode === "processed";
+    $("pane-proc").hidden = state.viewMode === "original";
+
+    $("preview-loading-overlay").hidden = state.previewPhase !== "loading";
+    $("preview-error-box").hidden = !(state.previewPhase === "error" && state.previewError);
+    $("preview-error-text").textContent = state.previewError || "";
+
+    $("proc-meta").textContent = state.draft.binarize_mode === "otsu"
+      ? ("Otsu 自动阈值 ≈ " + state.lastOtsu)
+      : (state.draft.binarize_mode === "manual" ? ("手动阈值 " + state.draft.threshold) : "灰度增强模式");
+  }
+
+  function renderInspector() {
+    var d = state.draft;
+    var ed = state.editingPresetId ? state.presets.find(function (p) { return p.id === state.editingPresetId; }) : null;
+    $("editor-title").textContent = ed ? ("编辑：" + ed.name) : "新建预处理预设";
+    $("editor-badge").hidden = !ed;
+    $("btn-cancel-edit").hidden = !ed;
+    $("btn-save-preset").textContent = ed ? "更新当前预设" : "保存为新预设";
+
+    document.querySelectorAll(".starter-btn").forEach(function (b) {
+      b.classList.toggle("on", b.dataset.starter === state.activeStarter);
+    });
+    $("param-invert").setAttribute("aria-checked", d.invert ? "true" : "false");
+    $("invert-hint").textContent = d.invert ? "已开启 · 深底浅字转为白底黑字" : "关闭 · 深底浅字时建议开启";
+
+    $("param-contrast").value = d.contrast; $("val-contrast").textContent = Number(d.contrast).toFixed(2);
+    $("param-brightness").value = d.brightness; $("val-brightness").textContent = Number(d.brightness).toFixed(2);
+    $("param-sharpen").value = d.sharpen; $("val-sharpen").textContent = Number(d.sharpen).toFixed(1);
+
+    $("binarize-seg").querySelectorAll("button").forEach(function (b) { b.classList.toggle("on", b.dataset.bin === d.binarize_mode); });
+    $("val-binarize").textContent = ({ off: "关闭", otsu: "自动", manual: "手动" })[d.binarize_mode] || "关闭";
+
+    var manual = d.binarize_mode === "manual";
+    $("row-threshold").classList.toggle("disabled", !manual);
+    $("param-threshold").disabled = !manual;
+    $("param-threshold").value = d.threshold;
+    $("val-threshold").textContent = manual ? String(d.threshold) : (d.binarize_mode === "otsu" ? "Otsu" : "--");
+    if (document.activeElement !== $("preset-name-input")) $("preset-name-input").value = d.name || "";
+  }
+
+  function renderOutput() {
+    var body = $("ocr-out-body"), badge = $("result-hit-badge"), metaEl = $("ocr-out-meta");
+    var copyRaw = $("btn-copy-raw"), copyTrans = $("btn-copy-trans");
+    $("ocr-mode-select").value = state.ocrMode;
+
+    if (state.phase === "loading") {
+      badge.className = "badge accent"; badge.textContent = "识别中…";
+      copyRaw.disabled = true; copyTrans.hidden = true;
+      metaEl.textContent = "正在执行顺序质量早停识别";
+      body.innerHTML = '<div class="box-loading" role="status"><span>正在按启用预设链路依次识别并评估置信度…</span><div class="progress"><i></i></div></div>';
+      return;
+    }
+    if (state.phase === "error") {
+      badge.className = "badge danger"; badge.textContent = "识别失败";
+      copyRaw.disabled = true; copyTrans.hidden = true;
+      metaEl.textContent = "错误信息由后端原样返回";
+      body.innerHTML = '<div class="box-error" role="alert"><div class="box-error-main"><svg class="ic"><use href="#i-alert"/></svg><span>' + escapeHtml(state.errorText) + '</span></div><button type="button" class="btn btn-sm" id="btn-retry-ocr">重试</button></div>';
+      var r = $("btn-retry-ocr"); if (r) r.addEventListener("click", function () { runMockOcr("draft"); });
+      return;
+    }
+    if (state.phase === "empty" || !state.hasImage) {
+      badge.className = "badge"; badge.textContent = enabledPresets().length ? ("已启用 " + enabledPresets().length + " 条预设") : "原图直识";
+      copyRaw.disabled = true; copyTrans.hidden = true;
+      metaEl.textContent = "识别结果可直接复制";
+      body.innerHTML = '<div class="box-empty"><div>粘贴或选择截图后，点击右侧「当前参数试识别」或顶部「按启用预设链路识别」查看效果。</div></div>';
+      return;
+    }
+
+    var m = state.ocrMeta || {};
+    badge.className = "badge " + (m.fallback_to_original ? "warn" : "ok");
+    if (m.run_mode === "draft_params") badge.textContent = "当前参数试识别 · 置信度 " + m.confidence + "%";
+    else if (m.fallback_to_original) badge.textContent = "3 条均未达标 → 补跑原图择优 · " + m.confidence + "%";
+    else if (m.matched_rank) badge.textContent = "早停命中 #" + m.matched_rank + " · " + m.confidence + "%";
+    else badge.textContent = "默认原图直识 · " + m.confidence + "%";
+
+    var trace = (m.attempts && m.attempts.length)
+      ? '<div class="trace-pills">' + m.attempts.map(function (a, i) {
+          var cls = a.fallback ? "trace-pill fallback" : (a.accepted ? "trace-pill hit" : "trace-pill");
+          return (i > 0 ? '<span>→</span>' : '') + '<span class="' + cls + '">' + escapeHtml(a.label) + ' ' + a.confidence + '%' + (a.accepted ? ' ✓' : '') + '</span>';
+        }).join("") + '</div>'
+      : "";
+
+    var showTrans = state.ocrMode !== "raw" && state.transText;
+    body.innerHTML = '<div class="hit-strip"><div class="hit-strip-main"><span class="dot ' + (m.fallback_to_original ? "warn" : "ok") + '"></span><span>' + escapeHtml(m.summary || "") + '</span></div>' + trace + '</div>' +
+      '<div class="studio-result-text">' + escapeHtml(state.ocrText) + '</div>' +
+      (showTrans ? '<div class="studio-sub-block"><div class="studio-sub-head"><span>译文（英 → 中）</span><span class="mono">qwen3.5:4b</span></div><div class="studio-sub-text">' + escapeHtml(state.transText) + '</div></div>' : '');
+
+    metaEl.textContent = "Tesseract" + (showTrans ? " + qwen3.5:4b" : "") + " · " + (m.elapsed_ms || 0) + "ms";
+    copyRaw.disabled = !state.ocrText;
+    copyTrans.hidden = !showTrans;
+    copyTrans.disabled = !showTrans;
+  }
+
+  function renderAll() {
+    renderTheme();
+    renderPipeline();
+    renderCompare();
+    renderInspector();
+    renderOutput();
+  }
+
+  function applyStarter(key) {
+    var t = STARTERS[key]; if (!t) return;
+    state.activeStarter = key;
+    state.draft = Object.assign({ name: state.editingPresetId ? state.draft.name : t.suggestedName }, t.params);
+    state.previewPhase = "ready";
+    renderInspector();
+    renderCompare();
+    logEvent("onRequestPreprocessPreview (starter=" + key + ")", state.draft);
+  }
+
+  function runMockOcr(kind) {
+    if (!state.hasImage) return;
+    var meta = SAMPLES[state.sampleKey] || SAMPLES.dark;
+    state.phase = "result";
+    state.ocrText = meta.rawText;
+    state.transText = state.ocrMode === "raw" ? "" : meta.transText;
+    if (kind === "draft") {
+      state.ocrMeta = {
+        run_mode: "draft_params", confidence: 95, elapsed_ms: 246, fallback_to_original: false,
+        summary: "使用右侧当前参数试识别（未修改全局预设），耗时 246ms", attempts: []
+      };
+      logEvent("onSubmitImage (draft)", { mode: state.ocrMode === "raw" ? "raw" : "translate", preprocess_params: state.draft });
+    } else {
+      var en = enabledPresets();
+      state.ocrMeta = en.length
+        ? { run_mode: "preset_chain", matched_rank: 1, confidence: 93, elapsed_ms: 290, fallback_to_original: false, summary: "命中顺位 #1「" + en[0].name + "」，质量达标早停，跳过其余预设", attempts: [{ label: "#1 " + en[0].name, confidence: 93, accepted: true }] }
+        : { run_mode: "original", confidence: 71, elapsed_ms: 188, fallback_to_original: false, summary: "当前未启用任何预处理预设，按默认原图识别", attempts: [{ label: "默认原图", confidence: 71, accepted: true }] };
+      logEvent("onSubmitImage (chain)", { mode: state.ocrMode === "raw" ? "raw" : "translate", enabled_count: en.length });
+    }
+    renderOutput();
+  }
+
+  function loadSample(key) {
+    state.sampleKey = key; state.hasImage = true; state.fileName = SAMPLES[key].fileName;
+    state.sourceCanvas = buildSampleCanvas(key); state.previewPhase = "ready";
+    document.querySelectorAll("[data-sample]").forEach(function (b) { b.classList.toggle("on", b.dataset.sample === key); });
+    renderCompare();
+    if (state.phase === "result") {
+      state.ocrText = SAMPLES[key].rawText;
+      state.transText = state.ocrMode === "raw" ? "" : SAMPLES[key].transText;
+      renderOutput();
+    }
+  }
+
+  function loadUserFile(file) {
+    if (!file) return;
+    var rd = new FileReader();
+    rd.onload = function (ev) {
+      var img = new Image();
+      img.onload = function () {
+        var c = document.createElement("canvas");
+        var sc = Math.min(1, 640 / Math.max(img.width, 1));
+        c.width = Math.max(1, Math.round(img.width * sc)); c.height = Math.max(1, Math.round(img.height * sc));
+        c.getContext("2d").drawImage(img, 0, 0, c.width, c.height);
+        state.hasImage = true; state.fileName = file.name || "clipboard-image.png";
+        state.sourceCanvas = c; state.previewPhase = "ready"; state.phase = "result";
+        state.ocrText = "（已载入本地图片 " + state.fileName + " · 拖动右侧滑块观察左右像素对比）";
+        state.transText = state.ocrMode === "raw" ? "" : "Loaded local screenshot for side-by-side preview.";
+        state.ocrMeta = { run_mode: "draft_params", confidence: 92, elapsed_ms: 210, summary: "本地图片已加载，可拖动右侧参数并试识别", attempts: [] };
+        renderAll();
+        logEvent("onRequestPreprocessPreview (本地贴图)", { fileName: state.fileName });
+      };
+      img.src = ev.target.result;
+    };
+    rd.readAsDataURL(file);
+  }
+
+  function applyState(name) {
+    document.querySelectorAll("[data-state]").forEach(function (b) { b.classList.toggle("on", b.dataset.state === name); });
+    $("save-error").hidden = true; $("save-feedback").hidden = true;
+    if (name === "empty") {
+      state.hasImage = false; state.fileName = ""; state.phase = "empty"; state.previewPhase = "idle";
+      state.editingPresetId = null; state.activeStarter = null;
+      state.draft = Object.assign({ name: "" }, DEFAULT_PARAMS); state.presets = [];
+    } else if (name === "tuning") {
+      state.hasImage = true; state.sampleKey = "dark"; state.sourceCanvas = buildSampleCanvas("dark");
+      state.fileName = SAMPLES.dark.fileName; state.viewMode = "split"; state.ocrMode = "zh-en";
+      state.phase = "result"; state.previewPhase = "ready"; state.previewError = "";
+      state.editingPresetId = null; state.activeStarter = "dark_invert"; state.listExpanded = true;
+      state.draft = Object.assign({ name: "深底终端报错截图" }, STARTERS.dark_invert.params);
+      state.presets = [
+        { id: "p1", name: "深底反色终端", enabled: true, invert: true, contrast: 1.65, brightness: 1.05, sharpen: 0.8, binarize_mode: "off", threshold: 128 },
+        { id: "p2", name: "低对比灰字文档", enabled: true, invert: false, contrast: 2.3, brightness: 1.15, sharpen: 1.6, binarize_mode: "off", threshold: 128 }
+      ];
+      state.ocrText = SAMPLES.dark.rawText; state.transText = SAMPLES.dark.transText;
+      state.ocrMeta = { run_mode: "draft_params", confidence: 95, elapsed_ms: 248, fallback_to_original: false, summary: "使用右侧参数草稿试识别，置信度 95%（耗时 248ms）", attempts: [] };
+    } else if (name === "full") {
+      state.hasImage = true; state.sampleKey = "gray"; state.sourceCanvas = buildSampleCanvas("gray");
+      state.fileName = SAMPLES.gray.fileName; state.viewMode = "split"; state.ocrMode = "zh-en";
+      state.phase = "result"; state.previewPhase = "ready"; state.previewError = "";
+      state.editingPresetId = "p2"; state.activeStarter = null; state.listExpanded = true;
+      state.presets = [
+        { id: "p1", name: "夜间暗色终端日志与IDE报错截图专用反色高对比预设", enabled: true, invert: true, contrast: 1.7, brightness: 1.05, sharpen: 0.8, binarize_mode: "off", threshold: 128 },
+        { id: "p2", name: "低对比灰底文档增强", enabled: true, invert: false, contrast: 2.35, brightness: 1.15, sharpen: 1.6, binarize_mode: "off", threshold: 128 },
+        { id: "p3", name: "强黑白视频字幕二值化", enabled: true, invert: false, contrast: 1.8, brightness: 1.0, sharpen: 1.0, binarize_mode: "otsu", threshold: 142 },
+        { id: "p4", name: "手动阈值 160 表格线清理", enabled: false, invert: false, contrast: 1.5, brightness: 1.0, sharpen: 1.2, binarize_mode: "manual", threshold: 160 }
+      ];
+      state.draft = Object.assign({}, state.presets[1]);
+      state.ocrText = SAMPLES.gray.rawText; state.transText = SAMPLES.gray.transText;
+      state.ocrMeta = {
+        run_mode: "preset_chain", confidence: 79, elapsed_ms: 742, fallback_to_original: true,
+        summary: "3 条预设均未达质量门限（<82%），已自动补跑原图并择优采用最高分结果",
+        attempts: [
+          { label: "#1 夜间暗色终端…", confidence: 41, accepted: false },
+          { label: "#2 低对比灰底文档", confidence: 72, accepted: false },
+          { label: "#3 强黑白视频字幕", confidence: 64, accepted: false },
+          { label: "补跑原图（择优）", confidence: 79, accepted: true, fallback: true }
+        ]
+      };
+    } else if (name === "loading") {
+      state.hasImage = true; if (!state.sourceCanvas) state.sourceCanvas = buildSampleCanvas("dark");
+      state.previewPhase = "loading"; state.phase = "loading";
+    } else if (name === "error") {
+      state.hasImage = true; if (!state.sourceCanvas) state.sourceCanvas = buildSampleCanvas("dark");
+      state.previewPhase = "error";
+      state.previewError = "后端预览接口返回错误（invalid_request）：图像尺寸超限或服务暂不可用。";
+      state.phase = "error";
+      state.errorText = "文字识别失败（ocr_failed）：未能从当前图片提取有效文本，请调整参数后重试。";
+    }
+    document.querySelectorAll("[data-sample]").forEach(function (b) { b.classList.toggle("on", b.dataset.sample === state.sampleKey); });
+    renderAll();
+    logEvent("previewStateChanged", { state: name, enabled: enabledPresets().length });
+  }
+
+  /* 事件绑定 */
+  $("preview-controls").addEventListener("click", function (ev) {
+    var b = ev.target.closest("button"); if (!b) return;
+    if (b.dataset.state) applyState(b.dataset.state);
+    else if (b.dataset.sample) loadSample(b.dataset.sample);
+    else if (b.id === "btn-theme") { state.theme = state.theme === "dark" ? "light" : "dark"; renderTheme(); }
+  });
+  $("rail-theme-btn").addEventListener("click", function () { state.theme = state.theme === "dark" ? "light" : "dark"; renderTheme(); });
+  $("btn-toggle-list").addEventListener("click", function () { state.listExpanded = !state.listExpanded; renderPipeline(); });
+  $("view-mode-seg").addEventListener("click", function (ev) {
+    var b = ev.target.closest("button[data-view]"); if (!b || b.disabled) return;
+    state.viewMode = b.dataset.view; renderCompare();
+  });
+  $("ocr-mode-select").addEventListener("change", function (ev) {
+    state.ocrMode = ev.target.value;
+    if (state.phase === "result") {
+      state.transText = state.ocrMode === "raw" ? "" : (SAMPLES[state.sampleKey] || SAMPLES.dark).transText;
+      renderOutput();
+    }
+  });
+
+  function bindRange(id, key) {
+    $(id).addEventListener("input", function (ev) {
+      state.draft[key] = key === "threshold" ? parseInt(ev.target.value, 10) : parseFloat(ev.target.value);
+      state.activeStarter = null; state.previewPhase = "ready";
+      renderInspector(); renderCompare();
+    });
+    $(id).addEventListener("change", function () { logEvent("onRequestPreprocessPreview", { key: key, value: state.draft[key] }); });
+  }
+  bindRange("param-contrast", "contrast");
+  bindRange("param-brightness", "brightness");
+  bindRange("param-sharpen", "sharpen");
+  bindRange("param-threshold", "threshold");
+
+  $("param-invert").addEventListener("click", function () {
+    state.draft.invert = !state.draft.invert; state.activeStarter = null; state.previewPhase = "ready";
+    renderInspector(); renderCompare(); logEvent("onRequestPreprocessPreview", { invert: state.draft.invert });
+  });
+  $("binarize-seg").addEventListener("click", function (ev) {
+    var b = ev.target.closest("button[data-bin]"); if (!b) return;
+    state.draft.binarize_mode = b.dataset.bin; state.activeStarter = null; state.previewPhase = "ready";
+    renderInspector(); renderCompare(); logEvent("onRequestPreprocessPreview", { binarize_mode: state.draft.binarize_mode });
+  });
+  document.querySelectorAll(".starter-btn").forEach(function (b) { b.addEventListener("click", function () { applyStarter(b.dataset.starter); }); });
+  $("btn-reset-params").addEventListener("click", function () {
+    state.activeStarter = null; state.draft = Object.assign({ name: state.draft.name }, DEFAULT_PARAMS);
+    renderInspector(); renderCompare(); logEvent("onResetDraftParams");
+  });
+  $("preset-name-input").addEventListener("input", function (ev) { state.draft.name = ev.target.value; $("save-error").hidden = true; });
+  $("btn-save-preset").addEventListener("click", function () {
+    var nm = String(state.draft.name || "").trim();
+    if (!nm) { $("save-error").textContent = "请先填写预设名称。"; $("save-error").hidden = false; $("preset-name-input").focus(); return; }
+    $("save-error").hidden = true;
+    var pp = { invert: !!state.draft.invert, contrast: Number(state.draft.contrast), brightness: Number(state.draft.brightness), sharpen: Number(state.draft.sharpen), binarize_mode: state.draft.binarize_mode, threshold: Number(state.draft.threshold) };
+    if (state.editingPresetId) {
+      state.presets = state.presets.map(function (p) { return p.id === state.editingPresetId ? Object.assign({}, p, { name: nm }, pp) : p; });
+      logEvent("onSaveOcrPresets (update)", { id: state.editingPresetId, name: nm });
+      state.editingPresetId = null;
+    } else {
+      var autoEn = enabledPresets().length < MAX_ENABLED;
+      var nid = "p" + (Date.now() % 100000);
+      state.presets.push(Object.assign({ id: nid, name: nm, enabled: autoEn }, pp));
+      logEvent("onSaveOcrPresets (create)", { id: nid, name: nm, enabled: autoEn });
+    }
+    $("save-feedback").hidden = false; setTimeout(function () { $("save-feedback").hidden = true; }, 1800);
+    renderPipeline(); renderInspector();
+  });
+  $("btn-cancel-edit").addEventListener("click", function () {
+    state.editingPresetId = null; state.activeStarter = null; state.draft = Object.assign({ name: "" }, DEFAULT_PARAMS);
+    renderPipeline(); renderInspector(); renderCompare();
+  });
+  $("btn-new-preset").addEventListener("click", function () {
+    state.editingPresetId = null; state.activeStarter = null; state.draft = Object.assign({ name: "" }, DEFAULT_PARAMS);
+    renderPipeline(); renderInspector(); renderCompare(); $("preset-name-input").focus();
+  });
+
+  $("presets-body").addEventListener("click", function (ev) {
+    var b = ev.target.closest("[data-act]"); if (!b || b.disabled) return;
+    var act = b.dataset.act, id = b.dataset.id;
+    var idx = state.presets.findIndex(function (p) { return p.id === id; }); if (idx < 0) return;
+    if (act === "up" && idx > 0) {
+      var t = state.presets[idx - 1]; state.presets[idx - 1] = state.presets[idx]; state.presets[idx] = t;
+      logEvent("onSaveOcrPresets (up)", { id: id }); renderPipeline();
+    } else if (act === "down" && idx < state.presets.length - 1) {
+      var t2 = state.presets[idx + 1]; state.presets[idx + 1] = state.presets[idx]; state.presets[idx] = t2;
+      logEvent("onSaveOcrPresets (down)", { id: id }); renderPipeline();
+    } else if (act === "edit") {
+      state.editingPresetId = id; state.activeStarter = null; state.draft = Object.assign({}, state.presets[idx]);
+      renderPipeline(); renderInspector(); renderCompare(); logEvent("onEditPreset", { id: id });
+    } else if (act === "toggle") {
+      var item = state.presets[idx];
+      if (!item.enabled && enabledPresets().length >= MAX_ENABLED) return;
+      item.enabled = !item.enabled;
+      logEvent("onSaveOcrPresets (toggle)", { id: id, enabled: item.enabled });
+      renderPipeline(); renderOutput();
+    } else if (act === "delete") {
+      state.pendingDeleteId = id;
+      $("confirm-title").textContent = "删除预设「" + state.presets[idx].name + "」？";
+      $("confirm-modal").hidden = false;
+    }
+  });
+
+  $("confirm-cancel").addEventListener("click", function () { state.pendingDeleteId = null; $("confirm-modal").hidden = true; });
+  $("confirm-ok").addEventListener("click", function () {
+    if (state.pendingDeleteId) {
+      var delId = state.pendingDeleteId;
+      state.presets = state.presets.filter(function (p) { return p.id !== delId; });
+      if (state.editingPresetId === delId) { state.editingPresetId = null; state.draft = Object.assign({ name: "" }, DEFAULT_PARAMS); }
+      logEvent("onSaveOcrPresets (delete)", { id: delId });
+    }
+    state.pendingDeleteId = null; $("confirm-modal").hidden = true; renderAll();
+  });
+
+  $("btn-run-draft").addEventListener("click", function () { runMockOcr("draft"); });
+  $("btn-run-chain").addEventListener("click", function () { runMockOcr("chain"); });
+  $("btn-retry-preview").addEventListener("click", function () { state.previewPhase = "ready"; state.previewError = ""; renderCompare(); });
+
+  function pick() { $("ocr-file-input").click(); }
+  $("btn-head-pick").addEventListener("click", pick);
+  $("btn-foot-pick").addEventListener("click", pick);
+  $("ocr-dropzone").addEventListener("click", pick);
+  $("ocr-dropzone").addEventListener("keydown", function (ev) { if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); pick(); } });
+  $("ocr-file-input").addEventListener("change", function (ev) { if (ev.target.files[0]) loadUserFile(ev.target.files[0]); ev.target.value = ""; });
+  $("btn-ocr-clear").addEventListener("click", function () { state.hasImage = false; state.fileName = ""; state.phase = "empty"; renderCompare(); renderOutput(); logEvent("onClearOcr"); });
+
+  $("drop-target-box").addEventListener("dragover", function (ev) { ev.preventDefault(); $("ocr-dropzone").classList.add("drag-over"); });
+  $("drop-target-box").addEventListener("dragleave", function () { $("ocr-dropzone").classList.remove("drag-over"); });
+  $("drop-target-box").addEventListener("drop", function (ev) {
+    ev.preventDefault(); $("ocr-dropzone").classList.remove("drag-over");
+    var f = ev.dataTransfer && ev.dataTransfer.files && ev.dataTransfer.files[0];
+    if (f && String(f.type || "").indexOf("image/") === 0) loadUserFile(f);
+  });
+  document.addEventListener("paste", function (ev) {
+    var items = ev.clipboardData && ev.clipboardData.items; if (!items) return;
+    for (var i = 0; i < items.length; i++) {
+      if (items[i].type && items[i].type.indexOf("image/") === 0) { ev.preventDefault(); loadUserFile(items[i].getAsFile()); return; }
+    }
+  });
+
+  function copyFb(kind) { $("ocr-copy-feedback").hidden = false; setTimeout(function () { $("ocr-copy-feedback").hidden = true; }, 1600); logEvent("onCopy", { kind: kind }); }
+  $("btn-copy-raw").addEventListener("click", function () { copyFb("ocr"); });
+  $("btn-copy-trans").addEventListener("click", function () { copyFb("ocr_translation"); });
+
+  applyState("tuning");
+})();
+</script>
+</body>
+</html>

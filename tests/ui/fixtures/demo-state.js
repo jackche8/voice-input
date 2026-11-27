@@ -43,9 +43,83 @@
     };
   }
 
+  const SAMPLE_PNG_DATA_URL =
+    "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAQAAAAECAIAAAAmkwkpAAAADElEQVR4nGNgGAWjAAQAAAEAAZ2G/4YAAAAASUVORK5CYII=";
+
+  const OCR_STARTER_TEMPLATES = [
+    {
+      key: "dark_invert",
+      label: "深底反色",
+      suggested_name: "深底反色终端",
+      params: { invert: true, contrast: 1.65, brightness: 1.05, sharpen: 0.8, binarize_mode: "off", threshold: 128 }
+    },
+    {
+      key: "low_contrast",
+      label: "低对比增强",
+      suggested_name: "低对比灰字增强",
+      params: { invert: false, contrast: 2.3, brightness: 1.15, sharpen: 1.6, binarize_mode: "off", threshold: 128 }
+    },
+    {
+      key: "strong_binary",
+      label: "强黑白二值化",
+      suggested_name: "强黑白字幕二值化",
+      params: { invert: false, contrast: 1.8, brightness: 1.0, sharpen: 1.0, binarize_mode: "otsu", threshold: 142 }
+    }
+  ];
+
+  const OCR_PRESETS_FULL = [
+    {
+      id: "preset-dark-1",
+      name: "夜间暗色终端日志与IDE报错截图专用反色高对比预设",
+      enabled: true,
+      invert: true,
+      contrast: 1.7,
+      brightness: 1.05,
+      sharpen: 0.8,
+      binarize_mode: "off",
+      threshold: 128
+    },
+    {
+      id: "preset-gray-2",
+      name: "低对比灰底文档增强",
+      enabled: true,
+      invert: false,
+      contrast: 2.35,
+      brightness: 1.15,
+      sharpen: 1.6,
+      binarize_mode: "off",
+      threshold: 128
+    },
+    {
+      id: "preset-bin-3",
+      name: "强黑白视频字幕二值化",
+      enabled: true,
+      invert: false,
+      contrast: 1.8,
+      brightness: 1.0,
+      sharpen: 1.0,
+      binarize_mode: "otsu",
+      threshold: 142
+    },
+    {
+      id: "preset-manual-4",
+      name: "手动阈值 160 表格线条清理",
+      enabled: false,
+      invert: false,
+      contrast: 1.5,
+      brightness: 1.0,
+      sharpen: 1.2,
+      binarize_mode: "manual",
+      threshold: 160
+    }
+  ];
+
   global.V3Fixtures = {
     RAW: RAW,
     POLISHED: POLISHED,
+    SAMPLE_PNG_DATA_URL: SAMPLE_PNG_DATA_URL,
+    OCR_STARTER_TEMPLATES: OCR_STARTER_TEMPLATES,
+    OCR_PRESETS_FULL: OCR_PRESETS_FULL,
     setupConnected: {
       connection: "connected",
       asr: {
@@ -218,6 +292,7 @@
     },
     homeOcrResult: {
       connection: "connected",
+      ocrStarterTemplates: OCR_STARTER_TEMPLATES,
       ocr: {
         phase: "result",
         mode: "translate",
@@ -226,8 +301,65 @@
         target_lang: "zh",
         direction_mode: "auto",
         fileName: "capture.png",
+        previewUrl: SAMPLE_PNG_DATA_URL,
+        processedPreviewUrl: SAMPLE_PNG_DATA_URL,
+        previewPhase: "ready",
+        imageWidth: 560,
+        imageHeight: 210,
         ocr_text: "Hello OCR world",
         text: "你好 OCR 世界",
+        ocr_meta: {
+          run_mode: "original",
+          matched_preset_id: null,
+          matched_preset_name: "默认原图",
+          matched_rank: null,
+          confidence: 92,
+          elapsed_ms: 196,
+          early_stopped: false,
+          fallback_to_original: false,
+          attempts: [
+            { preset_id: null, label: "默认原图", rank: null, confidence: 92, score: 92.0, valid_chars: 13, accepted: true }
+          ]
+        },
+        error: null,
+        message: ""
+      }
+    },
+    homeOcrPresetsFull: {
+      connection: "connected",
+      ocrStarterTemplates: OCR_STARTER_TEMPLATES,
+      ocr_preprocess_presets: OCR_PRESETS_FULL,
+      ocr: {
+        phase: "result",
+        mode: "translate",
+        lang_pair: "zh-en",
+        source_lang: "en",
+        target_lang: "zh",
+        direction_mode: "auto",
+        fileName: "video-subtitle-banner.png",
+        previewUrl: SAMPLE_PNG_DATA_URL,
+        processedPreviewUrl: SAMPLE_PNG_DATA_URL,
+        previewPhase: "ready",
+        imageWidth: 560,
+        imageHeight: 210,
+        otsuThreshold: 132,
+        ocr_text: "LOCAL OFFLINE OCR · ZERO CLOUD UPLOAD",
+        text: "本地离线 OCR · 零云端上传",
+        ocr_meta: {
+          run_mode: "preset_chain",
+          matched_preset_id: "preset-bin-3",
+          matched_preset_name: "强黑白视频字幕二值化",
+          matched_rank: 3,
+          confidence: 91,
+          elapsed_ms: 612,
+          early_stopped: true,
+          fallback_to_original: false,
+          attempts: [
+            { preset_id: "preset-dark-1", label: "夜间暗色终端…", rank: 1, confidence: 34, score: 21.0, valid_chars: 8, accepted: false },
+            { preset_id: "preset-gray-2", label: "低对比灰底文档", rank: 2, confidence: 52, score: 40.0, valid_chars: 14, accepted: false },
+            { preset_id: "preset-bin-3", label: "强黑白视频字幕", rank: 3, confidence: 91, score: 89.2, valid_chars: 32, accepted: true }
+          ]
+        },
         error: null,
         message: ""
       }

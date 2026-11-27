@@ -19,6 +19,7 @@ def test_local_status_ok_and_does_not_echo_token(app):
     assert res.status_code == 200
     body = res.json()
     assert body["ok"] is True
+    assert body["injected"]["ocr_preview"] is True
     dumped = str(body)
     assert TEST_TOKEN not in dumped and "token" not in dumped.lower()
 
@@ -41,6 +42,13 @@ def test_remote_status_and_claim_forbidden_even_with_token(app):
     assert cfg.status_code == 403
     setup = client.post("/api/setup/pull_model", headers=headers)
     assert setup.status_code == 403
+    ocr_preview = client.post(
+        "/api/v1/ocr/preview",
+        files={"image": ("s.png", b"x", "image/png")},
+        headers=headers,
+    )
+    assert ocr_preview.status_code == 403
+    assert ocr_preview.json()["error"] == "forbidden"
 
 
 def test_x_forwarded_for_cannot_spoof_localhost(app):

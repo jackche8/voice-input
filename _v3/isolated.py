@@ -19,11 +19,15 @@ from _asr_provider import SidecarStreamProvider
 from _contracts import PolishRequest, PolishResponse, TranslateRequest, TranslateResponse
 from _jobs_client import JobsClient
 from _ollama import OllamaClient
+from _ocr_preprocess import render_ocr_preprocess_preview
 from _paths import STATIC_V3
 from _ports import DEFAULT_ASR_PORT, DEFAULT_OLLAMA_PORT, DEFAULT_SERVER_PORT
 from _polish import polish_text
 from _translate import translate_text
 from _v3.runtime import (
+    OcrFn,
+    OcrLayoutFn,
+    OcrPreviewFn,
     Runtime,
     StreamingAsrProvider,
     TranscribeFn,
@@ -170,7 +174,9 @@ def compose_isolated_candidate(
     transcribe: TranscribeFn | None = None,
     polish: Callable[[PolishRequest], PolishResponse] | None = None,
     translate: Callable[[TranslateRequest], TranslateResponse] | None = None,
-    ocr: Callable[..., str] | None = None,
+    ocr: OcrFn | None = None,
+    ocr_layout: OcrLayoutFn | None = None,
+    ocr_preview: OcrPreviewFn | None = render_ocr_preprocess_preview,
     ollama_base_url: str | None = None,
     ollama_model: str = "qwen3.5:4b",
     ollama_client: OllamaClient | None = None,
@@ -236,6 +242,8 @@ def compose_isolated_candidate(
         polish=polish,
         translate=translate,
         ocr=ocr,
+        ocr_layout=ocr_layout,
+        ocr_preview=ocr_preview,
         stream_provider=stream_provider,
         setup=setup,
         lan_ips=lan_ips,

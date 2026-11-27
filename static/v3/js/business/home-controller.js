@@ -152,6 +152,22 @@
         })
       : null;
 
+    var ocrActions = typeof root.createOcrActions === "function"
+      ? root.createOcrActions({
+          client: client,
+          context: context,
+          setupActions: setupActions,
+          setState: setState,
+          getState: getState,
+          isDestroyed: function () { return destroyed; },
+          nonLocalMessage: function () { return nonLocalMessage(context); },
+          onInvalidateOcr: function () { ocrReqId += 1; },
+          previewDebounceMs: opts.previewDebounceMs,
+          setTimeout: opts.setTimeout,
+          clearTimeout: opts.clearTimeout
+        })
+      : null;
+
     function storeLan(mapped) {
       lanToken = mapped && mapped.token ? mapped.token : null;
       lanUrls = [];
@@ -622,6 +638,9 @@
           )
         : null;
 
+      var hasDraftParams = slot === "ocr" && payload.preprocess_params != null;
+      var runKind = hasDraftParams ? "draft" : "chain";
+
       function setSlotError(errObj, blocked) {
         var patch = { copyStatus: null, copyKind: null };
         if (blocked) patch.connection = "error";
@@ -635,6 +654,8 @@
             direction_mode: null,
             ocr_text: "",
             text: "",
+            ocr_meta: null,
+            lastRunKind: runKind,
             error: (errObj && errObj.error) || "ocr_failed",
             message: (errObj && errObj.message) || "",
             details: (errObj && errObj.details) != null ? errObj.details : null,
@@ -689,6 +710,8 @@
             direction_mode: null,
             ocr_text: "",
             text: "",
+            ocr_meta: null,
+            lastRunKind: runKind,
             error: null,
             message: "",
             details: null,
@@ -726,6 +749,14 @@
       if (mode === "translate" && langPair) {
         form.append("lang_pair", langPair);
       }
+      if (hasDraftParams) {
+        form.append(
+          "preprocess_params",
+          typeof payload.preprocess_params === "string"
+            ? payload.preprocess_params
+            : JSON.stringify(payload.preprocess_params)
+        );
+      }
       var filename = (file && file.name) || "clipboard-image.png";
       if (file instanceof Blob || (typeof File !== "undefined" && file instanceof File)) {
         form.append("image", file, filename);
@@ -751,6 +782,8 @@
               direction_mode: (res && res.direction_mode) || null,
               ocr_text: rawOcr,
               text: usedMode === "raw" ? "" : ((res && res.text) || ""),
+              ocr_meta: (res && res.ocr_meta) != null ? res.ocr_meta : null,
+              lastRunKind: runKind,
               error: null,
               message: "",
               details: null,
@@ -983,9 +1016,12 @@
       if (logsActions && typeof logsActions.destroy === "function") {
         logsActions.destroy();
       }
+      if (ocrActions && typeof ocrActions.destroy === "function") {
+        ocrActions.destroy();
+      }
     }
 
-    var hooks = Object.assign({}, setupActions.hooks, logsActions ? logsActions.hooks : {}, {
+    var hooks = Object.assign({}, setupActions.hooks, logsActions ? logsActions.hooks : {}, ocrActions ? ocrActions.hooks : {}, {
       onTranslateInput: function (payload) { return handleTranslateInput(payload); },
       onTranslateText: function (payload) { return translateText(payload); },
       onSwapDirection: function (payload) { return swapDirection(payload); },
@@ -1025,7 +1061,9 @@
         getLanUrls: function () { return lanUrls.slice(); },
         isDestroyed: function () { return destroyed; },
         polling: function () { return setupActions.isPolling(); },
-        debouncePending: function () { return debounceTimer != null; }
+        debouncePending: function () { return debounceTimer != null; },
+        previewDebouncePending: function () { return !!(ocrActions && ocrActions._debug && ocrActions._debug.previewDebouncePending()); },
+        getOcrReqId: function () { return ocrReqId; }
       }
     };
   }

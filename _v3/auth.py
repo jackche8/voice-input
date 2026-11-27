@@ -225,7 +225,7 @@ def access_mode(method: str, path: str) -> str:
         return "lan_token"
     if path in {"/api/v1/stt", "/api/v1/polish", "/api/v1/translate"}:
         return "lan_token"
-    if path in {"/api/v1/ocr-translate", "/api/v1/ocr-inplace"}:
+    if path in {"/api/v1/ocr/preview", "/api/v1/ocr-translate", "/api/v1/ocr-inplace"}:
         return "local"
     if path == "/api/v1/history":
         return "lan_token"

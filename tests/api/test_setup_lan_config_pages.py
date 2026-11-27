@@ -255,6 +255,64 @@ def test_config_api_never_returns_legacy_secrets(tmp_path):
     assert bad_cap.status_code == 400 and bad_cap.json()["error"] == "invalid_request"
 
 
+def test_config_api_ocr_preprocess_presets_roundtrip_and_readable_400_message(tmp_path):
+    runtime, app = _app(tmp_path)
+    client = local_client(app)
+
+    initial = client.get("/api/v1/config").json()
+    assert initial["ocr_preprocess_presets"] == []
+    starters = initial["ocr_preprocess_starter_templates"]
+    assert [s["key"] for s in starters] == ["dark_invert", "low_contrast", "strong_binary"]
+
+    # 保存 3 条启用预设并落盘往返
+    three_enabled = [
+        {"id": f"p-{idx}", "name": s["suggested_name"], "enabled": True, **s["params"]}
+        for idx, s in enumerate(starters, start=1)
+    ]
+    saved = client.post(
+        "/api/v1/config",
+        json={"ocr_preprocess_presets": three_enabled},
+        headers=local_headers(),
+    )
+    assert saved.status_code == 200, saved.text
+    assert [p["id"] for p in saved.json()["ocr_preprocess_presets"]] == ["p-1", "p-2", "p-3"]
+    disk = json.loads(runtime.config.path.read_text(encoding="utf-8"))
+    assert len(disk["ocr_preprocess_presets"]) == 3
+
+    # 启用第 4 条 → 400 invalid_request，且 ErrorBody.message 透出具体中文原因并保留 details.errors
+    four_enabled = [*three_enabled, {"id": "p-4", "name": "第四条", "enabled": True}]
+    over = client.post(
+        "/api/v1/config",
+        json={"ocr_preprocess_presets": four_enabled},
+        headers=local_headers(),
+    )
+    assert over.status_code == 400
+    over_body = over.json()
+    assert over_body["error"] == "invalid_request"
+    assert "最多同时启用 3 个预处理预设" in over_body["message"]
+    assert over_body["details"]["errors"]
+
+    # 重复 id → 400 invalid_request 且透出可读中文原因
+    dup = client.post(
+        "/api/v1/config",
+        json={"ocr_preprocess_presets": [three_enabled[0], three_enabled[0]]},
+        headers=local_headers(),
+    )
+    assert dup.status_code == 400
+    assert dup.json()["error"] == "invalid_request"
+    assert "不能重复" in dup.json()["message"]
+
+    # 越界参数 → 400 invalid_request 且保留 details.errors
+    bad_range = client.post(
+        "/api/v1/config",
+        json={"ocr_preprocess_presets": [{"id": "p-bad", "name": "越界", "enabled": True, "contrast": 9.5}]},
+        headers=local_headers(),
+    )
+    assert bad_range.status_code == 400
+    assert bad_range.json()["error"] == "invalid_request"
+    assert bad_range.json()["details"]["errors"]
+
+
 # ---------------------------------------------------------------- audio inputs
 
 
@@ -403,6 +461,7 @@ def test_openapi_snapshot_is_the_generated_document(tmp_path):
     assert snapshot == generated, "static/v3/openapi.json 必须由 scripts/gate.py --write-openapi-snapshot 生成"
     assert "/api/v1/lan-access" in snapshot["paths"]
     assert "/api/v1/audio-inputs" in snapshot["paths"]
+    assert "/api/v1/ocr/preview" in snapshot["paths"]
     assert "/api/setup/install-all" in snapshot["paths"] and "/api/setup/tasks" not in snapshot["paths"]
     for schema in (
         "SetupCheckResponse",
@@ -412,6 +471,12 @@ def test_openapi_snapshot_is_the_generated_document(tmp_path):
         "AppConfigUpdate",
         "AudioInputDevice",
         "AudioInputListResponse",
+        "OcrPreprocessParams",
+        "OcrPreprocessPreset",
+        "OcrPreprocessStarterTemplate",
+        "OcrAttemptSummary",
+        "OcrRunMeta",
+        "OcrPreprocessPreviewResponse",
     ):
         assert schema in snapshot["components"]["schemas"]
     assert TEST_TOKEN not in json.dumps(snapshot)

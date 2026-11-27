@@ -18,7 +18,8 @@
     "autostart_enabled",
     "ui_theme",
     "audio_input_device",
-    "log_max_lines"
+    "log_max_lines",
+    "ocr_preprocess_presets"
   ];
 
   function pickLegalConfig(patch) {
@@ -57,6 +58,21 @@
     }
     if (typeof config.log_max_lines === "number" && isFinite(config.log_max_lines)) {
       state.log_max_lines = config.log_max_lines;
+    }
+    if (Array.isArray(config.ocr_preprocess_presets)) {
+      state.ocr_preprocess_presets = config.ocr_preprocess_presets.map(function (item) {
+        return Object.assign({}, item);
+      });
+    }
+    if (Array.isArray(config.ocr_preprocess_starter_templates)) {
+      state.ocrStarterTemplates = config.ocr_preprocess_starter_templates.map(function (tpl) {
+        return {
+          key: tpl.key,
+          label: tpl.label,
+          suggested_name: tpl.suggested_name,
+          params: tpl.params ? Object.assign({}, tpl.params) : null
+        };
+      });
     }
     return state;
   }

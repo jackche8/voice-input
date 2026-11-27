@@ -365,6 +365,9 @@ const overflowGuardChecks = [
   { file: "studio.css", rules: studioRules, selector: ".empty", expect: { "overflow-wrap": "anywhere" } },
   { file: "studio.css", rules: studioRules, selector: ".studio-panel", expect: { "min-width": "0" } },
   { file: "studio.css", rules: studioRules, selector: ".setup-section", expect: { "min-width": "0" } },
+  { file: "studio.css", rules: studioRules, selector: ".preset-name", expect: { "overflow-wrap": "anywhere" } },
+  { file: "studio.css", rules: studioRules, selector: ".save-err", expect: { "overflow-wrap": "anywhere" } },
+  { file: "studio.css", rules: studioRules, selector: ".presets-err-bar", expect: { "overflow-wrap": "anywhere" } },
   {
     file: "studio.css",
     rules: studioRules,
@@ -537,12 +540,12 @@ hasAll("UtteranceSource", sourceEnums);
 hasAll("HistoryPolish", polishEnums);
 hasAll("ProductEventType", eventEnums);
 
-for (const field of ["stable_text", "tail_text", "raw_text", "final_text", "ocr_text", "polish_enabled", "custom_keywords", "translate_lang_pair", "translate_auto_enabled", "log_max_lines", "lang_pair", "source_lang", "direction_mode", "hotkey_voice", "hotkey_screenshot", "hotkey_ocr", "hotkey_repeat", "hotkey_annotate", "ui_theme", "audio_input_device", "job_id", "delivery_unknown"]) {
+for (const field of ["stable_text", "tail_text", "raw_text", "final_text", "ocr_text", "ocr_meta", "ocr_preprocess_presets", "polish_enabled", "custom_keywords", "translate_lang_pair", "translate_auto_enabled", "log_max_lines", "lang_pair", "source_lang", "direction_mode", "hotkey_voice", "hotkey_screenshot", "hotkey_ocr", "hotkey_repeat", "hotkey_annotate", "ui_theme", "audio_input_device", "job_id", "delivery_unknown"]) {
   if (!prodText.includes(field)) fail("生产代码未使用契约字段 " + field);
 }
-pass("关键契约字段（含 log_max_lines / ui_theme / audio_input_device / translate_lang_pair / translate_auto_enabled / 方向字段与五热键）已在界面层出现");
+pass("关键契约字段（含 ocr_preprocess_presets / ocr_meta / log_max_lines / ui_theme / audio_input_device / translate_lang_pair / translate_auto_enabled / 方向字段与五热键）已在界面层出现");
 
-/* 反向守卫：static/v3/ 全量生产源码与生成快照严禁残留已删除旧字段 translate_target_lang 与废弃 aboutText / .setup-about */
+/* 反向守卫：static/v3/ 全量生产源码与生成快照严禁残留已删除旧字段 translate_target_lang、废弃 aboutText/.setup-about 与废弃旧 OCR 预览样式类 */
 function stripSourceComments(filePath, raw) {
   if (filePath.endsWith(".json")) return raw;
   if (filePath.endsWith(".html")) return raw.replace(/<!--[\s\S]*?-->/g, "");
@@ -550,6 +553,7 @@ function stripSourceComments(filePath, raw) {
 }
 const legacyTargetLangHits = [];
 const legacyAboutHits = [];
+const legacyOcrCssHits = [];
 for (const file of files) {
   const code = stripSourceComments(file, fs.readFileSync(file, "utf8"));
   if (/\btranslate_target_lang\b/.test(code)) {
@@ -557,6 +561,9 @@ for (const file of files) {
   }
   if (/\baboutText\b|\.setup-about\b/.test(code)) {
     legacyAboutHits.push(path.relative(repo, file));
+  }
+  if (/\.ocr-preview-wrap\b|\.ocr-preview-img\b|\.ocr-mode-group\b/.test(code)) {
+    legacyOcrCssHits.push(path.relative(repo, file));
   }
 }
 if (legacyTargetLangHits.length) {
@@ -569,16 +576,51 @@ if (legacyAboutHits.length) {
 } else {
   pass("static/v3/ 生产源码已彻底清除已废弃 aboutText 与 .setup-about（零出现反向守卫）");
 }
+if (legacyOcrCssHits.length) {
+  fail("static/v3/ 生产源码仍残留废弃 OCR 样式类（.ocr-preview-wrap / .ocr-preview-img / .ocr-mode-group）：" + legacyOcrCssHits.join(", "));
+} else {
+  pass("static/v3/ 生产源码已彻底清除废弃 OCR 样式类（.ocr-preview-wrap / .ocr-preview-img / .ocr-mode-group）");
+}
 
-for (const panelFile of ["js/logs-panel.js", "js/about-panel.js"]) {
+for (const panelFile of ["js/ocr-presets.js", "js/ocr-panel.js", "js/logs-panel.js", "js/about-panel.js"]) {
   const fullPanelPath = path.join(v3, panelFile);
   const panelCode = stripSourceComments(fullPanelPath, fs.readFileSync(fullPanelPath, "utf8"));
   if (/\binnerHTML\b/.test(panelCode)) {
-    fail("static/v3/" + panelFile + " 严禁使用 innerHTML 渲染日志或关于内容");
+    fail("static/v3/" + panelFile + " 严禁使用 innerHTML 渲染内容");
   }
 }
 if (!failures.some((m) => m.includes("innerHTML"))) {
-  pass("logs-panel.js 与 about-panel.js 严格零 innerHTML（纯 DOM 渲染）");
+  pass("ocr-presets.js / ocr-panel.js / logs-panel.js / about-panel.js 严格零 innerHTML（纯 DOM 渲染）");
+}
+
+/* 单源守卫：起步模板默认参数严禁复制到 labels.js / ocr-presets.js / ocr-panel.js，且不含 Canvas 演示文案 */
+const labelsCode = stripSourceComments(path.join(v3, "js/labels.js"), labels);
+const ocrPresetsPath = path.join(v3, "js/ocr-presets.js");
+const ocrPresetsCode = stripSourceComments(ocrPresetsPath, fs.readFileSync(ocrPresetsPath, "utf8"));
+const ocrPanelPath = path.join(v3, "js/ocr-panel.js");
+const ocrPanelJs = fs.readFileSync(ocrPanelPath, "utf8");
+const ocrPanelCode = stripSourceComments(ocrPanelPath, ocrPanelJs);
+const starterDupRe = /\bdark_invert\b|\blow_contrast\b|\bstrong_binary\b/;
+if (starterDupRe.test(labelsCode) || starterDupRe.test(ocrPresetsCode) || starterDupRe.test(ocrPanelCode)) {
+  fail("labels.js / ocr-presets.js / ocr-panel.js 违规复制了后端起步模板参数（dark_invert / low_contrast / strong_binary）");
+} else {
+  pass("labels.js / ocr-presets.js / ocr-panel.js 未复制后端起步模板参数（单源来自 state.ocrStarterTemplates）");
+}
+if (/Canvas\s*演示|模板内以\s*Canvas|<canvas\b/i.test(ocrPanelCode) || /Canvas\s*演示|模板内以\s*Canvas|<canvas\b/i.test(ocrPresetsCode)) {
+  fail("ocr-presets.js 或 ocr-panel.js 残留模板 Canvas 演示代码或文案");
+} else {
+  pass("ocr-presets.js 与 ocr-panel.js 已移除模板 Canvas 演示，仅以 <img> 展示后端同源预览图");
+}
+if (
+  !ocrPanelCode.includes("onRequestPreprocessPreview") ||
+  !ocrPanelCode.includes("onSubmitImage") ||
+  !ocrPanelCode.includes("onSaveOcrPresets") ||
+  !ocrPanelCode.includes("onClearOcr") ||
+  !ocrPanelCode.includes("onCopy")
+) {
+  fail("ocr-panel.js 缺少必需回调（onRequestPreprocessPreview / onSubmitImage / onSaveOcrPresets / onClearOcr / onCopy）");
+} else {
+  pass("ocr-panel.js 具备全部 OCR 预览、识别、预设持久化、清除与复制回调");
 }
 
 const indexHtml = fs.readFileSync(path.join(v3, "index.html"), "utf8");
@@ -586,22 +628,29 @@ if (
   !/css\/studio\.css/.test(indexHtml) ||
   !/js\/confirm\.js/.test(indexHtml) ||
   !/js\/setup-panel\.js/.test(indexHtml) ||
+  !/js\/ocr-presets\.js/.test(indexHtml) ||
+  !/js\/ocr-panel\.js/.test(indexHtml) ||
   !/js\/logs-panel\.js/.test(indexHtml) ||
   !/js\/about-panel\.js/.test(indexHtml) ||
   !/js\/home\.js/.test(indexHtml) ||
   !/js\/business\/setup-actions\.js/.test(indexHtml) ||
   !/js\/business\/logs-actions\.js/.test(indexHtml) ||
+  !/js\/business\/ocr-actions\.js/.test(indexHtml) ||
   !/js\/business\/home-controller\.js/.test(indexHtml) ||
   !/data-page=["']home["']/.test(indexHtml)
 ) {
-  fail("index.html 未正确挂载方案 C 统一工作台脚本与样式（含 confirm / logs-panel / about-panel / logs-actions）");
-} else pass("index.html 已加载 studio.css / confirm.js / setup-panel.js / logs-panel.js / about-panel.js / home.js / setup-actions.js / logs-actions.js / home-controller.js / bootstrap(home)");
+  fail("index.html 未正确挂载方案 C 统一工作台脚本与样式（含 confirm / ocr-presets / ocr-panel / logs-panel / about-panel / logs-actions / ocr-actions）");
+} else pass("index.html 已加载 studio.css / confirm.js / setup-panel.js / ocr-presets.js / ocr-panel.js / logs-panel.js / about-panel.js / home.js / setup-actions.js / logs-actions.js / ocr-actions.js / home-controller.js / bootstrap(home)");
 if (!/hotkey-capture\.js[\s\S]*js\/setup-panel\.js[\s\S]*js\/home\.js/.test(indexHtml)) {
   fail("index.html 未按 hotkey-capture.js → setup-panel.js → home.js 顺序加载");
 } else pass("index.html 先加载 hotkey-capture.js 再加载 setup-panel.js 与 home.js");
-if (!/js\/confirm\.js[\s\S]*js\/logs-panel\.js[\s\S]*js\/about-panel\.js[\s\S]*js\/home\.js[\s\S]*js\/business\/logs-actions\.js[\s\S]*js\/business\/home-controller\.js/.test(indexHtml)) {
-  fail("index.html 未按 confirm.js → logs-panel.js → about-panel.js → home.js → logs-actions.js → home-controller.js 顺序加载");
-} else pass("index.html 按 confirm.js → logs-panel.js → about-panel.js → home.js → logs-actions.js → home-controller.js 依赖顺序加载");
+if (!/js\/labels\.js[\s\S]*js\/confirm\.js[\s\S]*js\/ocr-presets\.js[\s\S]*js\/ocr-panel\.js[\s\S]*js\/logs-panel\.js[\s\S]*js\/about-panel\.js[\s\S]*js\/home\.js[\s\S]*js\/business\/logs-actions\.js[\s\S]*js\/business\/ocr-actions\.js[\s\S]*js\/business\/home-controller\.js/.test(indexHtml)) {
+  fail("index.html 未按 labels.js → confirm.js → ocr-presets.js → ocr-panel.js → logs-panel.js → about-panel.js → home.js → logs-actions.js → ocr-actions.js → home-controller.js 顺序加载");
+} else pass("index.html 按 labels.js → confirm.js → ocr-presets.js → ocr-panel.js → logs-panel.js → about-panel.js → home.js → logs-actions.js → ocr-actions.js → home-controller.js 依赖顺序加载");
+const ocrActionsCode = stripSourceComments(path.join(v3, "js/business/ocr-actions.js"), fs.readFileSync(path.join(v3, "js/business/ocr-actions.js"), "utf8"));
+if (!ocrActionsCode.includes("ocr_preview_api_v1_ocr_preview_post")) {
+  fail("ocr-actions.js 未引用冻结 operationId：ocr_preview_api_v1_ocr_preview_post");
+} else pass("ocr-actions.js 通过冻结 operationId（ocr_preview_api_v1_ocr_preview_post）派生预览接口");
 const redundantHomeScripts = [
   "js/business/job-id.js",
   "js/business/sse.js",
@@ -633,12 +682,24 @@ if (!homeJs.includes("sanitizeLanPatch") || !homeJs.includes("urlMasked") || /en
   fail("home.js 未严格阻止明文 LAN 令牌/URL 进入 DOM");
 } else pass("home.js 仅渲染脱敏 urlMasked，明文令牌不入 DOM");
 
-const homeErrMatch = homeJs.match(/phase === "error"\)\s*\{[\s\S]*?(?=\}\s*else\b)/g) || [];
-if (homeErrMatch.length < 2 || homeErrMatch.some((seg) => /\bocr_text\b/.test(seg))) {
-  fail("home.js 失败分支缺失或可能把 ocr_text 当译文");
-} else pass("home.js 翻译与 OCR 失败分支均如实呈现错误，不拿 ocr_text 冒充译文");
-
 const homeCode = stripSourceComments(path.join(v3, "js/home.js"), homeJs);
+if (/\bfunction\s+formatUiError\b/.test(homeCode) || /\bfunction\s+formatUiError\b/.test(ocrPanelCode) || !/\bfunction\s+formatUiError\b/.test(labelsCode)) {
+  fail("formatUiError 未单源定义于 labels.js（home.js 或 ocr-panel.js 存在重复定义）");
+} else pass("formatUiError 单源定义于 labels.js，home.js 与 ocr-panel.js 共用");
+if (/\bfunction\s+extractImageFile\b/.test(homeCode) || /\bfunction\s+extractImageFile\b/.test(ocrPanelCode) || !/\bfunction\s+extractImageFile\b/.test(ocrPresetsCode)) {
+  fail("extractImageFile 未单源定义于 ocr-presets.js（home.js 或 ocr-panel.js 存在重复定义）");
+} else pass("extractImageFile 单源定义于 ocr-presets.js，home.js 与 ocr-panel.js 共用");
+const homeErrMatch = homeCode.match(/phase === "error"\)\s*\{[\s\S]*?(?=\}\s*else\b)/g) || [];
+const ocrErrMatch = ocrPanelCode.match(/phase === "error"\)\s*\{[\s\S]*?(?=\}\s*else\b)/g) || [];
+if (
+  homeErrMatch.length < 1 ||
+  ocrErrMatch.length < 1 ||
+  homeErrMatch.some((seg) => /\bocr_text\b/.test(seg)) ||
+  ocrErrMatch.some((seg) => /\bocr_text\b/.test(seg))
+) {
+  fail("home.js 或 ocr-panel.js 失败分支缺失或可能把 ocr_text 当译文");
+} else pass("home.js 翻译失败分支与 ocr-panel.js OCR 失败分支均如实呈现错误，不拿 ocr_text 冒充译文");
+
 function extractElCallContaining(src, idx) {
   const start = src.lastIndexOf("V3.dom.el(", idx);
   if (start === -1) return "";
@@ -660,21 +721,25 @@ function extractElCallContaining(src, idx) {
   }
   return "";
 }
-const boxLoadingHits = [];
-const boxLoadingRe = /className\s*:\s*["']box-loading["']/g;
-let blMatch;
-while ((blMatch = boxLoadingRe.exec(homeCode)) !== null) {
-  boxLoadingHits.push(extractElCallContaining(homeCode, blMatch.index));
+function collectLoadingBlocks(src, selectorRe) {
+  const hits = [];
+  let match;
+  while ((match = selectorRe.exec(src)) !== null) {
+    hits.push(extractElCallContaining(src, match.index));
+  }
+  return hits;
 }
-const boxLoadingBad = boxLoadingHits.filter(
-  (block) => !/className\s*:\s*["'](?:[^"']*\bprogress\b[^"']*\bindeterminate\b|[^"']*\bindeterminate\b[^"']*\bprogress\b)[^"']*["']/.test(block)
-);
-if (boxLoadingHits.length < 2) {
-  fail("home.js 未找到全部 2 处 .box-loading 加载块（实测 " + boxLoadingHits.length + " 处）");
-} else if (boxLoadingBad.length > 0) {
-  fail("home.js 有 " + boxLoadingBad.length + " 处 .box-loading 未使用单源 progress indeterminate 类");
+const indetProgressRe = /className\s*:\s*["'](?:[^"']*\bprogress\b[^"']*\bindeterminate\b|[^"']*\bindeterminate\b[^"']*\bprogress\b)[^"']*["']/;
+const homeLoadingHits = collectLoadingBlocks(homeCode, /className\s*:\s*["']box-loading["']/g);
+const ocrLoadingHits = collectLoadingBlocks(ocrPanelCode, /className\s*:\s*["'](?:box-loading|ocr-canvas-overlay)["']/g);
+const homeLoadingBad = homeLoadingHits.filter((block) => !indetProgressRe.test(block));
+const ocrLoadingBad = ocrLoadingHits.filter((block) => !indetProgressRe.test(block));
+if (homeLoadingHits.length < 1 || ocrLoadingHits.length < 2) {
+  fail("home.js 或 ocr-panel.js 未找到全部加载块（home=" + homeLoadingHits.length + " 需≥1，ocr-panel=" + ocrLoadingHits.length + " 需≥2）");
+} else if (homeLoadingBad.length > 0 || ocrLoadingBad.length > 0) {
+  fail("home.js 或 ocr-panel.js 存在未使用单源 progress indeterminate 类的加载块（homeBad=" + homeLoadingBad.length + ", ocrBad=" + ocrLoadingBad.length + "）");
 } else {
-  pass("home.js 全部 " + boxLoadingHits.length + " 处 .box-loading 均使用单源 progress indeterminate 类");
+  pass("home.js（" + homeLoadingHits.length + " 处）与 ocr-panel.js（" + ocrLoadingHits.length + " 处：预览遮罩+识别加载）全部加载块均使用单源 progress indeterminate 类");
 }
 
 const voiceJs = fs.readFileSync(path.join(v3, "js/voice.js"), "utf8");
